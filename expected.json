@@ -1,9 +1,13 @@
 {
-  "_comment": "Keys are '<agent>|<intent>'. A bare '<agent>' key applies to every intent. Intents come from the orchestrator contract: Full Triage, Normalization Only, Classification Only, Enrichment, Resolved Ticket Review, Information Request, Write Request, Explanation, Detail Expansion. Author these from a run a reviewer approved: take the 'trajectory' column in runs_summary.csv and strip the wasted steps.",
+  "_comment": "Keys are '<agent>|<intent>'. A bare '<agent>' key applies to every intent. Intents come from the orchestrator contract: Full Triage, Normalization Only, Classification Only, Enrichment, Resolved Ticket Review, Information Request, Write Request, Explanation, Detail Expansion. Matching is in-order-with-extras: every step below must appear in this order, extras are allowed and counted against precision. Author these from a run a reviewer approved: take the 'trajectory' column in runs_summary.csv and strip the wasted steps. Keep them MINIMAL — each entry should be a step whose absence is a real defect, not a step that merely happened.",
+
+  "_provenance": "Authored 2026-09-16 from the two orchestrations in traces/2026-09-03-full-triage.csv. These are baseline placeholders, not reviewer-approved ground truth: no human has confirmed these runs were correct. Replace them from Dataverse AI Review once approved runs are accumulating — an 'approved, no override' review is a gold trajectory by definition.",
 
   "triage-orchestrator|Full Triage": [
     "load_skill",
-    "triage-analysis-agent"
+    "triage-analysis-agent",
+    "load_skill",
+    "connectwise-operations-agent"
   ],
 
   "triage-analysis-agent|Full Triage": [
@@ -12,5 +16,16 @@
     "ConnectWise-PSA-ForAgents___cw_get_ticket",
     "ConnectWise-PSA-ForAgents___cw_follow_href",
     "ConnectWise-PSA-ForAgents___cw_query"
+  ],
+
+  "triage-evaluation-agent|Write Request": [
+    "load_skill"
+  ],
+
+  "connectwise-operations-agent": [
+    "load_skill",
+    "ConnectWise-PSA-ForAgents___cw_get_ticket",
+    "ConnectWise-PSA-ForAgents___cw_update_ticket",
+    "ConnectWise-PSA-ForAgents___cw_create"
   ]
 }

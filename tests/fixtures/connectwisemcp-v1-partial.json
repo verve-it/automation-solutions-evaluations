@@ -1,0 +1,35 @@
+{
+  "toolbox": "ConnectwiseMCP",
+  "version": "1",
+  "source": "TEST FIXTURE — not the real toolbox schema. Hand-written from what the frozen traces prove, to exercise the generated argument validation end to end. Replace with a real tools/list extraction before using this for scoring; see tool_manifests/README.md.",
+  "tools": [
+    {
+      "name": "cw_resolve",
+      "description": "Resolve a fuzzy name or phrase to ConnectWise IDs and exact values.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reference_type": {
+            "type": "string",
+            "description": "Only these reference types are supported. `type`, `subtype`, `item`, `site`, `impact` and `urgency` are NOT — they return `Unknown reference type` or an empty failed span.",
+            "enum": ["company", "contact", "priority", "board", "status", "member"]
+          },
+          "query": {"type": "string"},
+          "context": {"type": "object"}
+        },
+        "required": ["reference_type", "query"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cw_get_ticket",
+      "description": "Get full details for a single service ticket, including notes.",
+      "parameters": {
+        "type": "object",
+        "properties": {"ticket_number": {"type": "integer"}},
+        "required": ["ticket_number"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
