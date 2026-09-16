@@ -1,0 +1,140 @@
+# Two triggers, per §5 of docs/HANDOFF.md.
+#
+#   merge gate       every push / PR. Replays the committed trace sets against
+#                    the committed baselines. Gates changes to the EVAL CODE.
+#                    No Azure, no network, no secrets.
+#
+#   drift detection  nightly over the last 24h of production traces. Gates
+#                    changes nobody here made: ConnectWise schema changes, MCP
+#                    version bumps, model drift. The cw_resolve failures in
+#                    §7 of the handoff would have been caught the day they
+#                    started.
+#
+# Both gate on DELTA, not on absolute pass rates. Known failures stay failing
+# without blocking unrelated work; a regression, or a check that stops
+# scoring, goes red. Gating on absolutes while §7 is open makes the suite
+# permanently red and people route around it. Tighten once §7 is cleared.
+#
+# Agent-side changes (prompt, skill file, MCP version) cannot trigger this
+# repo directly — this repo is deliberately separate, see §3 of the handoff.
+# Have the agents repo call the `agent-change` dispatch below after a release.
+
+name: evals
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"        # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Hours of production traces to evaluate"
+        default: "24"
+      reason:
+        description: "e.g. agent-change: triage-analysis-agent v83"
+        default: "manual"
+
+permissions:
+  contents: read
+  id-token: write              # workload identity for az login
+
+jobs:
+  # ---------------------------------------------------------------- merge gate
+  frozen-sets:
+    name: frozen sets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests and frozen-set replay
+        run: python -m pytest tests/ -q
+
+      - name: Score the known-good set
+        run: |
+          python trace_to_eval.py traces/2026-09-03-full-triage.csv \
+              -o out --tool-defs tool_manifests/
+          python run_evals.py out/eval_runs.jsonl \
+              --expected expected.json \
+              --baseline baselines/full-triage-2026-09-16.json \
+              --json artifacts/full-triage.json
+
+      - name: Score the known-bad set
+        run: |
+          python trace_to_eval.py traces/2026-09-15-ops-worst-case.csv \
+              -o out-ops --tool-defs tool_manifests/
+          python run_evals.py out-ops/eval_runs.jsonl \
+              --expected expected.json \
+              --baseline baselines/ops-worst-case-2026-09-16.json \
+              --json artifacts/ops-worst-case.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frozen-set-results
+          path: artifacts/
+
+  # ----------------------------------------------------------------- drift
+  production-drift:
+    name: production drift
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: evals          # holds the workload-identity federation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Federated credential, no client secret. The identity needs Log
+      # Analytics Reader on the workspace.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Lag mode: evaluate whatever production produced since the last run.
+      # A replay set over a dev ConnectWise instance is the better signal, but
+      # the agents mutate the ticket they operate on, so replaying against
+      # production is not an option. See §5 of the handoff.
+      - name: Export traces
+        run: |
+          python export_traces.py \
+              --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
+              --hours "${{ github.event.inputs.hours || '24' }}" \
+              --min-tool-calls 1 \
+              -o artifacts/spans.json
+
+      - name: Convert
+        run: |
+          python trace_to_eval.py artifacts/spans.json -o out \
+              --tool-defs tool_manifests/
+
+      # New orchestrations are not in any baseline, so this reports rather
+      # than gates until a baseline covering them is promoted. What it does
+      # catch tonight: a known run that regressed, and gating failures in the
+      # printed report.
+      - name: Score against the current baseline
+        run: |
+          python run_evals.py out/eval_runs.jsonl \
+              --expected expected.json \
+              --baseline baselines/full-triage-2026-09-16.json \
+              --json "artifacts/drift-$(date -u +%Y%m%dT%H%M%SZ).json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drift-results
+          path: artifacts/
+          retention-days: 90     # matches Foundry trace retention

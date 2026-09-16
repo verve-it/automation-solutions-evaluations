@@ -1,0 +1,84 @@
+# Agent-change gate: re-triage a fixed set of dev-instance tickets in the
+# Foundry STAGING project and score them with the Foundry evaluator catalog.
+#
+# This is the one place we invoke agents rather than score recorded traces.
+# It is safe only because staging is wired to the dev ConnectWise instance.
+# Never repoint it at the production project — the agents mutate the ticket
+# they operate on and the ops agent writes to a system of record.
+#
+# The action reports confidence intervals and tests for statistical
+# significance against `baseline-agent-id`, which is handoff §10 item 9
+# (telling a flaky agent from a broken one) for no code of ours.
+#
+# Triggered from the agents repo after a release:
+#
+#   curl -X POST -H "Accept: application/vnd.github+json" \
+#     -H "Authorization: Bearer $GITHUB_TOKEN" \
+#     https://api.github.com/repos/verve-it/automation-solutions-evaluations/dispatches \
+#     -d '{"event_type":"agent-change",
+#          "client_payload":{"agent_ids":"triage-analysis-agent:83",
+#                            "baseline_agent_id":"triage-analysis-agent:82"}}'
+#
+# Deliberately NOT a required check on the agents repo by default. If a broken
+# eval can block an agent hotfix, someone disables the gate under pressure and
+# it never comes back. Make it required once it has earned the trust.
+
+name: staging replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent-ids:
+        description: "agent-name:version, comma separated"
+        required: true
+      baseline-agent-id:
+        description: "agent-name:version to compare against"
+        required: false
+  repository_dispatch:
+    types: [agent-change]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  replay:
+    name: replay against staging
+    runs-on: ubuntu-latest
+    environment: staging          # holds the staging federation + endpoint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login using federated credentials
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # This job invokes agents, which writes to ConnectWise. Fail loudly
+      # rather than discover the mistake in a production ticket's audit trail.
+      - name: Refuse to run outside staging
+        env:
+          ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
+        run: |
+          case "$ENDPOINT" in
+            *staging*|*stg*|*dev*)
+              echo "endpoint looks like staging: ok" ;;
+            *)
+              echo "::error::AZURE_AI_PROJECT_ENDPOINT does not look like staging. Refusing to invoke agents."
+              exit 1 ;;
+          esac
+
+      - name: Replay and evaluate
+        uses: microsoft/ai-agent-evals@v3-beta
+        with:
+          azure-ai-project-endpoint: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
+          deployment-name: ${{ vars.AZURE_JUDGE_DEPLOYMENT }}
+          agent-ids: >-
+            ${{ github.event.inputs.agent-ids
+                || github.event.client_payload.agent_ids }}
+          baseline-agent-id: >-
+            ${{ github.event.inputs.baseline-agent-id
+                || github.event.client_payload.baseline_agent_id }}
+          data-path: ${{ github.workspace }}/replay/full-triage.json

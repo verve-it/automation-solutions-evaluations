@@ -1,0 +1,188 @@
+"""End-to-end replay of the committed trace sets against the committed
+baselines. This is the merge gate for changes to the eval code itself: a
+refactor that quietly changes what a check sees turns this red.
+
+It needs no Azure and no network. Agent-side changes are gated by the
+scheduled run in .github/workflows/evals.yml, which exports fresh traces.
+"""
+import json
+import subprocess
+import sys
+
+import pytest
+
+from conftest import REPO
+
+SETS = [
+    ("traces/2026-09-03-full-triage.csv",
+     "baselines/full-triage-2026-09-16.json", 7, 5),
+    ("traces/2026-09-15-ops-worst-case.csv",
+     "baselines/ops-worst-case-2026-09-16.json", 2, 0),
+]
+
+
+def _convert(trace, out_dir, *extra):
+    return subprocess.run(
+        [sys.executable, "trace_to_eval.py", trace, "-o", str(out_dir), *extra],
+        cwd=REPO, capture_output=True, text=True, check=True)
+
+
+def _score(jsonl, *extra):
+    return subprocess.run(
+        [sys.executable, "run_evals.py", str(jsonl),
+         "--expected", "expected.json", *extra],
+        cwd=REPO, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("trace,baseline,runs,passing", SETS)
+def test_frozen_set_matches_its_baseline(tmp_path, trace, baseline, runs,
+                                         passing):
+    _convert(trace, tmp_path)
+    jsonl = tmp_path / "eval_runs.jsonl"
+    rows = [json.loads(l) for l in jsonl.read_text().splitlines() if l.strip()]
+    assert len(rows) == runs
+
+    result = _score(jsonl, "--baseline", baseline)
+    assert "no change against baseline" in result.stdout, result.stdout
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize("trace,baseline,runs,passing", SETS)
+def test_gating_verdicts_are_stable(tmp_path, trace, baseline, runs, passing):
+    _convert(trace, tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    assert sum(1 for r in rows if r["passed"]) == passing
+
+
+def test_without_a_baseline_a_gating_failure_exits_non_zero(tmp_path):
+    _convert(SETS[1][0], tmp_path)
+    assert _score(tmp_path / "eval_runs.jsonl").returncode == 1
+
+
+def test_known_bad_set_still_fails_every_way_we_expect(tmp_path):
+    """If this set starts passing, suspect the check before celebrating."""
+    _convert(SETS[1][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    assert all(r["checks"]["no_wasted_calls"]["passed"] is False for r in rows)
+    assert all(r["checks"]["no_search_cascade"]["passed"] is False
+               for r in rows)
+
+
+def test_manifest_turns_on_generated_argument_validation(tmp_path):
+    """The ops runs are on ConnectwiseMCP v1. With a schema for that version,
+    every unsupported cw_resolve reference type is caught before the call."""
+    _convert(SETS[1][0], tmp_path,
+             "--tool-defs", "tests/fixtures/connectwisemcp-v1-partial.json")
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    args_checks = [r["checks"]["valid_tool_args"] for r in rows]
+    assert all(c["passed"] is False for c in args_checks)
+    assert all("reference_type" in c["reason"] for c in args_checks)
+    # and the runs become scorable by the Foundry evaluators
+    assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
+
+
+def test_every_agent_now_has_a_trajectory_expectation(tmp_path):
+    """Three of seven runs used to skip the trajectory check, including both
+    ops runs — the agent that writes to the system of record."""
+    _convert(SETS[0][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    assert all(r["checks"]["trajectory"]["passed"] is True for r in rows)
+
+
+def test_ops_run_that_never_read_the_ticket_fails_trajectory(tmp_path):
+    """73d29f4c updated a ticket without ever calling cw_get_ticket."""
+    _convert(SETS[1][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = {r["orchestration_id"][:8]: r for r in json.loads(out.read_text())}
+    traj = rows["73d29f4c"]["checks"]["trajectory"]
+    assert traj["passed"] is False
+    assert "cw_get_ticket" in traj["reason"]
+
+
+def test_every_truncation_in_the_frozen_sets_is_cw_query_not_load_skill(tmp_path):
+    """The handoff expected load_skill to be the truncation victim because it
+    is the largest payload. It is not — it survives past 8192 because gen_ai.*
+    attributes are largely exempt. Storing skills by reference is worth doing
+    for skill-version comparison, but it is not the truncation fix."""
+    for trace, *_ in SETS:
+        _convert(trace, tmp_path)
+        rows = [json.loads(l) for l in
+                (tmp_path / "eval_runs.jsonl").read_text().splitlines()
+                if l.strip()]
+        assert sum(r["truncated_skills"] for r in rows) == 0
+
+
+def test_skills_in_force_are_stable_across_both_orchestrations(tmp_path):
+    _convert(SETS[0][0], tmp_path)
+    rows = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    by_name = {}
+    for r in rows:
+        for s in r["skills_in_force"]:
+            by_name.setdefault(s["skill_name"], set()).add(s["sha256"])
+    assert by_name, "no skills recorded"
+    drifted = {k: v for k, v in by_name.items() if len(v) > 1}
+    assert not drifted, f"same skill, different content: {drifted}"
+
+
+def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
+    """Every trajectory verdict depends on this. When the hand-off format
+    stopped matching, the checks skipped and the diff read 'no change'."""
+    _convert(SETS[0][0], tmp_path)
+    rows = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    resolved = [r for r in rows if r["intent"]]
+    assert len(resolved) == 5
+    assert {r["intent"] for r in resolved} == {"Full Triage", "Write Request"}
+    assert all(r["started"].startswith("2026-09-03T") for r in rows)
+
+
+def test_binding_revisions_differ_between_agents_but_the_contract_does_not(
+        tmp_path):
+    """The toolbox revision is a binding edit counter, not a schema version.
+    The ops agent shows v1 and the analysis agent v5 for the same toolbox, and
+    the tool descriptions are byte-identical across both — which is why a
+    manifest normally declares "versions": ["*"]."""
+    _convert(SETS[0][0], tmp_path)
+    rows = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    revisions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
+                 for r in rows if r["mcp_toolboxes"]}
+    assert revisions["triage-analysis-agent"] == {"5"}
+    assert revisions["connectwise-operations-agent"] == {"1"}
+
+
+def test_foundry_conversion_maps_actions_to_tool_calls(tmp_path):
+    """submit_to_foundry.py renames `actions` to the `tool_calls` field the
+    Foundry agent evaluators expect, and parses the argument strings."""
+    import submit_to_foundry
+
+    _convert(SETS[0][0], tmp_path)
+    runs = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    rows = submit_to_foundry.to_foundry_rows(runs)
+    assert len(rows) == len(runs)
+    with_calls = [r for r in rows if r["tool_calls"]]
+    assert with_calls
+    call = with_calls[0]["tool_calls"][0]
+    assert set(call) == {"type", "name", "arguments"}
+    assert isinstance(call["arguments"], (dict, str))
+
+
+def test_foundry_sampling_is_reproducible_for_a_seed(tmp_path):
+    import submit_to_foundry
+
+    rows = [{"n": i} for i in range(50)]
+    a = submit_to_foundry.select(rows, 5, seed=7)
+    b = submit_to_foundry.select(rows, 5, seed=7)
+    assert a == b and len(a) == 5
+    assert submit_to_foundry.select(rows, 0, seed=7) == rows
