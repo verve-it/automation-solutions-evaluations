@@ -8,6 +8,7 @@
   "started": "2026-09-03T17:29:42.893Z",
   "mcp_toolboxes": [],
   "tool_calls": 6,
+  "duration_ms": 606775.0,
   "usage": {
    "llm_calls": 7,
    "prompt_tokens_sum": 85213,
@@ -19,6 +20,29 @@
    "peak_input_tokens": 14740,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "orchestration",
+    "sha256": "e67a9811cccd4c4884054fcab7ab277872536ae546e6b77fd69b465289bab27a",
+    "bytes": 3018,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "develop-write-plan",
+    "sha256": "b375a52572113e720058489cae6d35019be136e45b2069289e7708c57e4b6b0b",
+    "bytes": 4306,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "write-audit-note",
+    "sha256": "85ba7b5c4be570c417334a4427edaf423d70bb3d18b24ce512b21cfda5611cf0",
+    "bytes": 1299,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": true,
@@ -43,14 +67,18 @@
    },
    "trajectory": {
     "passed": true,
-    "reason": "matched, 4 extra step(s)",
-    "precision": 0.33,
+    "reason": "matched, 2 extra step(s)",
+    "precision": 0.67,
     "recall": 1.0,
-    "f1": 0.5
+    "f1": 0.8
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": true,
@@ -74,6 +102,7 @@
    }
   ],
   "tool_calls": 55,
+  "duration_ms": 232433.0,
   "usage": {
    "llm_calls": 38,
    "prompt_tokens_sum": 4173837,
@@ -85,6 +114,36 @@
    "peak_input_tokens": 327227,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
+    "bytes": 25023,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
+    "bytes": 21489,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "normalization",
+    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
+    "bytes": 25023,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
+    "bytes": 21489,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": true,
@@ -118,7 +177,12 @@
    "no_truncation": {
     "passed": false,
     "reason": "4 tool result(s) truncated at 8192 chars",
-    "count": 4
+    "count": 4,
+    "skills": 0
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -142,6 +206,7 @@
    }
   ],
   "tool_calls": 13,
+  "duration_ms": 86601.0,
   "usage": {
    "llm_calls": 10,
    "prompt_tokens_sum": 118336,
@@ -153,6 +218,22 @@
    "peak_input_tokens": 25428,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "post-ticket-audit-internal-note",
+    "sha256": "d1d78212d885108b7c1520aabfcf16ee28f10530006442178d107b8c6f591d36",
+    "bytes": 5961,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "9ca4da4ad055d0c770f1208985acb219d4adf7c1ec384b5f5b9ed934661525e0",
+    "bytes": 9699,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": true,
@@ -175,12 +256,19 @@
     "reason": ""
    },
    "trajectory": {
-    "passed": null,
-    "reason": "no expected_actions for connectwise-operations-agent"
+    "passed": true,
+    "reason": "matched, 9 extra step(s)",
+    "precision": 0.31,
+    "recall": 1.0,
+    "f1": 0.47
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -199,6 +287,7 @@
   "started": "2026-09-03T17:46:56.002Z",
   "mcp_toolboxes": [],
   "tool_calls": 6,
+  "duration_ms": 541934.0,
   "usage": {
    "llm_calls": 6,
    "prompt_tokens_sum": 78450,
@@ -210,6 +299,29 @@
    "peak_input_tokens": 15233,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "orchestration",
+    "sha256": "e67a9811cccd4c4884054fcab7ab277872536ae546e6b77fd69b465289bab27a",
+    "bytes": 3018,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "develop-write-plan",
+    "sha256": "b375a52572113e720058489cae6d35019be136e45b2069289e7708c57e4b6b0b",
+    "bytes": 4306,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "write-audit-note",
+    "sha256": "85ba7b5c4be570c417334a4427edaf423d70bb3d18b24ce512b21cfda5611cf0",
+    "bytes": 1299,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": true,
@@ -234,14 +346,18 @@
    },
    "trajectory": {
     "passed": true,
-    "reason": "matched, 4 extra step(s)",
-    "precision": 0.33,
+    "reason": "matched, 2 extra step(s)",
+    "precision": 0.67,
     "recall": 1.0,
-    "f1": 0.5
+    "f1": 0.8
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": true,
@@ -265,6 +381,7 @@
    }
   ],
   "tool_calls": 35,
+  "duration_ms": 346785.0,
   "usage": {
    "llm_calls": 27,
    "prompt_tokens_sum": 3777327,
@@ -276,6 +393,22 @@
    "peak_input_tokens": 281272,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
+    "bytes": 25023,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
+    "bytes": 21489,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": false,
@@ -310,7 +443,12 @@
    "no_truncation": {
     "passed": false,
     "reason": "3 tool result(s) truncated at 8192 chars",
-    "count": 3
+    "count": 3,
+    "skills": 0
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -331,6 +469,7 @@
   "started": "2026-09-03T17:53:47.296Z",
   "mcp_toolboxes": [],
   "tool_calls": 1,
+  "duration_ms": 21072.0,
   "usage": {
    "llm_calls": 2,
    "prompt_tokens_sum": 14140,
@@ -342,6 +481,15 @@
    "peak_input_tokens": 8559,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "resolved-ticket-quality-control-review",
+    "sha256": "225cfc1a735ba28bf67244a100887832cbb19fd3f68c2ac52cea281e7d6e2f59",
+    "bytes": 14738,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": true,
@@ -364,12 +512,19 @@
     "reason": ""
    },
    "trajectory": {
-    "passed": null,
-    "reason": "no expected_actions for triage-evaluation-agent|Write Request"
+    "passed": true,
+    "reason": "exact",
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -393,6 +548,7 @@
    }
   ],
   "tool_calls": 11,
+  "duration_ms": 77979.0,
   "usage": {
    "llm_calls": 9,
    "prompt_tokens_sum": 111130,
@@ -404,6 +560,22 @@
    "peak_input_tokens": 24214,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "post-ticket-audit-internal-note",
+    "sha256": "d1d78212d885108b7c1520aabfcf16ee28f10530006442178d107b8c6f591d36",
+    "bytes": 5961,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "9ca4da4ad055d0c770f1208985acb219d4adf7c1ec384b5f5b9ed934661525e0",
+    "bytes": 9699,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": false,
@@ -429,12 +601,19 @@
     "reason": ""
    },
    "trajectory": {
-    "passed": null,
-    "reason": "no expected_actions for connectwise-operations-agent"
+    "passed": true,
+    "reason": "matched, 7 extra step(s)",
+    "precision": 0.36,
+    "recall": 1.0,
+    "f1": 0.53
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,

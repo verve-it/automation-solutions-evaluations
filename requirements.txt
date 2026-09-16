@@ -2,3 +2,7 @@
 # trace set needs nothing installed. These are for export_traces.py.
 azure-identity>=1.17
 azure-monitor-query>=1.4
+
+# submit_to_foundry.py only. The merge gate never installs this.
+azure-ai-evaluation>=1.0
+azure-ai-projects>=1.0

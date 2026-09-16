@@ -27,7 +27,7 @@ Run:  python3 trace_to_eval.py spans.json -o ./out
 """
 
 from __future__ import annotations
-import argparse, csv, glob, json, os, re, sys
+import argparse, csv, glob, hashlib, json, os, re, sys
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -72,8 +72,15 @@ TRUNC_BOUNDARY = 8192   # values landing exactly here are suspect
 CASCADE_MIN = 4
 
 # `POST /api/projects/<p>/toolboxes/<toolbox>/versions/<v>/mcp` — the only
-# place the MCP toolbox version appears. Version-keying matters: two agents
-# in the same orchestration can sit on different toolbox versions.
+# place the toolbox binding appears.
+#
+# This number is a BINDING REVISION, not a schema version. Two agents in one
+# orchestration can show different numbers for the same toolbox purely because
+# their bindings were edited at different times: in the frozen traces the ops
+# agent shows v1 and the analysis agent v5, and the `cw_resolve`,
+# `cw_get_ticket` and `load_skill` descriptions are byte-identical across both.
+# So a manifest normally declares `"versions": ["*"]`. Pin to specific
+# revisions only when you have evidence the contract actually differs.
 TOOLBOX_RE = re.compile(r"/toolboxes/([^/]+)/versions/([^/]+)/")
 
 # Foundry prefixes MCP tools with the server name: `<server>___<tool>`.
@@ -253,12 +260,12 @@ def _int(v):
 # ------------------------------------------------------- tool manifests
 
 def load_tool_manifests(paths):
-    """Load `tool_manifests/*.json` into {(toolbox, version): [definitions]}.
+    """Load `tool_manifests/*.json`.
 
     `gen_ai.tool.definitions` only ever covers A2A agent registrations, so no
-    schema for any ConnectWise tool exists in telemetry. The toolbox is
-    versioned, so the manifest is a one-time extraction per version rather
-    than per-run capture. See tool_manifests/README.md.
+    schema for any ConnectWise tool exists in telemetry. A manifest supplies
+    it, once per toolbox, and declares which binding revisions it covers —
+    `"versions": ["*"]` normally. See tool_manifests/README.md.
     """
     files = []
     for p in paths or []:
@@ -267,17 +274,28 @@ def load_tool_manifests(paths):
         else:
             files.append(p)
 
-    manifests = {}
+    manifests = []
     for f in files:
         with open(f, encoding="utf-8") as fh:
             m = json.load(fh)
         toolbox = m.get("toolbox")
-        version = str(m.get("version", ""))
-        if not toolbox or not version:
-            raise ValueError(f"{f}: manifest needs 'toolbox' and 'version'")
-        manifests[(toolbox, version)] = [_as_definition(t)
-                                         for t in m.get("tools", [])]
+        if not toolbox:
+            raise ValueError(f"{f}: manifest needs 'toolbox'")
+        versions = m.get("versions")
+        if versions is None:
+            versions = [m["version"]] if "version" in m else ["*"]
+        manifests.append({
+            "toolbox": toolbox,
+            "versions": [str(v) for v in versions],
+            "tools": [_as_definition(t) for t in m.get("tools", [])],
+        })
     return manifests
+
+
+def manifest_applies(manifest, toolbox, version):
+    if manifest["toolbox"] != toolbox:
+        return False
+    return "*" in manifest["versions"] or str(version) in manifest["versions"]
 
 
 def _as_definition(tool):
@@ -445,6 +463,76 @@ def tool_step(s):
     }
 
 
+_FRONTMATTER_NAME = re.compile(r"^---\s*\nname:\s*([^\n]+)", re.MULTILINE)
+
+
+def collect_skills(steps):
+    """Which skill files were in force for this run, by content hash.
+
+    `load_skill` returns raw markdown with YAML frontmatter carrying `name`
+    and `description` but NO version, so "which rules were in force" is only
+    answerable by hashing what came back. That works until the payload
+    truncates — and `load_skill` is the largest payload in the traces
+    (25,023 chars observed), so the agent reasoned over incomplete RULES,
+    not merely incomplete data.
+
+    The durable fix is agent-side: have load_skill return
+    {skill_name, version, sha256} and rehydrate at eval time. Until then this
+    records what it can and marks what it cannot trust.
+    """
+    skills = []
+    for st in steps:
+        if base_tool_name(st["tool"]) != "load_skill":
+            continue
+        try:
+            name = (json.loads(st["arguments"] or "{}") or {}).get("skill_name")
+        except json.JSONDecodeError:
+            name = None
+        body = st["result"] or ""
+        m = _FRONTMATTER_NAME.search(body)
+        skills.append({
+            "skill_name": name or (m.group(1).strip() if m else ""),
+            "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "bytes": len(body),
+            # A truncated skill hashes to something that identifies the
+            # truncation, not the skill. Never compare these across runs.
+            "truncated": st["truncated"],
+            "errored": st["errored"],
+        })
+    return skills
+
+
+def write_skill_registry(runs, registry_dir):
+    """Store each intact skill body once, by hash, so a historical run's rules
+    can be read back. Truncated bodies are never stored."""
+    os.makedirs(registry_dir, exist_ok=True)
+    index_path = os.path.join(registry_dir, "index.json")
+    index = {}
+    if os.path.exists(index_path):
+        with open(index_path, encoding="utf-8") as fh:
+            index = json.load(fh)
+
+    written = 0
+    for run, bodies in runs:
+        for skill, body in bodies:
+            if skill["truncated"] or skill["errored"] or not body:
+                continue
+            digest = skill["sha256"]
+            if digest in index:
+                continue
+            with open(os.path.join(registry_dir, f"{digest}.md"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(body)
+            index[digest] = {"skill_name": skill["skill_name"],
+                             "bytes": skill["bytes"],
+                             "first_seen": run["started"]}
+            written += 1
+
+    with open(index_path, "w", encoding="utf-8") as fh:
+        json.dump(index, fh, indent=1, sort_keys=True)
+    return written, len(index)
+
+
 def find_cascades(steps, min_len=CASCADE_MIN):
     """Consecutive fruitless calls to the same tool — a distinct signature
     from one bad call, and the one that burns the most time.
@@ -506,11 +594,12 @@ def find_tool_defs(spans):
 
 
 def find_toolboxes(spans):
-    """Which MCP toolbox versions this run actually called.
+    """Which toolbox bindings this run actually called, as (toolbox, revision).
 
-    Not cosmetic: in the frozen baseline the ops agent is on ConnectwiseMCP
-    v1 while the analysis agent is on v5, in the same orchestration. Scoring
-    a v1 run against a v5 schema silently corrupts results.
+    The revision is which edit of the binding the agent is pinned to, not a
+    tool-contract version — see TOOLBOX_RE. Recorded so a genuine contract
+    change can be pinned later, and so a binding drifting between agents is
+    at least visible.
     """
     seen = []
     for s in spans:
@@ -584,18 +673,18 @@ def build_actions(steps):
 
 
 def resolve_tool_definitions(span_defs, toolboxes, manifests):
-    """Telemetry definitions plus any manifest matching a toolbox version this
-    run actually used. Returns (definitions, source_label)."""
+    """Telemetry definitions plus any manifest covering a toolbox this run
+    actually used. Returns (definitions, source_label)."""
     defs = list(span_defs) if isinstance(span_defs, list) else []
     sources = ["telemetry"] if defs else []
 
     for toolbox, version in toolboxes:
-        tools = manifests.get((toolbox, str(version)))
-        if tools is None:
-            continue
-        have = {d.get("name") for d in defs}
-        defs.extend(t for t in tools if t.get("name") not in have)
-        sources.append(f"manifest:{toolbox}@{version}")
+        for m in manifests:
+            if not manifest_applies(m, toolbox, version):
+                continue
+            have = {d.get("name") for d in defs}
+            defs.extend(t for t in m["tools"] if t.get("name") not in have)
+            sources.append(f"manifest:{toolbox}@{version}")
 
     if not defs and span_defs:
         return span_defs, "telemetry"
@@ -603,12 +692,12 @@ def resolve_tool_definitions(span_defs, toolboxes, manifests):
 
 
 def convert(spans, manifests=None):
-    manifests = manifests or {}
+    manifests = manifests or []
     by_op = defaultdict(list)
     for s in spans:
         by_op[s["op_id"]].append(s)
 
-    runs, summary = [], []
+    runs, summary, skill_bodies = [], [], []
     for op_id, op_spans in by_op.items():
         op_spans.sort(key=lambda s: s["timestamp"])
 
@@ -651,6 +740,7 @@ def convert(spans, manifests=None):
                 find_tool_defs(aspans), toolboxes, manifests)
             usage = collect_usage(aspans)
             cascades = find_cascades(steps)
+            skills = collect_skills(steps)
 
             row = {
                 "orchestration_id": op_id,
@@ -691,6 +781,8 @@ def convert(spans, manifests=None):
                     for st in steps if st["empty"]
                 ],
                 "search_cascades": cascades,
+                "skills_in_force": skills,
+                "truncated_skills": sum(1 for s in skills if s["truncated"]),
                 "tool_ms": round(sum(st["duration_ms"] for st in steps), 1),
                 "usage": usage,
 
@@ -700,6 +792,12 @@ def convert(spans, manifests=None):
                 "has_tool_definitions": bool(tool_defs),
             }
             runs.append(row)
+            skill_bodies.append((row, [
+                (sk, st["result"])
+                for sk, st in zip(skills, [s for s in steps
+                                           if base_tool_name(s["tool"])
+                                           == "load_skill"])
+            ]))
             summary.append({
                 "orchestration_id": op_id,
                 "run_agent": agent,
@@ -713,6 +811,8 @@ def convert(spans, manifests=None):
                 "errors": row["error_count"],
                 "truncated": row["truncated_results"],
                 "cascades": len(cascades),
+                "skills": ";".join(s["skill_name"] for s in skills),
+                "truncated_skills": sum(1 for s in skills if s["truncated"]),
                 "llm_calls": usage["llm_calls"],
                 "uncached_in": usage["uncached_input_tokens"],
                 "out_tokens": usage["output_tokens"],
@@ -725,7 +825,7 @@ def convert(spans, manifests=None):
 
     runs.sort(key=lambda r: (r["started"], r["run_agent"]))
     summary.sort(key=lambda r: (r["started"], r["run_agent"]))
-    return runs, summary
+    return runs, summary, skill_bodies
 
 
 # ----------------------------------------------------------------- output
@@ -735,6 +835,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("spans", help="JSON or CSV export of dependencies spans")
     ap.add_argument("-o", "--out", default="./out", help="output directory")
+    ap.add_argument("--skill-registry", metavar="DIR",
+                    help="store each intact load_skill body once, by sha256, "
+                         "so a historical run's rules can be read back")
     ap.add_argument("--tool-defs", action="append", metavar="PATH",
                     help="tool manifest JSON, or a directory of them. "
                          "Injected as tool_definitions for runs whose MCP "
@@ -743,8 +846,13 @@ def main():
 
     manifests = load_tool_manifests(args.tool_defs)
     spans = load_spans(args.spans)
-    runs, summary = convert(spans, manifests)
+    runs, summary, skill_bodies = convert(spans, manifests)
     os.makedirs(args.out, exist_ok=True)
+
+    if args.skill_registry:
+        added, total = write_skill_registry(skill_bodies, args.skill_registry)
+        print(f"skill registry     : +{added} new, {total} total in "
+              f"{args.skill_registry}")
 
     jsonl = os.path.join(args.out, "eval_runs.jsonl")
     with open(jsonl, "w", encoding="utf-8") as fh:
@@ -773,10 +881,14 @@ def main():
     print(f"  with errors      : {sum(1 for r in runs if r['error_count'])}")
     print(f"  truncated results: {sum(r['truncated_results'] for r in runs)}")
     print(f"  search cascades  : {sum(len(r['search_cascades']) for r in runs)}")
+    trunc_skills = sum(r["truncated_skills"] for r in runs)
+    if trunc_skills:
+        print(f"  TRUNCATED SKILLS : {trunc_skills}  (agent reasoned over "
+              f"incomplete rules)")
     print(f"  unknown intent   : {sum(1 for r in runs if not r['intent'])}")
     if manifests:
-        print(f"  manifests loaded : "
-              f"{', '.join(f'{t}@{v}' for t, v in sorted(manifests))}")
+        print("  manifests loaded : " + ", ".join(
+            f"{m['toolbox']}@{','.join(m['versions'])}" for m in manifests))
     if toolboxes:
         print(f"  toolboxes seen   : {', '.join(toolboxes)}")
     print(f"\nwrote {jsonl}")

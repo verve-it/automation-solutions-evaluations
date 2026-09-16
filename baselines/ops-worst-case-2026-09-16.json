@@ -13,6 +13,7 @@
    }
   ],
   "tool_calls": 34,
+  "duration_ms": 109518.0,
   "usage": {
    "llm_calls": 19,
    "prompt_tokens_sum": 642384,
@@ -24,6 +25,22 @@
    "peak_input_tokens": 58274,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
+    "bytes": 10209,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "post-ticket-audit-internal-note",
+    "sha256": "fad80be0b42103209aa91f037fd74649868635c4aed36cd776de57e6d3f7a672",
+    "bytes": 5092,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": false,
@@ -51,12 +68,19 @@
     "longest": 9
    },
    "trajectory": {
-    "passed": null,
-    "reason": "no expected_actions for connectwise-operations-agent"
+    "passed": true,
+    "reason": "matched, 30 extra step(s)",
+    "precision": 0.12,
+    "recall": 1.0,
+    "f1": 0.21
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -82,6 +106,7 @@
    }
   ],
   "tool_calls": 14,
+  "duration_ms": 75257.0,
   "usage": {
    "llm_calls": 11,
    "prompt_tokens_sum": 204741,
@@ -93,6 +118,15 @@
    "peak_input_tokens": 27835,
    "usage_source": "chat_spans"
   },
+  "skills_in_force": [
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
+    "bytes": 10209,
+    "truncated": false,
+    "errored": false
+   }
+  ],
   "checks": {
    "no_wasted_calls": {
     "passed": false,
@@ -121,12 +155,19 @@
     "longest": 4
    },
    "trajectory": {
-    "passed": null,
-    "reason": "no expected_actions for connectwise-operations-agent"
+    "passed": false,
+    "reason": "missing ['ConnectWise-PSA-ForAgents___cw_get_ticket', 'ConnectWise-PSA-ForAgents___cw_update_ticket', 'ConnectWise-PSA-ForAgents___cw_create']",
+    "precision": 0.07,
+    "recall": 0.25,
+    "f1": 0.11
    },
    "no_truncation": {
     "passed": true,
     "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
     "passed": false,
@@ -136,7 +177,8 @@
   "passed": false,
   "failed_gating": [
    "no_dead_ends",
-   "no_wasted_calls"
+   "no_wasted_calls",
+   "trajectory"
   ]
  }
 ]

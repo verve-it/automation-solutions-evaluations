@@ -87,6 +87,53 @@ def test_manifest_turns_on_generated_argument_validation(tmp_path):
     assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
 
 
+def test_every_agent_now_has_a_trajectory_expectation(tmp_path):
+    """Three of seven runs used to skip the trajectory check, including both
+    ops runs — the agent that writes to the system of record."""
+    _convert(SETS[0][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    assert all(r["checks"]["trajectory"]["passed"] is True for r in rows)
+
+
+def test_ops_run_that_never_read_the_ticket_fails_trajectory(tmp_path):
+    """73d29f4c updated a ticket without ever calling cw_get_ticket."""
+    _convert(SETS[1][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = {r["orchestration_id"][:8]: r for r in json.loads(out.read_text())}
+    traj = rows["73d29f4c"]["checks"]["trajectory"]
+    assert traj["passed"] is False
+    assert "cw_get_ticket" in traj["reason"]
+
+
+def test_every_truncation_in_the_frozen_sets_is_cw_query_not_load_skill(tmp_path):
+    """The handoff expected load_skill to be the truncation victim because it
+    is the largest payload. It is not — it survives past 8192 because gen_ai.*
+    attributes are largely exempt. Storing skills by reference is worth doing
+    for skill-version comparison, but it is not the truncation fix."""
+    for trace, *_ in SETS:
+        _convert(trace, tmp_path)
+        rows = [json.loads(l) for l in
+                (tmp_path / "eval_runs.jsonl").read_text().splitlines()
+                if l.strip()]
+        assert sum(r["truncated_skills"] for r in rows) == 0
+
+
+def test_skills_in_force_are_stable_across_both_orchestrations(tmp_path):
+    _convert(SETS[0][0], tmp_path)
+    rows = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    by_name = {}
+    for r in rows:
+        for s in r["skills_in_force"]:
+            by_name.setdefault(s["skill_name"], set()).add(s["sha256"])
+    assert by_name, "no skills recorded"
+    drifted = {k: v for k, v in by_name.items() if len(v) > 1}
+    assert not drifted, f"same skill, different content: {drifted}"
+
+
 def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
     """Every trajectory verdict depends on this. When the hand-off format
     stopped matching, the checks skipped and the diff read 'no change'."""
@@ -99,13 +146,43 @@ def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
     assert all(r["started"].startswith("2026-09-03T") for r in rows)
 
 
-def test_the_two_agents_are_on_different_toolbox_versions(tmp_path):
-    """Not cosmetic: the ops agent writes to the system of record and is a
-    major version behind the analysis agent."""
+def test_binding_revisions_differ_between_agents_but_the_contract_does_not(
+        tmp_path):
+    """The toolbox revision is a binding edit counter, not a schema version.
+    The ops agent shows v1 and the analysis agent v5 for the same toolbox, and
+    the tool descriptions are byte-identical across both — which is why a
+    manifest normally declares "versions": ["*"]."""
     _convert(SETS[0][0], tmp_path)
     rows = [json.loads(l) for l in
             (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
-    versions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
-                for r in rows if r["mcp_toolboxes"]}
-    assert versions["triage-analysis-agent"] == {"5"}
-    assert versions["connectwise-operations-agent"] == {"1"}
+    revisions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
+                 for r in rows if r["mcp_toolboxes"]}
+    assert revisions["triage-analysis-agent"] == {"5"}
+    assert revisions["connectwise-operations-agent"] == {"1"}
+
+
+def test_foundry_conversion_maps_actions_to_tool_calls(tmp_path):
+    """submit_to_foundry.py renames `actions` to the `tool_calls` field the
+    Foundry agent evaluators expect, and parses the argument strings."""
+    import submit_to_foundry
+
+    _convert(SETS[0][0], tmp_path)
+    runs = [json.loads(l) for l in
+            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+    rows = submit_to_foundry.to_foundry_rows(runs)
+    assert len(rows) == len(runs)
+    with_calls = [r for r in rows if r["tool_calls"]]
+    assert with_calls
+    call = with_calls[0]["tool_calls"][0]
+    assert set(call) == {"type", "name", "arguments"}
+    assert isinstance(call["arguments"], (dict, str))
+
+
+def test_foundry_sampling_is_reproducible_for_a_seed(tmp_path):
+    import submit_to_foundry
+
+    rows = [{"n": i} for i in range(50)]
+    a = submit_to_foundry.select(rows, 5, seed=7)
+    b = submit_to_foundry.select(rows, 5, seed=7)
+    assert a == b and len(a) == 5
+    assert submit_to_foundry.select(rows, 0, seed=7) == rows
