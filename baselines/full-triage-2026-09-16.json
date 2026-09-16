@@ -1,0 +1,449 @@
+[
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "triage-orchestrator",
+  "intent": "Full Triage",
+  "intent_source": "delegated",
+  "traj_key": "triage-orchestrator|Full Triage",
+  "started": "2026-09-03T17:29:42.893Z",
+  "mcp_toolboxes": [],
+  "tool_calls": 6,
+  "usage": {
+   "llm_calls": 7,
+   "prompt_tokens_sum": 85213,
+   "uncached_input_tokens": 35756,
+   "cache_read_tokens": 49457,
+   "cache_write_tokens": 35615,
+   "output_tokens": 1503,
+   "reasoning_tokens": 234,
+   "peak_input_tokens": 14740,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "3 call(s) validated",
+    "checked": 3
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 4 extra step(s)",
+    "precision": 0.33,
+    "recall": 1.0,
+    "f1": 0.5
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "triage-analysis-agent",
+  "intent": "Full Triage",
+  "intent_source": "inbound",
+  "traj_key": "triage-analysis-agent|Full Triage",
+  "started": "2026-09-03T17:30:08.862Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "5"
+   }
+  ],
+  "tool_calls": 55,
+  "usage": {
+   "llm_calls": 38,
+   "prompt_tokens_sum": 4173837,
+   "uncached_input_tokens": 539548,
+   "cache_read_tokens": 3634289,
+   "cache_write_tokens": 539196,
+   "output_tokens": 7894,
+   "reasoning_tokens": 2464,
+   "peak_input_tokens": 327227,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "9/55 tool calls errored",
+    "count": 9,
+    "rate": 0.16
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 50 extra step(s)",
+    "precision": 0.09,
+    "recall": 1.0,
+    "f1": 0.17
+   },
+   "no_truncation": {
+    "passed": false,
+    "reason": "4 tool result(s) truncated at 8192 chars",
+    "count": 4
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "connectwise-operations-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "connectwise-operations-agent",
+  "started": "2026-09-03T17:38:12.209Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "1"
+   }
+  ],
+  "tool_calls": 13,
+  "usage": {
+   "llm_calls": 10,
+   "prompt_tokens_sum": 118336,
+   "uncached_input_tokens": 25455,
+   "cache_read_tokens": 92881,
+   "cache_write_tokens": 25425,
+   "output_tokens": 1346,
+   "reasoning_tokens": 284,
+   "peak_input_tokens": 25428,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for connectwise-operations-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-orchestrator",
+  "intent": "Full Triage",
+  "intent_source": "delegated",
+  "traj_key": "triage-orchestrator|Full Triage",
+  "started": "2026-09-03T17:46:56.002Z",
+  "mcp_toolboxes": [],
+  "tool_calls": 6,
+  "usage": {
+   "llm_calls": 6,
+   "prompt_tokens_sum": 78450,
+   "uncached_input_tokens": 16886,
+   "cache_read_tokens": 61564,
+   "cache_write_tokens": 16868,
+   "output_tokens": 1761,
+   "reasoning_tokens": 328,
+   "peak_input_tokens": 15233,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "3 call(s) validated",
+    "checked": 3
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 4 extra step(s)",
+    "precision": 0.33,
+    "recall": 1.0,
+    "f1": 0.5
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-analysis-agent",
+  "intent": "Full Triage",
+  "intent_source": "declared",
+  "traj_key": "triage-analysis-agent|Full Triage",
+  "started": "2026-09-03T17:47:31.689Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "5"
+   }
+  ],
+  "tool_calls": 35,
+  "usage": {
+   "llm_calls": 27,
+   "prompt_tokens_sum": 3777327,
+   "uncached_input_tokens": 281350,
+   "cache_read_tokens": 3495977,
+   "cache_write_tokens": 281150,
+   "output_tokens": 6417,
+   "reasoning_tokens": 2054,
+   "peak_input_tokens": 281272,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "4 avoidable call(s): empty_failedx2, missing_scriptx1, invalid_entityx1",
+    "count": 4
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "6/35 tool calls errored",
+    "count": 6,
+    "rate": 0.17
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 30 extra step(s)",
+    "precision": 0.14,
+    "recall": 1.0,
+    "f1": 0.25
+   },
+   "no_truncation": {
+    "passed": false,
+    "reason": "3 tool result(s) truncated at 8192 chars",
+    "count": 3
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-evaluation-agent",
+  "intent": "Write Request",
+  "intent_source": "declared",
+  "traj_key": "triage-evaluation-agent|Write Request",
+  "started": "2026-09-03T17:53:47.296Z",
+  "mcp_toolboxes": [],
+  "tool_calls": 1,
+  "usage": {
+   "llm_calls": 2,
+   "prompt_tokens_sum": 14140,
+   "uncached_input_tokens": 8562,
+   "cache_read_tokens": 5578,
+   "cache_write_tokens": 8437,
+   "output_tokens": 389,
+   "reasoning_tokens": 281,
+   "peak_input_tokens": 8559,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-evaluation-agent|Write Request"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "connectwise-operations-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "connectwise-operations-agent",
+  "started": "2026-09-03T17:54:30.959Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "1"
+   }
+  ],
+  "tool_calls": 11,
+  "usage": {
+   "llm_calls": 9,
+   "prompt_tokens_sum": 111130,
+   "uncached_input_tokens": 24238,
+   "cache_read_tokens": 86892,
+   "cache_write_tokens": 24211,
+   "output_tokens": 1552,
+   "reasoning_tokens": 404,
+   "peak_input_tokens": 24214,
+   "usage_source": "chat_spans"
+  },
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "1 avoidable call(s): invalid_reference_typex1",
+    "count": 1
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "1/11 tool calls errored",
+    "count": 1,
+    "rate": 0.09
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for connectwise-operations-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ }
+]

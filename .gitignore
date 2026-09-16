@@ -1,0 +1,24 @@
+# Converter / scorer output. Regenerate with `make evals`; never commit.
+out/
+out-*/
+artifacts/
+
+# Unattended export landing zone. Raw traces that matter get curated into
+# traces/ by hand with a dated name and a line in traces/README.md.
+traces/auto/
+.export-state.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
