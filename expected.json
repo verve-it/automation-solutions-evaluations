@@ -1,0 +1,16 @@
+{
+  "_comment": "Keys are '<agent>|<intent>'. A bare '<agent>' key applies to every intent. Intents come from the orchestrator contract: Full Triage, Normalization Only, Classification Only, Enrichment, Resolved Ticket Review, Information Request, Write Request, Explanation, Detail Expansion. Author these from a run a reviewer approved: take the 'trajectory' column in runs_summary.csv and strip the wasted steps.",
+
+  "triage-orchestrator|Full Triage": [
+    "load_skill",
+    "triage-analysis-agent"
+  ],
+
+  "triage-analysis-agent|Full Triage": [
+    "load_skill",
+    "load_skill",
+    "ConnectWise-PSA-ForAgents___cw_get_ticket",
+    "ConnectWise-PSA-ForAgents___cw_follow_href",
+    "ConnectWise-PSA-ForAgents___cw_query"
+  ]
+}
