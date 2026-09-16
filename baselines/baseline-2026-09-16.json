@@ -1,0 +1,266 @@
+[
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "connectwise-operations-agent",
+  "started": "",
+  "tool_calls": 13,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for this agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "connectwise-operations-agent",
+  "started": "",
+  "tool_calls": 11,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "1 avoidable call(s): invalid_reference_typex1",
+    "count": 1
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "1/11 tool calls errored",
+    "count": 1,
+    "rate": 0.09
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for this agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "triage-analysis-agent",
+  "started": "",
+  "tool_calls": 55,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "9/55 tool calls errored",
+    "count": 9,
+    "rate": 0.16
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 51 extra step(s)",
+    "precision": 0.07,
+    "recall": 1.0,
+    "f1": 0.14
+   },
+   "no_truncation": {
+    "passed": false,
+    "reason": "4 tool result(s) truncated at 8192 chars",
+    "count": 4
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-analysis-agent",
+  "started": "",
+  "tool_calls": 35,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "4 avoidable call(s): empty_failedx2, missing_scriptx1, invalid_entityx1",
+    "count": 4
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "6/35 tool calls errored",
+    "count": 6,
+    "rate": 0.17
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 31 extra step(s)",
+    "precision": 0.11,
+    "recall": 1.0,
+    "f1": 0.21
+   },
+   "no_truncation": {
+    "passed": false,
+    "reason": "3 tool result(s) truncated at 8192 chars",
+    "count": 3
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-evaluation-agent",
+  "started": "",
+  "tool_calls": 1,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for this agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "bed408b416e8bb61d56f800212b90459",
+  "run_agent": "triage-orchestrator",
+  "started": "",
+  "tool_calls": 6,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 3 extra step(s)",
+    "precision": 0.5,
+    "recall": 1.0,
+    "f1": 0.67
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "4dda7f4fa5f04ff2855b46978948af2a",
+  "run_agent": "triage-orchestrator",
+  "started": "",
+  "tool_calls": 6,
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 3 extra step(s)",
+    "precision": 0.5,
+    "recall": 1.0,
+    "f1": 0.67
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ }
+]
