@@ -1,0 +1,2447 @@
+From 58d8edd53431666d7ba3cd7c200d644f65e7aca1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 16 Sep 2026 17:24:13 +0000
+Subject: [PATCH 1/3] fix: toolbox version is a binding revision, not a schema
+ version
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The number in `/toolboxes/<toolbox>/versions/<v>/mcp` tracks when an agent's
+toolbox binding was last edited, not the tool contract. Checked against the
+frozen traces: the ops agent is on v1 and the analysis agent on v5 for the
+same toolbox, and the `cw_resolve`, `cw_get_ticket` and `load_skill`
+descriptions are byte-identical across both.
+
+So a manifest now declares which revisions it covers, and `["*"]` is the
+normal answer:
+
+    {"toolbox": "ConnectwiseMCP", "versions": ["*"], "tools": [...]}
+
+A single `"version": "5"` is still accepted and pins to that revision — use it
+only with evidence the contract actually differs. The converter keeps
+recording the revisions each run used, so a real divergence stays visible, but
+the earlier claim that scoring across them corrupts results was wrong for this
+toolbox and the warning is gone.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0145AG8KerLg2fDJTVJDwy9T
+---
+ tests/test_trace_to_eval.py | 108 ++++++++++++++++++++--
+ tool_manifests/README.md    | 129 +++++++++++++++-----------
+ trace_to_eval.py            | 174 +++++++++++++++++++++++++++++-------
+ 3 files changed, 319 insertions(+), 92 deletions(-)
+
+diff --git a/tests/test_trace_to_eval.py b/tests/test_trace_to_eval.py
+index bbffabd..cdbebdc 100644
+--- a/tests/test_trace_to_eval.py
++++ b/tests/test_trace_to_eval.py
+@@ -13,7 +13,7 @@ from conftest import invoke, span, tool_call
+ def test_tools_call_child_does_not_double_count():
+     spans = (tool_call("cw_query", "triage-analysis-agent")
+              + [invoke("triage-analysis-agent")])
+-    runs, _ = t.convert(spans)
++    runs, _, _ = t.convert(spans)
+     assert runs[0]["tool_names"] == ["cw_query"]
+ 
+ 
+@@ -33,7 +33,7 @@ def test_child_agent_spans_group_by_name_not_parent():
+         *tool_call("cw_query", "triage-analysis-agent"),
+     ]
+     spans[1]["parent"] = "somewhere-outside-the-subtree"
+-    runs, _ = t.convert(spans)
++    runs, _, _ = t.convert(spans)
+     assert {r["run_agent"] for r in runs} == {"triage-orchestrator",
+                                               "triage-analysis-agent"}
+ 
+@@ -63,7 +63,7 @@ def test_a2a_call_stays_in_caller_trajectory_and_callee_is_its_own_run():
+         invoke("triage-orchestrator", user_text="Automated flow: triage 1"),
+         invoke("triage-analysis-agent", user_text="intent=Full Triage"),
+     ]
+-    runs, _ = t.convert(spans)
++    runs, _, _ = t.convert(spans)
+     by_agent = {r["run_agent"]: r for r in runs}
+     assert by_agent["triage-orchestrator"]["tool_names"] == \
+         ["triage-analysis-agent"]
+@@ -137,7 +137,7 @@ def test_child_intent_falls_back_to_the_callers_handoff():
+         invoke("triage-analysis-agent",
+                user_text="Full Triage for ticket 1, no keyword"),
+     ]
+-    runs, _ = t.convert(spans)
++    runs, _, _ = t.convert(spans)
+     analysis = next(r for r in runs if r["run_agent"] == "triage-analysis-agent")
+     assert analysis["intent"] == "Full Triage"
+     assert analysis["intent_source"] == "inbound"
+@@ -242,23 +242,115 @@ def test_manifest_is_injected_for_the_toolbox_version_the_run_used(tmp_path):
+         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/5/mcp", "a"),
+         *tool_call("cw_resolve", "a"),
+     ]
+-    runs, _ = t.convert(spans, manifests)
++    runs, _, _ = t.convert(spans, manifests)
+     assert runs[0]["tool_definitions"][0]["name"] == "cw_resolve"
+     assert runs[0]["tool_definitions_source"] == "manifest:ConnectwiseMCP@5"
+     assert runs[0]["has_tool_definitions"] is True
+ 
+ 
+-def test_manifest_for_another_version_is_not_applied():
+-    manifests = {("ConnectwiseMCP", "5"): [{"name": "cw_resolve"}]}
++def test_manifest_pinned_to_another_revision_is_not_applied():
++    """Pinning is for a proven contract change; otherwise use "*"."""
++    manifests = [{"toolbox": "ConnectwiseMCP", "versions": ["5"],
++                  "tools": [{"name": "cw_resolve"}]}]
+     spans = [
+         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/1/mcp", "a"),
+         *tool_call("cw_resolve", "a"),
+     ]
+-    runs, _ = t.convert(spans, manifests)
++    runs, _, _ = t.convert(spans, manifests)
+     assert runs[0]["tool_definitions"] == []
+ 
+ 
++def test_wildcard_manifest_covers_every_binding_revision():
++    """The revision in the toolbox URL is a binding edit counter, not a schema
++    version: the ops agent shows v1 and the analysis agent v5 for the same
++    toolbox, with byte-identical tool descriptions."""
++    manifests = [{"toolbox": "ConnectwiseMCP", "versions": ["*"],
++                  "tools": [{"name": "cw_resolve", "parameters": {}}]}]
++    for revision in ("1", "5", "17"):
++        spans = [
++            span(f"POST /api/p/toolboxes/ConnectwiseMCP/versions/{revision}/mcp",
++                 "a"),
++            *tool_call("cw_resolve", "a"),
++        ]
++        runs, _, _ = t.convert(spans, manifests)
++        assert runs[0]["tool_definitions"][0]["name"] == "cw_resolve"
++
++
++def test_manifest_without_a_versions_field_defaults_to_wildcard(tmp_path):
++    man = tmp_path / "m.json"
++    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}))
++    assert t.load_tool_manifests([str(man)])[0]["versions"] == ["*"]
++
++
++def test_single_version_key_is_still_accepted(tmp_path):
++    man = tmp_path / "m.json"
++    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}))
++    assert t.load_tool_manifests([str(man)])[0]["versions"] == ["3"]
++
++
+ def test_base_tool_name_strips_the_foundry_server_prefix():
+     assert t.base_tool_name("ConnectWise-PSA-ForAgents___cw_resolve") == \
+         "cw_resolve"
+     assert t.base_tool_name("load_skill") == "load_skill"
++
++
++# --- skills in force --------------------------------------------------------
++
++def test_skill_bodies_are_hashed_so_rules_are_identifiable():
++    """load_skill returns raw markdown with `name` and `description` in the
++    frontmatter but NO version, so the content hash is the only identity a
++    historical run has."""
++    body = "---\nname: normalization\ndescription: x\n---\n\n# Normalization\n"
++    spans = (tool_call("load_skill", "a", args={"skill_name": "normalization"},
++                       result=body)
++             + [invoke("a")])
++    runs, _, _ = t.convert(spans)
++    skill = runs[0]["skills_in_force"][0]
++    assert skill["skill_name"] == "normalization"
++    assert skill["bytes"] == len(body)
++    assert skill["truncated"] is False
++    assert len(skill["sha256"]) == 64
++
++
++def test_same_skill_content_hashes_identically_across_runs():
++    body = "---\nname: classification\n---\nrules"
++    digests = set()
++    for op in ("op1", "op2"):
++        spans = tool_call("load_skill", "a", op, args={"skill_name": "x"},
++                          result=body) + [invoke("a", op)]
++        runs, _, _ = t.convert(spans)
++        digests.add(runs[0]["skills_in_force"][0]["sha256"])
++    assert len(digests) == 1
++
++
++def test_a_truncated_skill_is_flagged_separately_from_a_truncated_result():
++    """A skill cut mid-payload means the agent worked from incomplete RULES."""
++    spans = (tool_call("load_skill", "a", args={"skill_name": "big"},
++                       result="x" * t.TRUNC_BOUNDARY)
++             + [invoke("a")])
++    runs, _, _ = t.convert(spans)
++    assert runs[0]["truncated_skills"] == 1
++    assert runs[0]["skills_in_force"][0]["truncated"] is True
++
++
++def test_skill_name_falls_back_to_the_frontmatter():
++    spans = tool_call("load_skill", "a", args={}, result="---\nname: orch\n---")
++    runs, _, _ = t.convert(spans + [invoke("a")])
++    assert runs[0]["skills_in_force"][0]["skill_name"] == "orch"
++
++
++def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
++    good = "---\nname: ok\n---\nbody"
++    spans = (tool_call("load_skill", "a", args={"skill_name": "ok"},
++                       result=good, ts="2026-09-03T17:00:00.000Z")
++             + tool_call("load_skill", "a", args={"skill_name": "cut"},
++                         result="y" * t.TRUNC_BOUNDARY,
++                         ts="2026-09-03T17:00:01.000Z")
++             + [invoke("a")])
++    _, _, bodies = t.convert(spans)
++    added, total = t.write_skill_registry(bodies, str(tmp_path))
++    assert (added, total) == (1, 1)
++    # idempotent: a second pass adds nothing
++    assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
++    index = json.loads((tmp_path / "index.json").read_text())
++    assert [v["skill_name"] for v in index.values()] == ["ok"]
+diff --git a/tool_manifests/README.md b/tool_manifests/README.md
+index f1a9629..ed73f08 100644
+--- a/tool_manifests/README.md
++++ b/tool_manifests/README.md
+@@ -40,65 +40,86 @@ used to exercise the mechanism. Do not score anything with it.
+ 
+ ## Getting the real thing
+ 
+-The toolbox is versioned, so this is a one-time extraction **per version**, not
+-a per-run capture.
+-
+-1. Check whether the `tools/list` span already carries it. (It did not in the
+-   September traces — there are no `tools/list` spans in the export at all, and
+-   `mcp.method.name` only shows `initialize` and `tools/call`.)
+-
+-   ```kusto
+-   dependencies
+-   | where name has "tools/list"
+-   | extend d = customDimensions
+-   | project timestamp, name, keys = bag_keys(d), dims = d
+-   | take 5
+-   ```
+-
+-2. If not, export the toolbox definition from the Foundry portal, or capture
+-   the raw `tools/list` JSON-RPC response from the MCP endpoint, then:
+-
+-   ```bash
+-   python3 extract_tool_manifest.py --from-tools-list tools-list.json \
+-       --toolbox ConnectwiseMCP --version 5 \
+-       -o tool_manifests/connectwisemcp-v5.json
+-   ```
+-
+-3. A skeleton from the traces is available in the meantime — every tool the
+-   agents actually called, with the description telemetry carries and the
+-   argument keys observed, and `parameters: null` for each. Tools with a null
+-   schema are skipped by the validator rather than guessed at.
+-
+-   ```bash
+-   python3 extract_tool_manifest.py \
+-       --from-trace traces/2026-09-03-full-triage.csv \
+-       --toolbox ConnectwiseMCP --version 5 \
+-       -o tool_manifests/connectwisemcp-v5.json
+-   ```
+-
+-## Version-key everything
+-
+-**Scoring old behaviour against a new schema silently corrupts results.** The
+-converter matches a manifest to a run by the toolbox version in the run's span
+-URLs (`/toolboxes/<toolbox>/versions/<v>/mcp`) and applies nothing when they
+-do not match.
+-
+-This is not hypothetical. In the frozen full-triage baseline:
+-
+-| Agent | Toolbox version |
+-|---|---|
+-| `triage-analysis-agent` | ConnectwiseMCP **5** |
+-| `connectwise-operations-agent` | ConnectwiseMCP **1** |
+-
+-The agent that writes to the system of record is four versions behind the one
+-that reads. Worth confirming that is deliberate.
++Four routes, best first.
++
++**0. Try `AIAgentConverter` before extracting anything.** It takes an Agent
++Service thread id and run id and returns `query`, `response`, `tool_calls` and
++**`tool_definitions`** — read from the Agent Service, not from telemetry. If it
++covers the ConnectWise tools, this whole directory becomes unnecessary. Your
++traces carry the thread id as `gen_ai.conversation.id` (`conv_...`). Half an
++hour to find out. See `docs/FOUNDRY.md`.
++
++**1. Call `tools/list` on the toolbox endpoint.** The URL is already in your
++traces — it is the span name of every MCP call:
++
++```
++POST /api/projects/automation-solutions/toolboxes/ConnectwiseMCP/versions/5/mcp
++```
++
++```bash
++python3 fetch_tool_manifest.py \
++    --host https://<your-foundry-host> \
++    --project automation-solutions \
++    --toolbox ConnectwiseMCP \
++    -o tool_manifests/connectwisemcp.json
++```
++
++`az login` first, or paste a token with `--token`. `--print-url` shows the
++endpoint without calling it.
++
++**2. From a `tools/list` dump or portal export:**
++
++```bash
++python3 extract_tool_manifest.py --from-tools-list tools-list.json \
++    --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
++```
++
++**3. A skeleton from the traces, in the meantime** — every tool the agents
++actually called, with the description telemetry carries and the argument keys
++observed, and `parameters: null` for each. Tools with a null schema are skipped
++by the validator rather than guessed at:
++
++```bash
++make manifest-skeleton
++```
++
++There are no `tools/list` spans in the September exports — `mcp.method.name`
++only shows `initialize` and `tools/call` — so route 1 or 2 is needed. Worth
++re-checking after any telemetry change:
++
++```kusto
++dependencies
++| where name has "tools/list"
++| extend d = customDimensions
++| project timestamp, name, keys = bag_keys(d), dims = d
++| take 5
++```
++
++## The version in the URL is a binding revision, not a schema version
++
++In the frozen full-triage set the analysis agent shows ConnectwiseMCP **v5**
++and the ops agent **v1** — same toolbox, same orchestration. The `cw_resolve`,
++`cw_get_ticket` and `load_skill` descriptions are **byte-identical** across
++both, so the number tracks when each agent's binding was last edited, not the
++tool contract.
++
++So a manifest normally declares:
++
++```json
++"versions": ["*"]
++```
++
++Pin to specific revisions only when you have evidence the contract actually
++differs — compare `gen_ai.tool.description` across revisions first. The
++converter records the revisions each run used either way, so a genuine
++divergence stays visible.
+ 
+ ## File format
+ 
+ ```json
+ {
+   "toolbox": "ConnectwiseMCP",
+-  "version": "5",
++  "versions": ["*"],
+   "source": "where this came from, and when",
+   "tools": [
+     {
+@@ -116,6 +137,8 @@ that reads. Worth confirming that is deliberate.
+ - `parameters` is a JSON Schema object. `inputSchema` is accepted as an alias,
+   so a raw `tools/list` entry can be dropped in unchanged.
+ - `parameters: null` means "not known yet" — skipped, never guessed.
++- `versions` lists the binding revisions this manifest covers; `["*"]` is the
++  normal answer. A single `"version": "5"` is still accepted and means `["5"]`.
+ 
+ The validator implements a deliberately small JSON Schema subset: `required`,
+ `additionalProperties: false`, `type`, and `enum`. That is the six criteria
+diff --git a/trace_to_eval.py b/trace_to_eval.py
+index 4331e9f..2872ee0 100644
+--- a/trace_to_eval.py
++++ b/trace_to_eval.py
+@@ -27,7 +27,7 @@ Run:  python3 trace_to_eval.py spans.json -o ./out
+ """
+ 
+ from __future__ import annotations
+-import argparse, csv, glob, json, os, re, sys
++import argparse, csv, glob, hashlib, json, os, re, sys
+ from collections import defaultdict
+ from datetime import datetime, timezone
+ 
+@@ -72,8 +72,15 @@ TRUNC_BOUNDARY = 8192   # values landing exactly here are suspect
+ CASCADE_MIN = 4
+ 
+ # `POST /api/projects/<p>/toolboxes/<toolbox>/versions/<v>/mcp` — the only
+-# place the MCP toolbox version appears. Version-keying matters: two agents
+-# in the same orchestration can sit on different toolbox versions.
++# place the toolbox binding appears.
++#
++# This number is a BINDING REVISION, not a schema version. Two agents in one
++# orchestration can show different numbers for the same toolbox purely because
++# their bindings were edited at different times: in the frozen traces the ops
++# agent shows v1 and the analysis agent v5, and the `cw_resolve`,
++# `cw_get_ticket` and `load_skill` descriptions are byte-identical across both.
++# So a manifest normally declares `"versions": ["*"]`. Pin to specific
++# revisions only when you have evidence the contract actually differs.
+ TOOLBOX_RE = re.compile(r"/toolboxes/([^/]+)/versions/([^/]+)/")
+ 
+ # Foundry prefixes MCP tools with the server name: `<server>___<tool>`.
+@@ -253,12 +260,12 @@ def _int(v):
+ # ------------------------------------------------------- tool manifests
+ 
+ def load_tool_manifests(paths):
+-    """Load `tool_manifests/*.json` into {(toolbox, version): [definitions]}.
++    """Load `tool_manifests/*.json`.
+ 
+     `gen_ai.tool.definitions` only ever covers A2A agent registrations, so no
+-    schema for any ConnectWise tool exists in telemetry. The toolbox is
+-    versioned, so the manifest is a one-time extraction per version rather
+-    than per-run capture. See tool_manifests/README.md.
++    schema for any ConnectWise tool exists in telemetry. A manifest supplies
++    it, once per toolbox, and declares which binding revisions it covers —
++    `"versions": ["*"]` normally. See tool_manifests/README.md.
+     """
+     files = []
+     for p in paths or []:
+@@ -267,19 +274,30 @@ def load_tool_manifests(paths):
+         else:
+             files.append(p)
+ 
+-    manifests = {}
++    manifests = []
+     for f in files:
+         with open(f, encoding="utf-8") as fh:
+             m = json.load(fh)
+         toolbox = m.get("toolbox")
+-        version = str(m.get("version", ""))
+-        if not toolbox or not version:
+-            raise ValueError(f"{f}: manifest needs 'toolbox' and 'version'")
+-        manifests[(toolbox, version)] = [_as_definition(t)
+-                                         for t in m.get("tools", [])]
++        if not toolbox:
++            raise ValueError(f"{f}: manifest needs 'toolbox'")
++        versions = m.get("versions")
++        if versions is None:
++            versions = [m["version"]] if "version" in m else ["*"]
++        manifests.append({
++            "toolbox": toolbox,
++            "versions": [str(v) for v in versions],
++            "tools": [_as_definition(t) for t in m.get("tools", [])],
++        })
+     return manifests
+ 
+ 
++def manifest_applies(manifest, toolbox, version):
++    if manifest["toolbox"] != toolbox:
++        return False
++    return "*" in manifest["versions"] or str(version) in manifest["versions"]
++
++
+ def _as_definition(tool):
+     """Normalise a tools/list entry to the shape telemetry uses, so a run's
+     tool_definitions reads the same whether it came from a span or a file."""
+@@ -445,6 +463,76 @@ def tool_step(s):
+     }
+ 
+ 
++_FRONTMATTER_NAME = re.compile(r"^---\s*\nname:\s*([^\n]+)", re.MULTILINE)
++
++
++def collect_skills(steps):
++    """Which skill files were in force for this run, by content hash.
++
++    `load_skill` returns raw markdown with YAML frontmatter carrying `name`
++    and `description` but NO version, so "which rules were in force" is only
++    answerable by hashing what came back. That works until the payload
++    truncates — and `load_skill` is the largest payload in the traces
++    (25,023 chars observed), so the agent reasoned over incomplete RULES,
++    not merely incomplete data.
++
++    The durable fix is agent-side: have load_skill return
++    {skill_name, version, sha256} and rehydrate at eval time. Until then this
++    records what it can and marks what it cannot trust.
++    """
++    skills = []
++    for st in steps:
++        if base_tool_name(st["tool"]) != "load_skill":
++            continue
++        try:
++            name = (json.loads(st["arguments"] or "{}") or {}).get("skill_name")
++        except json.JSONDecodeError:
++            name = None
++        body = st["result"] or ""
++        m = _FRONTMATTER_NAME.search(body)
++        skills.append({
++            "skill_name": name or (m.group(1).strip() if m else ""),
++            "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
++            "bytes": len(body),
++            # A truncated skill hashes to something that identifies the
++            # truncation, not the skill. Never compare these across runs.
++            "truncated": st["truncated"],
++            "errored": st["errored"],
++        })
++    return skills
++
++
++def write_skill_registry(runs, registry_dir):
++    """Store each intact skill body once, by hash, so a historical run's rules
++    can be read back. Truncated bodies are never stored."""
++    os.makedirs(registry_dir, exist_ok=True)
++    index_path = os.path.join(registry_dir, "index.json")
++    index = {}
++    if os.path.exists(index_path):
++        with open(index_path, encoding="utf-8") as fh:
++            index = json.load(fh)
++
++    written = 0
++    for run, bodies in runs:
++        for skill, body in bodies:
++            if skill["truncated"] or skill["errored"] or not body:
++                continue
++            digest = skill["sha256"]
++            if digest in index:
++                continue
++            with open(os.path.join(registry_dir, f"{digest}.md"), "w",
++                      encoding="utf-8") as fh:
++                fh.write(body)
++            index[digest] = {"skill_name": skill["skill_name"],
++                             "bytes": skill["bytes"],
++                             "first_seen": run["started"]}
++            written += 1
++
++    with open(index_path, "w", encoding="utf-8") as fh:
++        json.dump(index, fh, indent=1, sort_keys=True)
++    return written, len(index)
++
++
+ def find_cascades(steps, min_len=CASCADE_MIN):
+     """Consecutive fruitless calls to the same tool — a distinct signature
+     from one bad call, and the one that burns the most time.
+@@ -506,11 +594,12 @@ def find_tool_defs(spans):
+ 
+ 
+ def find_toolboxes(spans):
+-    """Which MCP toolbox versions this run actually called.
++    """Which toolbox bindings this run actually called, as (toolbox, revision).
+ 
+-    Not cosmetic: in the frozen baseline the ops agent is on ConnectwiseMCP
+-    v1 while the analysis agent is on v5, in the same orchestration. Scoring
+-    a v1 run against a v5 schema silently corrupts results.
++    The revision is which edit of the binding the agent is pinned to, not a
++    tool-contract version — see TOOLBOX_RE. Recorded so a genuine contract
++    change can be pinned later, and so a binding drifting between agents is
++    at least visible.
+     """
+     seen = []
+     for s in spans:
+@@ -584,18 +673,18 @@ def build_actions(steps):
+ 
+ 
+ def resolve_tool_definitions(span_defs, toolboxes, manifests):
+-    """Telemetry definitions plus any manifest matching a toolbox version this
+-    run actually used. Returns (definitions, source_label)."""
++    """Telemetry definitions plus any manifest covering a toolbox this run
++    actually used. Returns (definitions, source_label)."""
+     defs = list(span_defs) if isinstance(span_defs, list) else []
+     sources = ["telemetry"] if defs else []
+ 
+     for toolbox, version in toolboxes:
+-        tools = manifests.get((toolbox, str(version)))
+-        if tools is None:
+-            continue
+-        have = {d.get("name") for d in defs}
+-        defs.extend(t for t in tools if t.get("name") not in have)
+-        sources.append(f"manifest:{toolbox}@{version}")
++        for m in manifests:
++            if not manifest_applies(m, toolbox, version):
++                continue
++            have = {d.get("name") for d in defs}
++            defs.extend(t for t in m["tools"] if t.get("name") not in have)
++            sources.append(f"manifest:{toolbox}@{version}")
+ 
+     if not defs and span_defs:
+         return span_defs, "telemetry"
+@@ -603,12 +692,12 @@ def resolve_tool_definitions(span_defs, toolboxes, manifests):
+ 
+ 
+ def convert(spans, manifests=None):
+-    manifests = manifests or {}
++    manifests = manifests or []
+     by_op = defaultdict(list)
+     for s in spans:
+         by_op[s["op_id"]].append(s)
+ 
+-    runs, summary = [], []
++    runs, summary, skill_bodies = [], [], []
+     for op_id, op_spans in by_op.items():
+         op_spans.sort(key=lambda s: s["timestamp"])
+ 
+@@ -651,6 +740,7 @@ def convert(spans, manifests=None):
+                 find_tool_defs(aspans), toolboxes, manifests)
+             usage = collect_usage(aspans)
+             cascades = find_cascades(steps)
++            skills = collect_skills(steps)
+ 
+             row = {
+                 "orchestration_id": op_id,
+@@ -691,6 +781,8 @@ def convert(spans, manifests=None):
+                     for st in steps if st["empty"]
+                 ],
+                 "search_cascades": cascades,
++                "skills_in_force": skills,
++                "truncated_skills": sum(1 for s in skills if s["truncated"]),
+                 "tool_ms": round(sum(st["duration_ms"] for st in steps), 1),
+                 "usage": usage,
+ 
+@@ -700,6 +792,12 @@ def convert(spans, manifests=None):
+                 "has_tool_definitions": bool(tool_defs),
+             }
+             runs.append(row)
++            skill_bodies.append((row, [
++                (sk, st["result"])
++                for sk, st in zip(skills, [s for s in steps
++                                           if base_tool_name(s["tool"])
++                                           == "load_skill"])
++            ]))
+             summary.append({
+                 "orchestration_id": op_id,
+                 "run_agent": agent,
+@@ -713,6 +811,8 @@ def convert(spans, manifests=None):
+                 "errors": row["error_count"],
+                 "truncated": row["truncated_results"],
+                 "cascades": len(cascades),
++                "skills": ";".join(s["skill_name"] for s in skills),
++                "truncated_skills": sum(1 for s in skills if s["truncated"]),
+                 "llm_calls": usage["llm_calls"],
+                 "uncached_in": usage["uncached_input_tokens"],
+                 "out_tokens": usage["output_tokens"],
+@@ -725,7 +825,7 @@ def convert(spans, manifests=None):
+ 
+     runs.sort(key=lambda r: (r["started"], r["run_agent"]))
+     summary.sort(key=lambda r: (r["started"], r["run_agent"]))
+-    return runs, summary
++    return runs, summary, skill_bodies
+ 
+ 
+ # ----------------------------------------------------------------- output
+@@ -735,6 +835,9 @@ def main():
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument("spans", help="JSON or CSV export of dependencies spans")
+     ap.add_argument("-o", "--out", default="./out", help="output directory")
++    ap.add_argument("--skill-registry", metavar="DIR",
++                    help="store each intact load_skill body once, by sha256, "
++                         "so a historical run's rules can be read back")
+     ap.add_argument("--tool-defs", action="append", metavar="PATH",
+                     help="tool manifest JSON, or a directory of them. "
+                          "Injected as tool_definitions for runs whose MCP "
+@@ -743,9 +846,14 @@ def main():
+ 
+     manifests = load_tool_manifests(args.tool_defs)
+     spans = load_spans(args.spans)
+-    runs, summary = convert(spans, manifests)
++    runs, summary, skill_bodies = convert(spans, manifests)
+     os.makedirs(args.out, exist_ok=True)
+ 
++    if args.skill_registry:
++        added, total = write_skill_registry(skill_bodies, args.skill_registry)
++        print(f"skill registry     : +{added} new, {total} total in "
++              f"{args.skill_registry}")
++
+     jsonl = os.path.join(args.out, "eval_runs.jsonl")
+     with open(jsonl, "w", encoding="utf-8") as fh:
+         for r in runs:
+@@ -773,10 +881,14 @@ def main():
+     print(f"  with errors      : {sum(1 for r in runs if r['error_count'])}")
+     print(f"  truncated results: {sum(r['truncated_results'] for r in runs)}")
+     print(f"  search cascades  : {sum(len(r['search_cascades']) for r in runs)}")
++    trunc_skills = sum(r["truncated_skills"] for r in runs)
++    if trunc_skills:
++        print(f"  TRUNCATED SKILLS : {trunc_skills}  (agent reasoned over "
++              f"incomplete rules)")
+     print(f"  unknown intent   : {sum(1 for r in runs if not r['intent'])}")
+     if manifests:
+-        print(f"  manifests loaded : "
+-              f"{', '.join(f'{t}@{v}' for t, v in sorted(manifests))}")
++        print("  manifests loaded : " + ", ".join(
++            f"{m['toolbox']}@{','.join(m['versions'])}" for m in manifests))
+     if toolboxes:
+         print(f"  toolboxes seen   : {', '.join(toolboxes)}")
+     print(f"\nwrote {jsonl}")
+-- 
+2.43.0
+
+
+From 7b1df010c3b7daf9ca2748b22588cd525755d9d8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 16 Sep 2026 17:24:29 +0000
+Subject: [PATCH 2/3] feat: trajectory coverage for every agent, skill hashing,
+ cost tracking
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Handoff §10 items 4 (partly), 5 and the trajectory gap.
+
+**expected.json now covers all four agents.** Three of seven runs used to skip
+the trajectory check, including both `connectwise-operations-agent` runs — the
+agent that writes to the system of record. Trajectory coverage goes 4/4 -> 7/7.
+
+These are baseline placeholders, not reviewer-approved ground truth, and say
+so in the file: no human has confirmed those runs were correct. Replace them
+from Dataverse AI Review once approved runs accumulate — "approved, no
+override" is a gold trajectory by definition.
+
+They already earn their keep. The ops expectation
+
+    load_skill -> cw_get_ticket -> cw_update_ticket -> cw_create
+
+catches a known-bad run that updated a ticket it had never read.
+
+**Skills in force, by content hash.** `load_skill` returns raw markdown with
+`name` and `description` frontmatter and NO version, so a content hash is the
+only identity a historical run has. Each run now records
+{skill_name, sha256, bytes, truncated}, `--skill-registry DIR` stores each
+intact body once so the rules behind an old run can be read back, and the
+report prints SKILL DRIFT when one name resolves to two hashes.
+
+This corrects §7.4's premise. `load_skill` is the largest payload (25,023
+chars) but it is not the one truncating — **every truncation in both frozen
+sets is a `cw_query` result**, surviving past 8192 because gen_ai.* attributes
+are largely exempt from the cap. Skill-by-reference is still worth doing for
+version comparison and Task Adherence; the truncation fix belongs on
+`cw_query`, as paging or field projection. A truncated skill is now flagged
+separately anyway, because incomplete rules are worse than incomplete data.
+
+**Cost and latency tracked, not gated.** Tokens and wall clock print on every
+run and land in the JSON artifact so they trend from day one. `cost_latency`
+only returns a verdict when `--max-tokens` or `--max-duration-ms` is set;
+otherwise it skips and says it is tracking. Gate once normal is known. Current
+baseline: a full triage is ~10 min wall clock and ~1M uncached tokens across
+7 runs, with the analysis agent peaking at 327k context in a single turn.
+
+Baselines re-frozen. Gating totals unchanged at 5/7 and 0/2.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0145AG8KerLg2fDJTVJDwy9T
+---
+ .gitignore                               |   4 +
+ Makefile                                 |  10 +-
+ baselines/full-triage-2026-09-16.json    | 207 +++++++++++++++++++++--
+ baselines/ops-worst-case-2026-09-16.json |  52 +++++-
+ expected.json                            |  21 ++-
+ run_evals.py                             | 102 +++++++++--
+ tests/test_frozen_sets.py                |  91 +++++++++-
+ tests/test_run_evals.py                  |  40 +++++
+ 8 files changed, 484 insertions(+), 43 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 8cab7fe..2ae2214 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,6 +3,10 @@ out/
+ out-*/
+ artifacts/
+ 
++# Local skill-content registry, rebuilt from the traces by `make evals`.
++# Commit it only if you need the bodies without the traces to hand.
++skills/
++
+ # Unattended export landing zone. Raw traces that matter get curated into
+ # traces/ by hand with a dated name and a line in traces/README.md.
+ traces/auto/
+diff --git a/Makefile b/Makefile
+index af7f5ca..6a4a456 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,7 @@ OPS_WORST   := traces/2026-09-15-ops-worst-case.csv
+ FT_BASELINE := baselines/full-triage-2026-09-16.json
+ OW_BASELINE := baselines/ops-worst-case-2026-09-16.json
+ 
+-.PHONY: help test evals evals-ops baselines manifest-skeleton clean
++.PHONY: help test evals evals-ops baselines manifest-skeleton foundry clean
+ 
+ help:
+ 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | \
+@@ -16,7 +16,8 @@ test:  ## unit tests + frozen-set replay (no Azure, no network)
+ 	$(PY) -m pytest tests/ -q
+ 
+ evals:  ## score the known-good set against its baseline
+-	$(PY) trace_to_eval.py $(FULL_TRIAGE) -o out --tool-defs tool_manifests/
++	$(PY) trace_to_eval.py $(FULL_TRIAGE) -o out --tool-defs tool_manifests/ \
++	    --skill-registry skills
+ 	$(PY) run_evals.py out/eval_runs.jsonl --expected expected.json \
+ 	    --baseline $(FT_BASELINE) --json artifacts/full-triage.json
+ 
+@@ -33,11 +34,14 @@ baselines:  ## re-freeze both baselines from the committed traces
+ 	-$(PY) run_evals.py out-ops/eval_runs.jsonl --expected expected.json \
+ 	    --json $(OW_BASELINE)
+ 
++foundry:  ## convert to the Foundry evaluator schema (no judge calls)
++	$(PY) submit_to_foundry.py out/eval_runs.jsonl --dry-run --sample 0
++
+ manifest-skeleton:  ## seed tool_manifests/ from the traces (no schemas)
+ 	$(PY) extract_tool_manifest.py --from-trace $(FULL_TRIAGE) \
+ 	    --toolbox ConnectwiseMCP --version 5 \
+ 	    -o tool_manifests/connectwisemcp-v5.json
+ 
+ clean:
+-	rm -rf out out-ops artifacts .pytest_cache
++	rm -rf out out-ops artifacts skills .pytest_cache
+ 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
+diff --git a/baselines/full-triage-2026-09-16.json b/baselines/full-triage-2026-09-16.json
+index 52fbd59..b3d57f4 100644
+--- a/baselines/full-triage-2026-09-16.json
++++ b/baselines/full-triage-2026-09-16.json
+@@ -8,6 +8,7 @@
+   "started": "2026-09-03T17:29:42.893Z",
+   "mcp_toolboxes": [],
+   "tool_calls": 6,
++  "duration_ms": 606775.0,
+   "usage": {
+    "llm_calls": 7,
+    "prompt_tokens_sum": 85213,
+@@ -19,6 +20,29 @@
+    "peak_input_tokens": 14740,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "orchestration",
++    "sha256": "e67a9811cccd4c4884054fcab7ab277872536ae546e6b77fd69b465289bab27a",
++    "bytes": 3018,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "develop-write-plan",
++    "sha256": "b375a52572113e720058489cae6d35019be136e45b2069289e7708c57e4b6b0b",
++    "bytes": 4306,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "write-audit-note",
++    "sha256": "85ba7b5c4be570c417334a4427edaf423d70bb3d18b24ce512b21cfda5611cf0",
++    "bytes": 1299,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": true,
+@@ -43,15 +67,19 @@
+    },
+    "trajectory": {
+     "passed": true,
+-    "reason": "matched, 4 extra step(s)",
+-    "precision": 0.33,
++    "reason": "matched, 2 extra step(s)",
++    "precision": 0.67,
+     "recall": 1.0,
+-    "f1": 0.5
++    "f1": 0.8
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": true,
+     "reason": ""
+@@ -74,6 +102,7 @@
+    }
+   ],
+   "tool_calls": 55,
++  "duration_ms": 232433.0,
+   "usage": {
+    "llm_calls": 38,
+    "prompt_tokens_sum": 4173837,
+@@ -85,6 +114,36 @@
+    "peak_input_tokens": 327227,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "normalization",
++    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
++    "bytes": 25023,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "classification",
++    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
++    "bytes": 21489,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "normalization",
++    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
++    "bytes": 25023,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "classification",
++    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
++    "bytes": 21489,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": true,
+@@ -118,7 +177,12 @@
+    "no_truncation": {
+     "passed": false,
+     "reason": "4 tool result(s) truncated at 8192 chars",
+-    "count": 4
++    "count": 4,
++    "skills": 0
++   },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+    },
+    "evaluator_ready": {
+     "passed": false,
+@@ -142,6 +206,7 @@
+    }
+   ],
+   "tool_calls": 13,
++  "duration_ms": 86601.0,
+   "usage": {
+    "llm_calls": 10,
+    "prompt_tokens_sum": 118336,
+@@ -153,6 +218,22 @@
+    "peak_input_tokens": 25428,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "post-ticket-audit-internal-note",
++    "sha256": "d1d78212d885108b7c1520aabfcf16ee28f10530006442178d107b8c6f591d36",
++    "bytes": 5961,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "execute-approved-ticket-changes",
++    "sha256": "9ca4da4ad055d0c770f1208985acb219d4adf7c1ec384b5f5b9ed934661525e0",
++    "bytes": 9699,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": true,
+@@ -175,13 +256,20 @@
+     "reason": ""
+    },
+    "trajectory": {
+-    "passed": null,
+-    "reason": "no expected_actions for connectwise-operations-agent"
++    "passed": true,
++    "reason": "matched, 9 extra step(s)",
++    "precision": 0.31,
++    "recall": 1.0,
++    "f1": 0.47
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": false,
+     "reason": "missing tool_definitions"
+@@ -199,6 +287,7 @@
+   "started": "2026-09-03T17:46:56.002Z",
+   "mcp_toolboxes": [],
+   "tool_calls": 6,
++  "duration_ms": 541934.0,
+   "usage": {
+    "llm_calls": 6,
+    "prompt_tokens_sum": 78450,
+@@ -210,6 +299,29 @@
+    "peak_input_tokens": 15233,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "orchestration",
++    "sha256": "e67a9811cccd4c4884054fcab7ab277872536ae546e6b77fd69b465289bab27a",
++    "bytes": 3018,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "develop-write-plan",
++    "sha256": "b375a52572113e720058489cae6d35019be136e45b2069289e7708c57e4b6b0b",
++    "bytes": 4306,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "write-audit-note",
++    "sha256": "85ba7b5c4be570c417334a4427edaf423d70bb3d18b24ce512b21cfda5611cf0",
++    "bytes": 1299,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": true,
+@@ -234,15 +346,19 @@
+    },
+    "trajectory": {
+     "passed": true,
+-    "reason": "matched, 4 extra step(s)",
+-    "precision": 0.33,
++    "reason": "matched, 2 extra step(s)",
++    "precision": 0.67,
+     "recall": 1.0,
+-    "f1": 0.5
++    "f1": 0.8
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": true,
+     "reason": ""
+@@ -265,6 +381,7 @@
+    }
+   ],
+   "tool_calls": 35,
++  "duration_ms": 346785.0,
+   "usage": {
+    "llm_calls": 27,
+    "prompt_tokens_sum": 3777327,
+@@ -276,6 +393,22 @@
+    "peak_input_tokens": 281272,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "normalization",
++    "sha256": "730f8adc457b8d7a76548519b99829c9d1cafa1d973c4f91f7da3aa7387b0c27",
++    "bytes": 25023,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "classification",
++    "sha256": "ebfe87e6c9ca6ef3d6af3301161f9eaa09e06dab2fe25782d8fbd04eb60127fb",
++    "bytes": 21489,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": false,
+@@ -310,7 +443,12 @@
+    "no_truncation": {
+     "passed": false,
+     "reason": "3 tool result(s) truncated at 8192 chars",
+-    "count": 3
++    "count": 3,
++    "skills": 0
++   },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+    },
+    "evaluator_ready": {
+     "passed": false,
+@@ -331,6 +469,7 @@
+   "started": "2026-09-03T17:53:47.296Z",
+   "mcp_toolboxes": [],
+   "tool_calls": 1,
++  "duration_ms": 21072.0,
+   "usage": {
+    "llm_calls": 2,
+    "prompt_tokens_sum": 14140,
+@@ -342,6 +481,15 @@
+    "peak_input_tokens": 8559,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "resolved-ticket-quality-control-review",
++    "sha256": "225cfc1a735ba28bf67244a100887832cbb19fd3f68c2ac52cea281e7d6e2f59",
++    "bytes": 14738,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": true,
+@@ -364,13 +512,20 @@
+     "reason": ""
+    },
+    "trajectory": {
+-    "passed": null,
+-    "reason": "no expected_actions for triage-evaluation-agent|Write Request"
++    "passed": true,
++    "reason": "exact",
++    "precision": 1.0,
++    "recall": 1.0,
++    "f1": 1.0
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": false,
+     "reason": "missing tool_definitions"
+@@ -393,6 +548,7 @@
+    }
+   ],
+   "tool_calls": 11,
++  "duration_ms": 77979.0,
+   "usage": {
+    "llm_calls": 9,
+    "prompt_tokens_sum": 111130,
+@@ -404,6 +560,22 @@
+    "peak_input_tokens": 24214,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "post-ticket-audit-internal-note",
++    "sha256": "d1d78212d885108b7c1520aabfcf16ee28f10530006442178d107b8c6f591d36",
++    "bytes": 5961,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "execute-approved-ticket-changes",
++    "sha256": "9ca4da4ad055d0c770f1208985acb219d4adf7c1ec384b5f5b9ed934661525e0",
++    "bytes": 9699,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": false,
+@@ -429,13 +601,20 @@
+     "reason": ""
+    },
+    "trajectory": {
+-    "passed": null,
+-    "reason": "no expected_actions for connectwise-operations-agent"
++    "passed": true,
++    "reason": "matched, 7 extra step(s)",
++    "precision": 0.36,
++    "recall": 1.0,
++    "f1": 0.53
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": false,
+     "reason": "missing tool_definitions"
+diff --git a/baselines/ops-worst-case-2026-09-16.json b/baselines/ops-worst-case-2026-09-16.json
+index fc1cd5b..405e7b3 100644
+--- a/baselines/ops-worst-case-2026-09-16.json
++++ b/baselines/ops-worst-case-2026-09-16.json
+@@ -13,6 +13,7 @@
+    }
+   ],
+   "tool_calls": 34,
++  "duration_ms": 109518.0,
+   "usage": {
+    "llm_calls": 19,
+    "prompt_tokens_sum": 642384,
+@@ -24,6 +25,22 @@
+    "peak_input_tokens": 58274,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "execute-approved-ticket-changes",
++    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
++    "bytes": 10209,
++    "truncated": false,
++    "errored": false
++   },
++   {
++    "skill_name": "post-ticket-audit-internal-note",
++    "sha256": "fad80be0b42103209aa91f037fd74649868635c4aed36cd776de57e6d3f7a672",
++    "bytes": 5092,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": false,
+@@ -51,13 +68,20 @@
+     "longest": 9
+    },
+    "trajectory": {
+-    "passed": null,
+-    "reason": "no expected_actions for connectwise-operations-agent"
++    "passed": true,
++    "reason": "matched, 30 extra step(s)",
++    "precision": 0.12,
++    "recall": 1.0,
++    "f1": 0.21
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": false,
+     "reason": "missing tool_definitions"
+@@ -82,6 +106,7 @@
+    }
+   ],
+   "tool_calls": 14,
++  "duration_ms": 75257.0,
+   "usage": {
+    "llm_calls": 11,
+    "prompt_tokens_sum": 204741,
+@@ -93,6 +118,15 @@
+    "peak_input_tokens": 27835,
+    "usage_source": "chat_spans"
+   },
++  "skills_in_force": [
++   {
++    "skill_name": "execute-approved-ticket-changes",
++    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
++    "bytes": 10209,
++    "truncated": false,
++    "errored": false
++   }
++  ],
+   "checks": {
+    "no_wasted_calls": {
+     "passed": false,
+@@ -121,13 +155,20 @@
+     "longest": 4
+    },
+    "trajectory": {
+-    "passed": null,
+-    "reason": "no expected_actions for connectwise-operations-agent"
++    "passed": false,
++    "reason": "missing ['ConnectWise-PSA-ForAgents___cw_get_ticket', 'ConnectWise-PSA-ForAgents___cw_update_ticket', 'ConnectWise-PSA-ForAgents___cw_create']",
++    "precision": 0.07,
++    "recall": 0.25,
++    "f1": 0.11
+    },
+    "no_truncation": {
+     "passed": true,
+     "reason": ""
+    },
++   "cost_latency": {
++    "passed": null,
++    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
++   },
+    "evaluator_ready": {
+     "passed": false,
+     "reason": "missing tool_definitions"
+@@ -136,7 +177,8 @@
+   "passed": false,
+   "failed_gating": [
+    "no_dead_ends",
+-   "no_wasted_calls"
++   "no_wasted_calls",
++   "trajectory"
+   ]
+  }
+ ]
+\ No newline at end of file
+diff --git a/expected.json b/expected.json
+index 2120108..6529eb5 100644
+--- a/expected.json
++++ b/expected.json
+@@ -1,9 +1,13 @@
+ {
+-  "_comment": "Keys are '<agent>|<intent>'. A bare '<agent>' key applies to every intent. Intents come from the orchestrator contract: Full Triage, Normalization Only, Classification Only, Enrichment, Resolved Ticket Review, Information Request, Write Request, Explanation, Detail Expansion. Author these from a run a reviewer approved: take the 'trajectory' column in runs_summary.csv and strip the wasted steps.",
++  "_comment": "Keys are '<agent>|<intent>'. A bare '<agent>' key applies to every intent. Intents come from the orchestrator contract: Full Triage, Normalization Only, Classification Only, Enrichment, Resolved Ticket Review, Information Request, Write Request, Explanation, Detail Expansion. Matching is in-order-with-extras: every step below must appear in this order, extras are allowed and counted against precision. Author these from a run a reviewer approved: take the 'trajectory' column in runs_summary.csv and strip the wasted steps. Keep them MINIMAL — each entry should be a step whose absence is a real defect, not a step that merely happened.",
++
++  "_provenance": "Authored 2026-09-16 from the two orchestrations in traces/2026-09-03-full-triage.csv. These are baseline placeholders, not reviewer-approved ground truth: no human has confirmed these runs were correct. Replace them from Dataverse AI Review once approved runs are accumulating — an 'approved, no override' review is a gold trajectory by definition.",
+ 
+   "triage-orchestrator|Full Triage": [
+     "load_skill",
+-    "triage-analysis-agent"
++    "triage-analysis-agent",
++    "load_skill",
++    "connectwise-operations-agent"
+   ],
+ 
+   "triage-analysis-agent|Full Triage": [
+@@ -12,5 +16,16 @@
+     "ConnectWise-PSA-ForAgents___cw_get_ticket",
+     "ConnectWise-PSA-ForAgents___cw_follow_href",
+     "ConnectWise-PSA-ForAgents___cw_query"
++  ],
++
++  "triage-evaluation-agent|Write Request": [
++    "load_skill"
++  ],
++
++  "connectwise-operations-agent": [
++    "load_skill",
++    "ConnectWise-PSA-ForAgents___cw_get_ticket",
++    "ConnectWise-PSA-ForAgents___cw_update_ticket",
++    "ConnectWise-PSA-ForAgents___cw_create"
+   ]
+-}
+\ No newline at end of file
++}
+diff --git a/run_evals.py b/run_evals.py
+index 017b113..eafaf68 100644
+--- a/run_evals.py
++++ b/run_evals.py
+@@ -168,11 +168,48 @@ def check_trajectory(run, cfg):
+ 
+ def check_no_truncation(run, cfg):
+     """Results at exactly 8192 chars are cut mid-payload, so the agent
+-    reasoned over incomplete data. A data-quality gate, not a model gate."""
++    reasoned over incomplete data. A data-quality gate, not a model gate.
++
++    In the frozen sets every truncation is a `cw_query` result — not
++    `load_skill`, which is the largest payload but survives intact past 8192
++    because gen_ai.* attributes are largely exempt from the cap. A truncated
++    *skill* would be worse than a truncated result, so it is called out
++    separately if it ever happens.
++    """
+     n = run.get("truncated_results", 0)
++    skills = run.get("truncated_skills", 0)
+     if not n:
+         return _pass()
+-    return _fail(f"{n} tool result(s) truncated at 8192 chars", count=n)
++    detail = f"{n} tool result(s) truncated at 8192 chars"
++    if skills:
++        detail += f" — {skills} of them a SKILL (incomplete rules, not data)"
++    return _fail(detail, count=n, skills=skills)
++
++
++def check_cost_latency(run, cfg):
++    """Spend and wall-clock per run.
++
++    Tracking, not gating: the numbers are printed every run and stored in the
++    JSON artifact so they trend, and this only returns a verdict when a
++    threshold is actually set. Gate once you know what normal looks like.
++    """
++    usage = run.get("usage", {})
++    tokens = usage.get("uncached_input_tokens", 0) + usage.get("output_tokens", 0)
++    duration = run.get("duration_ms", 0)
++    max_tokens = cfg.get("max_tokens")
++    max_ms = cfg.get("max_duration_ms")
++    if not (max_tokens or max_ms):
++        return _skip("tracking only — no --max-tokens/--max-duration-ms set")
++
++    over = []
++    if max_tokens and tokens > max_tokens:
++        over.append(f"{tokens:,} tokens > {max_tokens:,}")
++    if max_ms and duration > max_ms:
++        over.append(f"{duration / 1000:.1f}s > {max_ms / 1000:.1f}s")
++    if over:
++        return _fail("; ".join(over), tokens=tokens, duration_ms=duration)
++    return _pass(f"{tokens:,} tokens, {duration / 1000:.1f}s",
++                 tokens=tokens, duration_ms=duration)
+ 
+ 
+ # ------------------------------------------------- generated arg validation
+@@ -303,6 +340,7 @@ CHECKS = {
+     "no_search_cascade":    check_no_search_cascade,
+     "trajectory":           check_trajectory,
+     "no_truncation":        check_no_truncation,
++    "cost_latency":         check_cost_latency,
+     "evaluator_ready":      check_has_evaluator_inputs,
+ }
+ 
+@@ -327,7 +365,9 @@ def score(runs, cfg):
+             "started": run.get("started", ""),
+             "mcp_toolboxes": run.get("mcp_toolboxes", []),
+             "tool_calls": run.get("tool_call_count", 0),
++            "duration_ms": run.get("duration_ms", 0),
+             "usage": run.get("usage", {}),
++            "skills_in_force": run.get("skills_in_force", []),
+             "checks": res,
+             "passed": not gating,
+             "failed_gating": gating,
+@@ -390,14 +430,48 @@ def print_report(rows):
+         print(f"  {gate} {n:<20} {scored}")
+     print("\n  * = gating check")
+ 
+-    # Uncached in / out, not the sum of per-turn prompts — see collect_usage.
+-    tok_in = sum(r.get("usage", {}).get("uncached_input_tokens", 0) for r in rows)
+-    tok_out = sum(r.get("usage", {}).get("output_tokens", 0) for r in rows)
+-    peak = max((r.get("usage", {}).get("peak_input_tokens", 0) for r in rows),
+-               default=0)
+-    if tok_in or tok_out:
+-        print(f"\n  tokens: {tok_in:,} uncached in / {tok_out:,} out across "
+-              f"{total} run(s); peak context {peak:,}")
++    print_tracking(rows)
++
++
++def print_tracking(rows):
++    """Cost and latency per run. Not gated — see check_cost_latency — but
++    always printed and always in the JSON artifact, so it trends from day one.
++    Token figures are uncached input plus output; the sum of per-turn prompts
++    is not a spend figure.
++    """
++    if not any(r.get("usage", {}).get("llm_calls") for r in rows):
++        return
++    w = max(len(r["traj_key"]) for r in rows) + 2
++    print(f"\nTRACKING (not gated)\n{'AGENT [INTENT]':<{w}}"
++          f"{'LLM':>5}{'UNCACHED IN':>13}{'CACHED':>11}{'OUT':>8}"
++          f"{'PEAK CTX':>10}{'WALL':>8}")
++    print("-" * (w + 55))
++    tot_in = tot_out = tot_cached = 0
++    for r in rows:
++        u = r.get("usage", {})
++        tot_in += u.get("uncached_input_tokens", 0)
++        tot_out += u.get("output_tokens", 0)
++        tot_cached += u.get("cache_read_tokens", 0)
++        print(f"{r['traj_key']:<{w}}{u.get('llm_calls', 0):>5}"
++              f"{u.get('uncached_input_tokens', 0):>13,}"
++              f"{u.get('cache_read_tokens', 0):>11,}"
++              f"{u.get('output_tokens', 0):>8,}"
++              f"{u.get('peak_input_tokens', 0):>10,}"
++              f"{r.get('duration_ms', 0) / 1000:>7.1f}s")
++    print(f"{'TOTAL':<{w}}{'':>5}{tot_in:>13,}{tot_cached:>11,}{tot_out:>8,}")
++
++    # A skill file cut mid-payload means the agent worked from incomplete
++    # rules, which is a different failure from incomplete data.
++    hashes = defaultdict(set)
++    for r in rows:
++        for s in r.get("skills_in_force", []):
++            if not s.get("truncated"):
++                hashes[s["skill_name"]].add(s["sha256"][:12])
++    drifted = {k: v for k, v in hashes.items() if len(v) > 1}
++    if drifted:
++        print("\nSKILL DRIFT — same skill, different content across these runs")
++        for name, digests in sorted(drifted.items()):
++            print(f"  {name}: {', '.join(sorted(digests))}")
+ 
+ 
+ def _key(row):
+@@ -474,13 +548,19 @@ def main():
+     ap.add_argument("--json", help="write full results here")
+     ap.add_argument("--baseline", help="frozen results to diff against")
+     ap.add_argument("--max-empty-rate", type=float, default=0.25)
++    ap.add_argument("--max-tokens", type=int,
++                    help="uncached input + output per run; unset = track only")
++    ap.add_argument("--max-duration-ms", type=int,
++                    help="wall clock per run; unset = track only")
+     ap.add_argument("--allow-lost-coverage", action="store_true",
+                     help="do not fail when a check that used to score now "
+                          "skips (use when intentionally retiring a check)")
+     args = ap.parse_args()
+ 
+     runs = [json.loads(l) for l in open(args.jsonl, encoding="utf-8") if l.strip()]
+-    cfg = {"max_empty_rate": args.max_empty_rate, "expected": {}}
++    cfg = {"max_empty_rate": args.max_empty_rate, "expected": {},
++           "max_tokens": args.max_tokens,
++           "max_duration_ms": args.max_duration_ms}
+     if args.expected:
+         cfg["expected"] = {
+             k: v for k, v in
+diff --git a/tests/test_frozen_sets.py b/tests/test_frozen_sets.py
+index 9f592a9..00cc268 100644
+--- a/tests/test_frozen_sets.py
++++ b/tests/test_frozen_sets.py
+@@ -87,6 +87,53 @@ def test_manifest_turns_on_generated_argument_validation(tmp_path):
+     assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
+ 
+ 
++def test_every_agent_now_has_a_trajectory_expectation(tmp_path):
++    """Three of seven runs used to skip the trajectory check, including both
++    ops runs — the agent that writes to the system of record."""
++    _convert(SETS[0][0], tmp_path)
++    out = tmp_path / "results.json"
++    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
++    rows = json.loads(out.read_text())
++    assert all(r["checks"]["trajectory"]["passed"] is True for r in rows)
++
++
++def test_ops_run_that_never_read_the_ticket_fails_trajectory(tmp_path):
++    """73d29f4c updated a ticket without ever calling cw_get_ticket."""
++    _convert(SETS[1][0], tmp_path)
++    out = tmp_path / "results.json"
++    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
++    rows = {r["orchestration_id"][:8]: r for r in json.loads(out.read_text())}
++    traj = rows["73d29f4c"]["checks"]["trajectory"]
++    assert traj["passed"] is False
++    assert "cw_get_ticket" in traj["reason"]
++
++
++def test_every_truncation_in_the_frozen_sets_is_cw_query_not_load_skill(tmp_path):
++    """The handoff expected load_skill to be the truncation victim because it
++    is the largest payload. It is not — it survives past 8192 because gen_ai.*
++    attributes are largely exempt. Storing skills by reference is worth doing
++    for skill-version comparison, but it is not the truncation fix."""
++    for trace, *_ in SETS:
++        _convert(trace, tmp_path)
++        rows = [json.loads(l) for l in
++                (tmp_path / "eval_runs.jsonl").read_text().splitlines()
++                if l.strip()]
++        assert sum(r["truncated_skills"] for r in rows) == 0
++
++
++def test_skills_in_force_are_stable_across_both_orchestrations(tmp_path):
++    _convert(SETS[0][0], tmp_path)
++    rows = [json.loads(l) for l in
++            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
++    by_name = {}
++    for r in rows:
++        for s in r["skills_in_force"]:
++            by_name.setdefault(s["skill_name"], set()).add(s["sha256"])
++    assert by_name, "no skills recorded"
++    drifted = {k: v for k, v in by_name.items() if len(v) > 1}
++    assert not drifted, f"same skill, different content: {drifted}"
++
++
+ def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
+     """Every trajectory verdict depends on this. When the hand-off format
+     stopped matching, the checks skipped and the diff read 'no change'."""
+@@ -99,13 +146,43 @@ def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
+     assert all(r["started"].startswith("2026-09-03T") for r in rows)
+ 
+ 
+-def test_the_two_agents_are_on_different_toolbox_versions(tmp_path):
+-    """Not cosmetic: the ops agent writes to the system of record and is a
+-    major version behind the analysis agent."""
++def test_binding_revisions_differ_between_agents_but_the_contract_does_not(
++        tmp_path):
++    """The toolbox revision is a binding edit counter, not a schema version.
++    The ops agent shows v1 and the analysis agent v5 for the same toolbox, and
++    the tool descriptions are byte-identical across both — which is why a
++    manifest normally declares "versions": ["*"]."""
+     _convert(SETS[0][0], tmp_path)
+     rows = [json.loads(l) for l in
+             (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+-    versions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
+-                for r in rows if r["mcp_toolboxes"]}
+-    assert versions["triage-analysis-agent"] == {"5"}
+-    assert versions["connectwise-operations-agent"] == {"1"}
++    revisions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
++                 for r in rows if r["mcp_toolboxes"]}
++    assert revisions["triage-analysis-agent"] == {"5"}
++    assert revisions["connectwise-operations-agent"] == {"1"}
++
++
++def test_foundry_conversion_maps_actions_to_tool_calls(tmp_path):
++    """submit_to_foundry.py renames `actions` to the `tool_calls` field the
++    Foundry agent evaluators expect, and parses the argument strings."""
++    import submit_to_foundry
++
++    _convert(SETS[0][0], tmp_path)
++    runs = [json.loads(l) for l in
++            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
++    rows = submit_to_foundry.to_foundry_rows(runs)
++    assert len(rows) == len(runs)
++    with_calls = [r for r in rows if r["tool_calls"]]
++    assert with_calls
++    call = with_calls[0]["tool_calls"][0]
++    assert set(call) == {"type", "name", "arguments"}
++    assert isinstance(call["arguments"], (dict, str))
++
++
++def test_foundry_sampling_is_reproducible_for_a_seed(tmp_path):
++    import submit_to_foundry
++
++    rows = [{"n": i} for i in range(50)]
++    a = submit_to_foundry.select(rows, 5, seed=7)
++    b = submit_to_foundry.select(rows, 5, seed=7)
++    assert a == b and len(a) == 5
++    assert submit_to_foundry.select(rows, 0, seed=7) == rows
+diff --git a/tests/test_run_evals.py b/tests/test_run_evals.py
+index 6a5d7af..7b7f06e 100644
+--- a/tests/test_run_evals.py
++++ b/tests/test_run_evals.py
+@@ -197,3 +197,43 @@ def test_only_gating_checks_decide_the_verdict():
+ 
+ def test_every_gating_check_exists():
+     assert e.GATING <= set(e.CHECKS)
++
++
++# --- cost / latency: tracked, not gated -------------------------------------
++
++def _usage(**kw):
++    base = {"llm_calls": 3, "uncached_input_tokens": 1000,
++            "output_tokens": 100, "cache_read_tokens": 5000,
++            "peak_input_tokens": 900}
++    base.update(kw)
++    return base
++
++
++def test_cost_latency_skips_when_no_threshold_is_set():
++    """Tracking from day one, gating once we know what normal looks like."""
++    res = e.check_cost_latency(run(usage=_usage(), duration_ms=1000), {})
++    assert res["passed"] is None
++    assert "tracking only" in res["reason"]
++
++
++def test_cost_latency_fails_only_against_an_explicit_budget():
++    r = run(usage=_usage(), duration_ms=600_000)
++    assert e.check_cost_latency(r, {"max_tokens": 500})["passed"] is False
++    assert e.check_cost_latency(r, {"max_duration_ms": 60_000})["passed"] is False
++    assert e.check_cost_latency(r, {"max_tokens": 10_000,
++                                    "max_duration_ms": 900_000})["passed"] is True
++
++
++def test_cost_latency_counts_uncached_input_plus_output_not_cached():
++    r = run(usage=_usage(uncached_input_tokens=100, output_tokens=10,
++                         cache_read_tokens=10_000_000), duration_ms=1)
++    assert e.check_cost_latency(r, {"max_tokens": 200})["passed"] is True
++
++
++def test_cost_latency_is_not_a_gating_check():
++    assert "cost_latency" not in e.GATING
++
++
++def test_truncated_skill_is_called_out_in_the_truncation_reason():
++    r = run(truncated_results=3, truncated_skills=1)
++    assert "SKILL" in e.check_no_truncation(r, {})["reason"]
+-- 
+2.43.0
+
+
+From 10fab70cc1f7aaad38ac20ff5c9c056e897f5729 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 16 Sep 2026 17:24:45 +0000
+Subject: [PATCH 3/3] feat: use Foundry for what Foundry does, and say where
+ the line is
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Answers "are we hand-rolling anything Foundry offers for little effort".
+docs/FOUNDRY.md is the durable version; the short answer is three surfaces.
+
+  deterministic checks   process quality on RECORDED production traces
+                         free, no judge variance          -> merge gate
+  ai-agent-evals action  agents INVOKED with a query set in staging,
+                         confidence intervals + significance -> agent change
+  continuous evaluation  judged metrics on sampled live traffic -> always on
+
+Handed to Foundry:
+
+- **§10.9 statistics.** `microsoft/ai-agent-evals` reports confidence
+  intervals and tests significance against a baseline agent version. Not
+  writing pass@k.
+- **§5 replay harness.** The action invokes agents from a data file. With a dev
+  ConnectWise instance and a Foundry staging project now available, the most
+  expensive open item in the handoff costs no code. `replay/full-triage.json`
+  plus `.github/workflows/staging-replay.yml`, fired by repository_dispatch
+  from the agents repo. The ticket ids are placeholders.
+- **§10.7 judged evaluators and portal history.** `submit_to_foundry.py` maps
+  eval_runs.jsonl to the evaluator schema (`actions` -> `tool_calls`), samples
+  because judging costs inference per row, and uploads. `--dry-run` converts
+  with no SDK and no spend.
+
+Kept ours, with a reason:
+
+- The ConnectWise failure taxonomy — no Foundry equivalent.
+- `valid_tool_args` as the gate. **ToolCallAccuracyEvaluator returns _pass_ for
+  tool types it does not support**, with a reason string saying so. If the MCP
+  toolbox tools do not register as Function Tools it reports green without
+  evaluating. A pass meaning "did not evaluate" is worse than no check, so the
+  judged one is a second opinion, never the gate.
+
+Also `fetch_tool_manifest.py`: calls `tools/list` on the toolbox MCP endpoint
+— the URL is already the span name of every MCP call in our traces — and
+writes a manifest. Stdlib only, DefaultAzureCredential or a pasted token.
+Before using it, try `AIAgentConverter`, which returns `tool_definitions` read
+from the Agent Service rather than telemetry and may close §6 outright; the
+thread id is in our traces as `gen_ai.conversation.id`.
+
+The staging workflow refuses to run unless the project endpoint looks like
+staging. It is the one job that invokes agents, and the ops agent writes to a
+system of record.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0145AG8KerLg2fDJTVJDwy9T
+---
+ .github/workflows/staging-replay.yml |  84 +++++++++++++
+ README.md                            |  36 ++++--
+ docs/FOUNDRY.md                      |  79 ++++++++++++
+ docs/HANDOFF.md                      |  24 +++-
+ fetch_tool_manifest.py               | 162 +++++++++++++++++++++++++
+ replay/README.md                     |  40 ++++++
+ replay/full-triage.json              |  32 +++++
+ requirements.txt                     |   4 +
+ submit_to_foundry.py                 | 174 +++++++++++++++++++++++++++
+ 9 files changed, 620 insertions(+), 15 deletions(-)
+ create mode 100644 .github/workflows/staging-replay.yml
+ create mode 100644 docs/FOUNDRY.md
+ create mode 100644 fetch_tool_manifest.py
+ create mode 100644 replay/README.md
+ create mode 100644 replay/full-triage.json
+ create mode 100644 submit_to_foundry.py
+
+diff --git a/.github/workflows/staging-replay.yml b/.github/workflows/staging-replay.yml
+new file mode 100644
+index 0000000..3db246a
+--- /dev/null
++++ b/.github/workflows/staging-replay.yml
+@@ -0,0 +1,84 @@
++# Agent-change gate: re-triage a fixed set of dev-instance tickets in the
++# Foundry STAGING project and score them with the Foundry evaluator catalog.
++#
++# This is the one place we invoke agents rather than score recorded traces.
++# It is safe only because staging is wired to the dev ConnectWise instance.
++# Never repoint it at the production project — the agents mutate the ticket
++# they operate on and the ops agent writes to a system of record.
++#
++# The action reports confidence intervals and tests for statistical
++# significance against `baseline-agent-id`, which is handoff §10 item 9
++# (telling a flaky agent from a broken one) for no code of ours.
++#
++# Triggered from the agents repo after a release:
++#
++#   curl -X POST -H "Accept: application/vnd.github+json" \
++#     -H "Authorization: Bearer $GITHUB_TOKEN" \
++#     https://api.github.com/repos/verve-it/automation-solutions-evaluations/dispatches \
++#     -d '{"event_type":"agent-change",
++#          "client_payload":{"agent_ids":"triage-analysis-agent:83",
++#                            "baseline_agent_id":"triage-analysis-agent:82"}}'
++#
++# Deliberately NOT a required check on the agents repo by default. If a broken
++# eval can block an agent hotfix, someone disables the gate under pressure and
++# it never comes back. Make it required once it has earned the trust.
++
++name: staging replay
++
++on:
++  workflow_dispatch:
++    inputs:
++      agent-ids:
++        description: "agent-name:version, comma separated"
++        required: true
++      baseline-agent-id:
++        description: "agent-name:version to compare against"
++        required: false
++  repository_dispatch:
++    types: [agent-change]
++
++permissions:
++  id-token: write
++  contents: read
++
++jobs:
++  replay:
++    name: replay against staging
++    runs-on: ubuntu-latest
++    environment: staging          # holds the staging federation + endpoint
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Azure login using federated credentials
++        uses: azure/login@v2
++        with:
++          client-id: ${{ vars.AZURE_CLIENT_ID }}
++          tenant-id: ${{ vars.AZURE_TENANT_ID }}
++          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
++
++      # This job invokes agents, which writes to ConnectWise. Fail loudly
++      # rather than discover the mistake in a production ticket's audit trail.
++      - name: Refuse to run outside staging
++        env:
++          ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
++        run: |
++          case "$ENDPOINT" in
++            *staging*|*stg*|*dev*)
++              echo "endpoint looks like staging: ok" ;;
++            *)
++              echo "::error::AZURE_AI_PROJECT_ENDPOINT does not look like staging. Refusing to invoke agents."
++              exit 1 ;;
++          esac
++
++      - name: Replay and evaluate
++        uses: microsoft/ai-agent-evals@v3-beta
++        with:
++          azure-ai-project-endpoint: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
++          deployment-name: ${{ vars.AZURE_JUDGE_DEPLOYMENT }}
++          agent-ids: >-
++            ${{ github.event.inputs.agent-ids
++                || github.event.client_payload.agent_ids }}
++          baseline-agent-id: >-
++            ${{ github.event.inputs.baseline-agent-id
++                || github.event.client_payload.baseline_agent_id }}
++          data-path: ${{ github.workspace }}/replay/full-triage.json
+diff --git a/README.md b/README.md
+index 654f6b4..692e3da 100644
+--- a/README.md
++++ b/README.md
+@@ -58,14 +58,18 @@ Only `export_traces.py` needs dependencies: `pip install -r requirements.txt`.
+ export_traces.py          Log Analytics -> raw spans, unattended (for CI)
+ trace_to_eval.py          raw spans -> eval_runs.jsonl, one row per agent run
+ run_evals.py              scoring, reporting, baseline diff
+-extract_tool_manifest.py  build tool_manifests/<toolbox>-v<n>.json
++fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
++extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
++submit_to_foundry.py      the same dataset through the Foundry judged evaluators
+ 
+ expected.json             ground-truth trajectories, keyed "<agent>|<intent>"
+ baselines/                frozen results — COMMIT THESE
+ traces/                   raw exports, dated, committed
+-tool_manifests/           MCP tool schemas, version-keyed (empty — see below)
++replay/                   dev-instance tickets re-triaged in staging
++tool_manifests/           MCP tool schemas (empty — see below)
+ tests/                    unit tests + frozen-set replay
+ docs/HANDOFF.md           full engineering context
++docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
+ ```
+ 
+ `expected.json` and `baselines/` are the real assets. The scripts are
+@@ -96,7 +100,8 @@ each distinct `gen_ai.agent.name` inside it is a run.
+ | `trajectory` | **yes** | In-order match vs ground truth, extras allowed. Reports precision / recall / F1. |
+ | `no_tool_errors` | info | Any error. Too broad to gate — a legitimately empty result is not a defect. |
+ | `no_search_cascade` | info | Four or more consecutive fruitless calls to one tool. Distinct from one bad call, and it burns the most time. |
+-| `no_truncation` | info | Results at exactly 8192 chars, cut mid-payload. Telemetry problem, not model. |
++| `no_truncation` | info | Results at exactly 8192 chars, cut mid-payload. Telemetry problem, not model. A truncated *skill* is called out separately — incomplete rules, not incomplete data. |
++| `cost_latency` | info | Tokens and wall clock. **Tracked always, gated only if you set `--max-tokens` / `--max-duration-ms`.** |
+ | `evaluator_ready` | info | Would Foundry evaluators accept this run. Dataset readiness. |
+ 
+ Adding one is a function returning `_pass()`, `_fail(reason)` or
+@@ -124,12 +129,12 @@ suite is red permanently and people route around it.
+ 
+ | Gap | Blocks | Where |
+ |---|---|---|
+-| **MCP tool manifest** | 3 Foundry evaluators, generated arg validation | `tool_manifests/README.md` — the plumbing is done, the schemas are not |
+-| Dataverse loading on the new pipeline | All outcome evaluation | Handoff §8. Has lead time; nothing about outcome quality is answerable until it has been running a while. |
+-| Foundry submission | Portal visibility, LLM-judged evaluators | Handoff §9. Needs the manifest first. |
+-| Cost / latency gates | Regression on spend | Token data is now collected per run (`usage` in each JSONL row); no threshold is enforced. |
+-| Statistical treatment | Distinguishing flaky from broken | Single runs only, no pass@k. |
+-| Replay set | Clean merge-gate signal | Needs a dev ConnectWise instance so writes are safe. Until then, lag mode. |
++| **MCP tool manifest** | 3 Foundry evaluators, generated arg validation | `tool_manifests/README.md`. Plumbing and two extraction paths are done; the schemas are not. Try `AIAgentConverter` first — it may close this outright. |
++| **Dataverse loading on the new pipeline** | All outcome evaluation | Handoff §8. Has lead time; nothing about outcome quality is answerable until it has been running a while. |
++| `replay/` ticket ids | The staging agent-change gate | `replay/README.md` — the workflow is written, the dev ticket ids are placeholders. |
++| Cost / latency budgets | Gating on spend | Tracked now; set `--max-tokens` / `--max-duration-ms` once you know what normal looks like. |
++| Skill versions | "Which rules were in force" across versions | `load_skill` returns no version. Hashing is the workaround; the fix is agent-side. |
++| Intent on the ops hand-off | Intent-keyed expectations for the ops agent | The orchestrator hands it a JSON write plan with no `intent=`, so those runs key on the bare agent name. |
+ 
+ ## Gotchas
+ 
+@@ -151,6 +156,12 @@ suite is red permanently and people route around it.
+   8192 — treat `res_len == 8192` as suspect.
+ - **Foundry Traces retains 90 days**; Dataverse rows are permanent.
+ 
++- **`load_skill` returns no version** — only `name` and `description` in the
++  frontmatter. Content hash is the only identity a historical run has, and a
++  truncated body hashes to the truncation rather than the skill.
++- **`ToolCallAccuracyEvaluator` returns _pass_ for tool types it does not
++  support.** Never let it be the gate. See `docs/FOUNDRY.md`.
++
+ `tests/` locks in every one of these. If you are about to simplify one away,
+ reproduce the case in a trace first.
+ 
+@@ -158,7 +169,8 @@ reproduce the case in a trace first.
+ 
+ - App Insights: `automation-solutions-resource-appinsights` (rg `Verve-CopilotCapacity`)
+ - Foundry project: `automation-solutions`
+-- MCP toolbox: `ConnectwiseMCP` — **v5 for the analysis agent, v1 for the ops
+-  agent**. Worth confirming that is deliberate; the ops agent is the only one
+-  that writes to a system of record.
++- MCP toolbox: `ConnectwiseMCP`. The number in the toolbox URL is a **binding
++  revision**, not a schema version — the ops agent shows v1 and the analysis
++  agent v5 for the same toolbox, with byte-identical tool descriptions. A
++  manifest normally declares `"versions": ["*"]`.
+ - Content recording is **ON**
+diff --git a/docs/FOUNDRY.md b/docs/FOUNDRY.md
+new file mode 100644
+index 0000000..4b7c42f
+--- /dev/null
++++ b/docs/FOUNDRY.md
+@@ -0,0 +1,79 @@
++# What Foundry does for us, and what we do ourselves
++
++Written to answer one question: *are we hand-rolling anything Foundry offers
++for little effort?*
++
++## Three surfaces, three jobs
++
++| Surface | What it scores | Data source | Where it runs | Judge cost |
++|---|---|---|---|---|
++| **Deterministic checks** (`run_evals.py`) | Process quality — wasted calls, dead ends, cascades, argument validity, trajectory | Recorded production traces | CI merge gate, nightly drift | none |
++| **`microsoft/ai-agent-evals`** | Foundry evaluator catalog, with confidence intervals and significance vs a baseline agent version | Agents **invoked** with a query set | CI on agent change, **staging only** | per run |
++| **Foundry continuous evaluation** | Judged metrics on live traffic at a sampling rate | Production traces, sampled | Production, always on | per sampled run |
++
++They are not alternatives. The first scores what production actually did; the
++second scores what a changed agent *would* do; the third watches for drift
++without anyone asking.
++
++## What we handed to Foundry
++
++- **Statistical treatment** (handoff §10.9). The action reports confidence
++  intervals and tests for significance against `baseline-agent-id`. We are not
++  writing pass@k.
++- **The replay harness** (§5). The action invokes agents from `replay/`. With
++  staging wired to dev ConnectWise there is no harness to write — this was the
++  most expensive open item in the handoff and it costs nothing now.
++- **Judged evaluators** (§10.7). Task Adherence, Intent Resolution and
++  Relevance are LLM-judged and we could not write them ourselves.
++- **Portal run history**, via `submit_to_foundry.py` or the action's summary.
++  Somewhere non-engineers can look.
++- **Possibly the tool manifest.** `AIAgentConverter` takes an Agent Service
++  thread + run id and returns `tool_definitions` read from the Agent Service
++  rather than from telemetry. **Test this before extracting anything** — it may
++  close §6 outright. Your traces carry the thread id as
++  `gen_ai.conversation.id` (`conv_...`).
++
++## What we keep, and why
++
++- **`no_wasted_calls`, `no_dead_ends`, `no_search_cascade`.** A ConnectWise
++  failure taxonomy. Foundry has no equivalent and never will.
++- **`valid_tool_args` as the gate.** `ToolCallAccuracyEvaluator` supports a
++  fixed list of tool types — File Search, Azure AI Search, Bing, SharePoint,
++  Code Interpreter, Fabric, OpenAPI, Function Tool. **For anything else it
++  returns _pass_**, with a reason string saying evaluation is not supported.
++  If our MCP toolbox tools do not register as Function Tools, it reports green
++  without evaluating. A pass that means "did not evaluate" is worse than no
++  check, so the deterministic one stays the gate and the judged one is a
++  second opinion.
++- **Scoring recorded traces at all.** Foundry's offline evaluation invokes
++  agents. Against production that is the one thing we cannot do — the agents
++  mutate the ticket they operate on.
++- **Trajectory expectations.** `expected.json` is our ground truth, and
++  `check_trajectory` deliberately reports precision / recall / F1 the way Task
++  Navigation Efficiency does, so numbers stay comparable if we ever move it.
++
++## Judges are sampled, never per-commit
++
++Judged evaluation is slow and the scores wobble. The split:
++
++- **Merge gate:** deterministic checks only. Fast, free, no variance.
++- **Agent change:** the action against staging. Significance testing is the
++  point — a 3% move on 4 queries is noise and it will say so.
++- **Nightly / weekly:** `submit_to_foundry.py --sample 20` for portal history.
++- **Always on:** continuous evaluation at a low sampling rate.
++
++## Prerequisites
++
++| For | Needs |
++|---|---|
++| Continuous evaluation | App Insights connected to the Foundry project; the project managed identity holding Foundry User; a `create_agent_evaluation` call per run, so the **agents** call it, not us |
++| `ai-agent-evals` action | Staging project endpoint, a judge model deployment, federated credentials, and `replay/` populated with dev ticket ids |
++| `submit_to_foundry.py` | `azure-ai-evaluation`, a judge deployment, and `tool_manifests/` filled or ToolCallAccuracy is meaningless |
++
++## Sources
++
++- [Agent evaluation with the Foundry SDK](https://learn.microsoft.com/en-us/azure/foundry-classic/how-to/develop/agent-evaluate-sdk)
++- [Continuously evaluate your AI agents](https://learn.microsoft.com/en-us/azure/foundry-classic/how-to/continuous-evaluation-agents)
++- [microsoft/ai-agent-evals](https://github.com/microsoft/ai-agent-evals)
++- [Run an evaluation in a GitHub Action](https://learn.microsoft.com/en-us/azure/foundry/how-to/evaluation-github-action)
++- [Set up tracing for AI agents](https://learn.microsoft.com/en-us/azure/foundry/observability/how-to/trace-agent-setup)
+diff --git a/docs/HANDOFF.md b/docs/HANDOFF.md
+index 9e71a58..435a136 100644
+--- a/docs/HANDOFF.md
++++ b/docs/HANDOFF.md
+@@ -10,15 +10,33 @@
+ >   still missing. See `tool_manifests/README.md`.
+ > - §10 item 3 (CI wiring) is built — `.github/workflows/evals.yml`.
+ > - §10 item 5 (cascade check) is built — `no_search_cascade`, informational.
+-> - §10 item 6: token data is now collected per run; no threshold is enforced.
++> - §10 item 4 (skill-by-reference): partially done, and the premise needs
++>   correcting. Skill bodies are now hashed per run with an optional content
++>   registry, so "which rules were in force" is answerable. But **every
++>   truncation in both frozen sets is a `cw_query` result, not `load_skill`** —
++>   load_skill is the largest payload yet survives past 8192 intact. Storing
++>   skills by reference is still worth doing for version comparison and Task
++>   Adherence; it is not the truncation fix. That belongs on `cw_query`
++>   (paging or field projection). Also: `load_skill` returns no version field,
++>   only `name` and `description` frontmatter.
++> - §10 item 6: token data is now collected per run and printed every run;
++>   gated only if you set a budget.
++> - §10 item 7 (Foundry submission): `submit_to_foundry.py`.
++> - §10 item 9 (statistics): handed to `microsoft/ai-agent-evals`, which does
++>   confidence intervals and significance testing. With a dev ConnectWise
++>   instance and a Foundry staging project now available, §5's replay set is
++>   viable and needs no harness of ours — see `replay/` and `docs/FOUNDRY.md`.
+ > - The §2 numbers below were measured with two bugs live. `started` was empty
+ >   on every run (the portal names the column `timestamp [UTC]`), and intent
+ >   extraction never matched, because real hand-offs are `intent=Full Triage; …`
+ >   and the pattern required `intent:`. The trajectory check was therefore
+ >   skipping every run while the baseline diff read "no change". Both are
+ >   fixed; baselines re-frozen; the gating totals (5/7 and 0/2) are unchanged.
+-> - §11 says the toolbox is ConnectwiseMCP v5. It is v5 for
+->   `triage-analysis-agent` and **v1** for `connectwise-operations-agent`.
++> - §11 says the toolbox is ConnectwiseMCP v5. The traces show v5 for
++>   `triage-analysis-agent` and v1 for `connectwise-operations-agent` — but the
++>   tool descriptions are byte-identical across both, so that number is a
++>   binding revision, not a schema version. Manifests declare `["*"]` by
++>   default.
+ 
+ Everything needed to pick this up. Written for someone who has the repo but
+ none of the history.
+diff --git a/fetch_tool_manifest.py b/fetch_tool_manifest.py
+new file mode 100644
+index 0000000..60bf15b
+--- /dev/null
++++ b/fetch_tool_manifest.py
+@@ -0,0 +1,162 @@
++#!/usr/bin/env python3
++"""
++fetch_tool_manifest.py — call `tools/list` on a Foundry toolbox MCP endpoint
++and write tool_manifests/<toolbox>.json.
++
++The endpoint is already in your traces, as the span name of every MCP call:
++
++    POST /api/projects/automation-solutions/toolboxes/ConnectwiseMCP/versions/5/mcp
++
++so the only thing you need to supply is the Foundry host.
++
++    python3 fetch_tool_manifest.py \\
++        --host https://<your-foundry-host> \\
++        --project automation-solutions \\
++        --toolbox ConnectwiseMCP --revision 5 \\
++        -o tool_manifests/connectwisemcp.json
++
++Auth is DefaultAzureCredential (`az login`), or paste a token:
++
++    az account get-access-token --scope https://ai.azure.com/.default \\
++        --query accessToken -o tsv
++
++Before reaching for this, try `AIAgentConverter` from `azure-ai-evaluation`:
++it takes an Agent Service thread + run id and returns `tool_definitions` read
++from the Agent Service rather than from telemetry. If that covers your tools,
++the manifest gap closes with no extraction at all. Your traces carry the
++thread id as `gen_ai.conversation.id` (`conv_...`).
++
++Stdlib only, so it runs anywhere `az` does.
++"""
++
++from __future__ import annotations
++import argparse, json, os, sys, urllib.error, urllib.request
++
++DEFAULT_SCOPE = "https://ai.azure.com/.default"
++# MCP streamable HTTP replies with either JSON or an SSE stream.
++ACCEPT = "application/json, text/event-stream"
++
++
++def _token(explicit, scope):
++    if explicit:
++        return explicit
++    env = os.environ.get("FOUNDRY_TOKEN")
++    if env:
++        return env
++    try:
++        from azure.identity import DefaultAzureCredential
++    except ImportError:
++        sys.exit("azure-identity not installed and no --token/FOUNDRY_TOKEN. "
++                 "pip install -r requirements.txt, or paste a token from "
++                 f"`az account get-access-token --scope {scope}`")
++    return DefaultAzureCredential().get_token(scope).token
++
++
++def _post(url, token, payload, session=None):
++    body = json.dumps(payload).encode()
++    headers = {"Authorization": f"Bearer {token}",
++               "Content-Type": "application/json", "Accept": ACCEPT}
++    if session:
++        headers["Mcp-Session-Id"] = session
++    req = urllib.request.Request(url, data=body, headers=headers,
++                                 method="POST")
++    try:
++        with urllib.request.urlopen(req) as resp:
++            return (resp.read().decode("utf-8", "replace"),
++                    resp.headers.get("Mcp-Session-Id"))
++    except urllib.error.HTTPError as exc:
++        detail = exc.read().decode("utf-8", "replace")[:500]
++        sys.exit(f"HTTP {exc.code} from {url}\n{detail}\n\n"
++                 "401/403 usually means the wrong token scope — try "
++                 f"--scope https://cognitiveservices.azure.com/.default")
++
++
++def _parse(raw):
++    """A streamable-HTTP endpoint may answer with SSE; take the last frame."""
++    raw = raw.strip()
++    if not raw:
++        return {}
++    if raw.startswith("{"):
++        return json.loads(raw)
++    frames = [l[len("data:"):].strip() for l in raw.splitlines()
++              if l.startswith("data:")]
++    if not frames:
++        sys.exit(f"unrecognised response: {raw[:300]}")
++    return json.loads(frames[-1])
++
++
++def fetch_tools(url, token):
++    """initialize -> notifications/initialized -> tools/list, per the MCP
++    streamable-HTTP handshake. The session id comes back on the initialize
++    response and must be echoed on every later request."""
++    raw, session = _post(url, token, {
++        "jsonrpc": "2.0", "id": 1, "method": "initialize",
++        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
++                   "clientInfo": {"name": "triage-automation-evals",
++                                  "version": "1"}},
++    })
++    _parse(raw)
++    _post(url, token,
++          {"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
++
++    raw, _ = _post(url, token,
++                   {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
++                    "params": {}}, session)
++    reply = _parse(raw)
++    if "error" in reply:
++        sys.exit(f"tools/list failed: {reply['error']}")
++    return reply.get("result", {}).get("tools", [])
++
++
++def main():
++    ap = argparse.ArgumentParser(
++        description=__doc__,
++        formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--host", required=True,
++                    help="Foundry host, e.g. https://<resource>.services.ai.azure.com")
++    ap.add_argument("--project", required=True)
++    ap.add_argument("--toolbox", required=True)
++    ap.add_argument("--revision", default="5",
++                    help="binding revision from the span URL (default 5); "
++                         "any revision serves the same tool list")
++    ap.add_argument("--versions", default="*",
++                    help="comma-separated binding revisions this manifest "
++                         "covers. Default '*' — the revision is a binding "
++                         "edit counter, not a schema version.")
++    ap.add_argument("--scope", default=DEFAULT_SCOPE)
++    ap.add_argument("--token", help="bearer token; overrides DefaultAzureCredential")
++    ap.add_argument("-o", "--out", required=True)
++    ap.add_argument("--print-url", action="store_true",
++                    help="print the endpoint and exit")
++    args = ap.parse_args()
++
++    url = (f"{args.host.rstrip('/')}/api/projects/{args.project}"
++           f"/toolboxes/{args.toolbox}/versions/{args.revision}/mcp")
++    if args.print_url:
++        print(url)
++        return 0
++
++    tools = fetch_tools(url, _token(args.token, args.scope))
++    manifest = {
++        "toolbox": args.toolbox,
++        "versions": [v.strip() for v in args.versions.split(",")],
++        "source": f"tools/list against {url}",
++        "tools": [{"name": t.get("name", ""),
++                   "description": t.get("description", ""),
++                   "parameters": t.get("inputSchema") or t.get("parameters")}
++                  for t in tools],
++    }
++    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
++    with open(args.out, "w", encoding="utf-8") as fh:
++        json.dump(manifest, fh, indent=1, ensure_ascii=False)
++        fh.write("\n")
++
++    without = [t["name"] for t in manifest["tools"] if not t["parameters"]]
++    print(f"{len(tools)} tool(s) -> {args.out}")
++    if without:
++        print(f"WARNING {len(without)} without a schema: {', '.join(without)}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/replay/README.md b/replay/README.md
+new file mode 100644
+index 0000000..bb02f4c
+--- /dev/null
++++ b/replay/README.md
+@@ -0,0 +1,40 @@
++# Replay set
++
++A fixed list of dev-instance tickets re-triaged on each agent change, scored by
++the [`microsoft/ai-agent-evals`](https://github.com/microsoft/ai-agent-evals)
++action against the Foundry **staging** project.
++
++## Why this is separate from everything else here
++
++Every other evaluation in this repo scores **recorded** traces. This one
++**invokes the agents**. That is only safe because staging is wired to the dev
++ConnectWise instance.
++
++**Never point this at the production project.** The agents mutate the ticket
++they operate on, and `connectwise-operations-agent` writes to a system of
++record. That constraint is what makes the rest of this repo trace-scoring
++rather than a replay harness.
++
++## Why the action rather than our own harness
++
++It invokes the agents from this data file, runs any evaluator in the Foundry
++catalog, and reports **confidence intervals and statistical significance**
++against a baseline agent version. That is handoff §10 item 9 — distinguishing
++a flaky agent from a broken one — for no code. Set `baseline-agent-id` to the
++currently deployed version and the report says whether a change is real or
++noise.
++
++## Tickets are single-use
++
++A ticket is only useful once: after the first run it has been triaged, so its
++state no longer matches what the case was meant to exercise. Either re-seed
++the dev tickets before each run, or keep a pool large enough to rotate.
++
++## Populating
++
++Replace each `TICKET_ID_*` with a real dev ticket chosen to exercise that
++intent. Aim for coverage of the orchestrator's intent enum first, then add a
++regression case for each finding in §7 of `docs/HANDOFF.md` as it is fixed —
++that is how this set earns its keep over time.
++
++Fields prefixed `_` are notes for us; the action ignores them.
+diff --git a/replay/full-triage.json b/replay/full-triage.json
+new file mode 100644
+index 0000000..8db8f23
+--- /dev/null
++++ b/replay/full-triage.json
+@@ -0,0 +1,32 @@
++{
++  "name": "full-triage-replay",
++  "_comment": "Data file for microsoft/ai-agent-evals. The action INVOKES the agents with each query, so this only ever runs against the Foundry staging project wired to the dev ConnectWise instance. Never point it at production: the agents mutate the ticket they operate on and the ops agent writes to a system of record.",
++  "_todo": "Replace every TICKET_ID below with a real ticket in the dev ConnectWise instance, chosen to span the intents you care about. A ticket is only useful once: after the first run it has been triaged, so refresh or re-seed the dev tickets between runs.",
++
++  "evaluators": [
++    "builtin.intent_resolution",
++    "builtin.task_adherence",
++    "builtin.tool_call_accuracy"
++  ],
++
++  "data": [
++    {
++      "query": "entityType=ticket\nentityId=TICKET_ID_NEW_UNTRIAGED\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
++      "_intent": "Full Triage"
++    },
++    {
++      "query": "entityType=ticket\nentityId=TICKET_ID_MISSING_COMPANY\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
++      "_intent": "Full Triage",
++      "_why": "Upstream proposed a company that does not exist in ConnectWise. Burned ~34 calls before the write correctly refused. Regression case for the cascading dead-end search."
++    },
++    {
++      "query": "entityType=ticket\nentityId=TICKET_ID_RESOLVED\ncontext=Review this resolved ticket for closure readiness",
++      "_intent": "Resolved Ticket Review"
++    },
++    {
++      "query": "entityType=ticket\nentityId=TICKET_ID_ANY\ncontext=What is the current status and priority of this ticket?",
++      "_intent": "Information Request",
++      "_why": "Read-only path: the orchestrator should go straight to ConnectwiseMCP, not route to a child agent."
++    }
++  ]
++}
+diff --git a/requirements.txt b/requirements.txt
+index 47d3506..dfb325d 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,3 +2,7 @@
+ # trace set needs nothing installed. These are for export_traces.py.
+ azure-identity>=1.17
+ azure-monitor-query>=1.4
++
++# submit_to_foundry.py only. The merge gate never installs this.
++azure-ai-evaluation>=1.0
++azure-ai-projects>=1.0
+diff --git a/submit_to_foundry.py b/submit_to_foundry.py
+new file mode 100644
+index 0000000..0f59a7f
+--- /dev/null
++++ b/submit_to_foundry.py
+@@ -0,0 +1,174 @@
++#!/usr/bin/env python3
++"""
++submit_to_foundry.py — run the Foundry judged evaluators over eval_runs.jsonl
++and upload the results to the project for portal history.
++
++This is a SECOND SURFACE over the same dataset, not a replacement for
++run_evals.py. The split, deliberately:
++
++  run_evals.py      deterministic, free, no judge variance    -> merge gate
++  this              judged, costs inference, scores wobble    -> sampled
++
++Do not run LLM judges per commit. Nightly or weekly over a sample.
++
++What this buys that run_evals.py cannot: Task Adherence, Intent Resolution and
++Relevance are LLM-judged and we cannot write them ourselves, plus portal run
++history and comparison that non-engineers can look at.
++
++One caveat worth knowing before you trust a green:
++ToolCallAccuracyEvaluator returns **pass** for tool types it does not support,
++with a reason string saying so. If the ConnectWise MCP tools do not register as
++Function Tools it will report success without evaluating anything. Read the
++reason strings, and keep `valid_tool_args` in run_evals.py as the actual gate.
++
++    python3 submit_to_foundry.py out/eval_runs.jsonl \\
++        --project-endpoint $AZURE_AI_PROJECT_ENDPOINT \\
++        --model-deployment gpt-4o \\
++        --sample 20
++"""
++
++from __future__ import annotations
++import argparse, json, os, random, sys
++
++# Foundry evaluators that accept the converter schema (query / response /
++# tool_calls / tool_definitions).
++AVAILABLE = ["intent_resolution", "task_adherence", "tool_call_accuracy",
++             "relevance"]
++DEFAULT = ["intent_resolution", "task_adherence", "tool_call_accuracy"]
++
++
++def to_foundry_rows(runs):
++    """eval_runs.jsonl -> the field names the Foundry agent evaluators expect.
++
++    Our rows already carry `query`, `response` and `tool_definitions` in the
++    right shape; the evaluators want the calls under `tool_calls` rather than
++    the `actions` name Task Navigation Efficiency uses.
++    """
++    rows = []
++    for r in runs:
++        calls = []
++        for action in r.get("actions", []):
++            for part in action.get("content", []):
++                calls.append({
++                    "type": "tool_call",
++                    "name": part.get("name"),
++                    "arguments": _maybe_json(part.get("arguments")),
++                })
++        rows.append({
++            "query": r.get("query") or [],
++            "response": r.get("response") or [],
++            "tool_calls": calls,
++            "tool_definitions": r.get("tool_definitions") or [],
++            # carried through so a portal row can be traced back
++            "orchestration_id": r.get("orchestration_id"),
++            "run_agent": r.get("run_agent"),
++            "intent": r.get("intent"),
++        })
++    return rows
++
++
++def _maybe_json(value):
++    if not isinstance(value, str):
++        return value
++    try:
++        return json.loads(value)
++    except json.JSONDecodeError:
++        return value
++
++
++def select(rows, sample, seed):
++    """Judged evaluation costs inference per row. Sample, do not sweep."""
++    if not sample or sample >= len(rows):
++        return rows
++    return random.Random(seed).sample(rows, sample)
++
++
++def build_evaluators(names, endpoint, deployment):
++    from azure.ai.evaluation import (IntentResolutionEvaluator,
++                                     RelevanceEvaluator, TaskAdherenceEvaluator,
++                                     ToolCallAccuracyEvaluator)
++    model_config = {
++        "azure_endpoint": endpoint,
++        "azure_deployment": deployment,
++    }
++    catalog = {
++        "intent_resolution": IntentResolutionEvaluator,
++        "task_adherence": TaskAdherenceEvaluator,
++        "tool_call_accuracy": ToolCallAccuracyEvaluator,
++        "relevance": RelevanceEvaluator,
++    }
++    return {n: catalog[n](model_config=model_config) for n in names}
++
++
++def main():
++    ap = argparse.ArgumentParser(
++        description=__doc__,
++        formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("jsonl", help="eval_runs.jsonl from trace_to_eval.py")
++    ap.add_argument("--project-endpoint",
++                    default=os.environ.get("AZURE_AI_PROJECT_ENDPOINT"))
++    ap.add_argument("--model-endpoint",
++                    default=os.environ.get("AZURE_OPENAI_ENDPOINT"),
++                    help="judge model endpoint (defaults to the project's)")
++    ap.add_argument("--model-deployment",
++                    default=os.environ.get("AZURE_OPENAI_DEPLOYMENT"),
++                    help="judge model deployment, e.g. gpt-4o")
++    ap.add_argument("--evaluators", default=",".join(DEFAULT),
++                    help=f"any of: {', '.join(AVAILABLE)}")
++    ap.add_argument("--sample", type=int, default=20,
++                    help="rows to judge; 0 for all. Judged evaluation costs "
++                         "inference per row.")
++    ap.add_argument("--seed", type=int, default=0,
++                    help="sampling seed, so a run is reproducible")
++    ap.add_argument("--name", default="triage-evals",
++                    help="evaluation name shown in the portal")
++    ap.add_argument("--out", default="artifacts/foundry-input.jsonl")
++    ap.add_argument("--dry-run", action="store_true",
++                    help="write the converted dataset and stop; no judge "
++                         "calls, no spend, no SDK needed")
++    args = ap.parse_args()
++
++    with open(args.jsonl, encoding="utf-8") as fh:
++        runs = [json.loads(l) for l in fh if l.strip()]
++    rows = select(to_foundry_rows(runs), args.sample, args.seed)
++
++    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
++    with open(args.out, "w", encoding="utf-8") as fh:
++        for row in rows:
++            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
++    print(f"{len(rows)} of {len(runs)} run(s) -> {args.out}")
++
++    without_defs = sum(1 for r in rows if not r["tool_definitions"])
++    if without_defs:
++        print(f"WARNING {without_defs} row(s) carry no tool_definitions. "
++              "ToolCallAccuracy cannot evaluate those and reports pass. "
++              "Fill tool_manifests/ first — see tool_manifests/README.md.")
++
++    if args.dry_run:
++        return 0
++    if not (args.project_endpoint and args.model_deployment):
++        sys.exit("--project-endpoint and --model-deployment are required "
++                 "without --dry-run")
++
++    names = [n.strip() for n in args.evaluators.split(",") if n.strip()]
++    unknown = [n for n in names if n not in AVAILABLE]
++    if unknown:
++        sys.exit(f"unknown evaluator(s): {', '.join(unknown)}")
++
++    from azure.ai.evaluation import evaluate
++    result = evaluate(
++        data=args.out,
++        evaluation_name=args.name,
++        evaluators=build_evaluators(
++            names, args.model_endpoint or args.project_endpoint,
++            args.model_deployment),
++        azure_ai_project=args.project_endpoint,
++    )
++    print(json.dumps(result.get("metrics", {}), indent=1))
++    if result.get("studio_url"):
++        print(f"\nFoundry: {result['studio_url']}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.43.0
+

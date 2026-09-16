@@ -1,0 +1,184 @@
+[
+ {
+  "orchestration_id": "2c861b0dbf976d569ef664d76a292503",
+  "run_agent": "connectwise-operations-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "connectwise-operations-agent",
+  "started": "2026-09-15T19:53:23.724Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "1"
+   }
+  ],
+  "tool_calls": 34,
+  "duration_ms": 109518.0,
+  "usage": {
+   "llm_calls": 19,
+   "prompt_tokens_sum": 642384,
+   "uncached_input_tokens": 58328,
+   "cache_read_tokens": 584056,
+   "cache_write_tokens": 58152,
+   "output_tokens": 7226,
+   "reasoning_tokens": 3842,
+   "peak_input_tokens": 58274,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
+    "bytes": 10209,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "post-ticket-audit-internal-note",
+    "sha256": "fad80be0b42103209aa91f037fd74649868635c4aed36cd776de57e6d3f7a672",
+    "bytes": 5092,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "5 avoidable call(s): empty_failedx5",
+    "count": 5
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "8/34 tool calls errored",
+    "count": 8,
+    "rate": 0.24
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": false,
+    "reason": "1 cascade(s), longest 9x cw_resolve",
+    "count": 1,
+    "longest": 9
+   },
+   "trajectory": {
+    "passed": true,
+    "reason": "matched, 30 extra step(s)",
+    "precision": 0.12,
+    "recall": 1.0,
+    "f1": 0.21
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "73d29f4c3a13b093a0c93717d07e2ce4",
+  "run_agent": "connectwise-operations-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "connectwise-operations-agent",
+  "started": "2026-09-15T19:57:32.236Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "1"
+   }
+  ],
+  "tool_calls": 14,
+  "duration_ms": 75257.0,
+  "usage": {
+   "llm_calls": 11,
+   "prompt_tokens_sum": 204741,
+   "uncached_input_tokens": 21712,
+   "cache_read_tokens": 183029,
+   "cache_write_tokens": 21560,
+   "output_tokens": 5651,
+   "reasoning_tokens": 3505,
+   "peak_input_tokens": 27835,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "execute-approved-ticket-changes",
+    "sha256": "01ad643f0b54917710e72a24e7d1cd71e6fdc3b6954505a540959eb473a03236",
+    "bytes": 10209,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "3 avoidable call(s): empty_failedx3",
+    "count": 3
+   },
+   "valid_tool_args": {
+    "passed": null,
+    "reason": "no tool schemas (run the converter with --tool-defs)"
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "3/14 tool calls errored",
+    "count": 3,
+    "rate": 0.21
+   },
+   "no_dead_ends": {
+    "passed": false,
+    "reason": "4/14 calls returned nothing (ConnectWise-PSA-ForAgents___cw_query, ConnectWise-PSA-ForAgents___cw_resolve)",
+    "rate": 0.29
+   },
+   "no_search_cascade": {
+    "passed": false,
+    "reason": "1 cascade(s), longest 4x cw_resolve",
+    "count": 1,
+    "longest": 4
+   },
+   "trajectory": {
+    "passed": false,
+    "reason": "missing ['ConnectWise-PSA-ForAgents___cw_get_ticket', 'ConnectWise-PSA-ForAgents___cw_update_ticket', 'ConnectWise-PSA-ForAgents___cw_create']",
+    "precision": 0.07,
+    "recall": 0.25,
+    "f1": 0.11
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": false,
+    "reason": "missing tool_definitions"
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_dead_ends",
+   "no_wasted_calls",
+   "trajectory"
+  ]
+ }
+]
