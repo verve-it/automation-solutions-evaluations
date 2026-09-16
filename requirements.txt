@@ -1,0 +1,4 @@
+# The converter and the scorer are stdlib-only, on purpose: scoring a frozen
+# trace set needs nothing installed. These are for export_traces.py.
+azure-identity>=1.17
+azure-monitor-query>=1.4
