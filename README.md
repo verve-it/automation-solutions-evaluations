@@ -20,11 +20,16 @@ The agents mutate the ticket they operate on, and `connectwise-operations-agent`
 writes to a system of record. Re-running a triage produces different results
 because the first run already changed the data.
 
-**Evaluation is scoring of recorded traces, permanently. Never point an
-evaluator at a live agent against production ConnectWise.**
+**Never point an evaluator at a live agent against production ConnectWise.**
 
-That is why there is no replay harness and no stub layer, and why that is the
-correct design rather than a gap.
+What that rules out is re-running agents against production. It does not rule
+out replaying them against **recorded tool output**: `make_cassette.py` and
+`replay_server.py` serve an agent the exact responses the recorded run got,
+performing no writes and making no ConnectWise request. See `docs/REPLAY.md`.
+
+Only one thing in this repo invokes agents at all — `staging-replay.yml`,
+pinned to the test project and the dev ConnectWise instance. Everything else
+touches nothing.
 
 ## Quickstart
 
@@ -61,6 +66,8 @@ run_evals.py              scoring, reporting, baseline diff
 fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
 extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
 submit_to_foundry.py      the same dataset through the Foundry judged evaluators
+make_cassette.py          a recorded trace -> a replay cassette
+replay_server.py          an MCP server answering from a cassette; no writes
 
 expected.json             ground-truth trajectories, keyed "<agent>|<intent>"
 baselines/                frozen results — COMMIT THESE
@@ -70,6 +77,7 @@ tool_manifests/           MCP tool schemas (empty — see below)
 tests/                    unit tests + frozen-set replay
 docs/HANDOFF.md           full engineering context
 docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
+docs/REPLAY.md            stubbing the tools with recorded output
 ```
 
 `expected.json` and `baselines/` are the real assets. The scripts are
@@ -124,6 +132,23 @@ nothing with a config language nobody reads.
 
 The second is the CI mode. Gate on delta while known issues are open, or the
 suite is red permanently and people route around it.
+
+## Branch to Foundry project
+
+| Branch | Environment | Project | Invokes agents? |
+|---|---|---|---|
+| any | — | none | no — frozen sets only |
+| `staging` | `test` | `automation-solutions-test` | **yes**, via `staging-replay.yml` |
+| `main` | `production` | `automation-solutions` | **never** |
+
+Cassette replay (`docs/REPLAY.md`) invokes no agents from this repo and touches
+no ConnectWise at all, so it is safe to build from production traces on any
+branch.
+
+There is no production replay and there must not be: invoking agents re-triages
+real tickets and the ops agent writes to the system of record. Production is
+evaluated from recorded traces only. Full detail, plus judge model choice, in
+`docs/FOUNDRY.md`.
 
 ## What is not built
 
