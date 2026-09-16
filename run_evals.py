@@ -168,11 +168,48 @@ def check_trajectory(run, cfg):
 
 def check_no_truncation(run, cfg):
     """Results at exactly 8192 chars are cut mid-payload, so the agent
-    reasoned over incomplete data. A data-quality gate, not a model gate."""
+    reasoned over incomplete data. A data-quality gate, not a model gate.
+
+    In the frozen sets every truncation is a `cw_query` result — not
+    `load_skill`, which is the largest payload but survives intact past 8192
+    because gen_ai.* attributes are largely exempt from the cap. A truncated
+    *skill* would be worse than a truncated result, so it is called out
+    separately if it ever happens.
+    """
     n = run.get("truncated_results", 0)
+    skills = run.get("truncated_skills", 0)
     if not n:
         return _pass()
-    return _fail(f"{n} tool result(s) truncated at 8192 chars", count=n)
+    detail = f"{n} tool result(s) truncated at 8192 chars"
+    if skills:
+        detail += f" — {skills} of them a SKILL (incomplete rules, not data)"
+    return _fail(detail, count=n, skills=skills)
+
+
+def check_cost_latency(run, cfg):
+    """Spend and wall-clock per run.
+
+    Tracking, not gating: the numbers are printed every run and stored in the
+    JSON artifact so they trend, and this only returns a verdict when a
+    threshold is actually set. Gate once you know what normal looks like.
+    """
+    usage = run.get("usage", {})
+    tokens = usage.get("uncached_input_tokens", 0) + usage.get("output_tokens", 0)
+    duration = run.get("duration_ms", 0)
+    max_tokens = cfg.get("max_tokens")
+    max_ms = cfg.get("max_duration_ms")
+    if not (max_tokens or max_ms):
+        return _skip("tracking only — no --max-tokens/--max-duration-ms set")
+
+    over = []
+    if max_tokens and tokens > max_tokens:
+        over.append(f"{tokens:,} tokens > {max_tokens:,}")
+    if max_ms and duration > max_ms:
+        over.append(f"{duration / 1000:.1f}s > {max_ms / 1000:.1f}s")
+    if over:
+        return _fail("; ".join(over), tokens=tokens, duration_ms=duration)
+    return _pass(f"{tokens:,} tokens, {duration / 1000:.1f}s",
+                 tokens=tokens, duration_ms=duration)
 
 
 # ------------------------------------------------- generated arg validation
@@ -303,6 +340,7 @@ CHECKS = {
     "no_search_cascade":    check_no_search_cascade,
     "trajectory":           check_trajectory,
     "no_truncation":        check_no_truncation,
+    "cost_latency":         check_cost_latency,
     "evaluator_ready":      check_has_evaluator_inputs,
 }
 
@@ -327,7 +365,9 @@ def score(runs, cfg):
             "started": run.get("started", ""),
             "mcp_toolboxes": run.get("mcp_toolboxes", []),
             "tool_calls": run.get("tool_call_count", 0),
+            "duration_ms": run.get("duration_ms", 0),
             "usage": run.get("usage", {}),
+            "skills_in_force": run.get("skills_in_force", []),
             "checks": res,
             "passed": not gating,
             "failed_gating": gating,
@@ -390,14 +430,48 @@ def print_report(rows):
         print(f"  {gate} {n:<20} {scored}")
     print("\n  * = gating check")
 
-    # Uncached in / out, not the sum of per-turn prompts — see collect_usage.
-    tok_in = sum(r.get("usage", {}).get("uncached_input_tokens", 0) for r in rows)
-    tok_out = sum(r.get("usage", {}).get("output_tokens", 0) for r in rows)
-    peak = max((r.get("usage", {}).get("peak_input_tokens", 0) for r in rows),
-               default=0)
-    if tok_in or tok_out:
-        print(f"\n  tokens: {tok_in:,} uncached in / {tok_out:,} out across "
-              f"{total} run(s); peak context {peak:,}")
+    print_tracking(rows)
+
+
+def print_tracking(rows):
+    """Cost and latency per run. Not gated — see check_cost_latency — but
+    always printed and always in the JSON artifact, so it trends from day one.
+    Token figures are uncached input plus output; the sum of per-turn prompts
+    is not a spend figure.
+    """
+    if not any(r.get("usage", {}).get("llm_calls") for r in rows):
+        return
+    w = max(len(r["traj_key"]) for r in rows) + 2
+    print(f"\nTRACKING (not gated)\n{'AGENT [INTENT]':<{w}}"
+          f"{'LLM':>5}{'UNCACHED IN':>13}{'CACHED':>11}{'OUT':>8}"
+          f"{'PEAK CTX':>10}{'WALL':>8}")
+    print("-" * (w + 55))
+    tot_in = tot_out = tot_cached = 0
+    for r in rows:
+        u = r.get("usage", {})
+        tot_in += u.get("uncached_input_tokens", 0)
+        tot_out += u.get("output_tokens", 0)
+        tot_cached += u.get("cache_read_tokens", 0)
+        print(f"{r['traj_key']:<{w}}{u.get('llm_calls', 0):>5}"
+              f"{u.get('uncached_input_tokens', 0):>13,}"
+              f"{u.get('cache_read_tokens', 0):>11,}"
+              f"{u.get('output_tokens', 0):>8,}"
+              f"{u.get('peak_input_tokens', 0):>10,}"
+              f"{r.get('duration_ms', 0) / 1000:>7.1f}s")
+    print(f"{'TOTAL':<{w}}{'':>5}{tot_in:>13,}{tot_cached:>11,}{tot_out:>8,}")
+
+    # A skill file cut mid-payload means the agent worked from incomplete
+    # rules, which is a different failure from incomplete data.
+    hashes = defaultdict(set)
+    for r in rows:
+        for s in r.get("skills_in_force", []):
+            if not s.get("truncated"):
+                hashes[s["skill_name"]].add(s["sha256"][:12])
+    drifted = {k: v for k, v in hashes.items() if len(v) > 1}
+    if drifted:
+        print("\nSKILL DRIFT — same skill, different content across these runs")
+        for name, digests in sorted(drifted.items()):
+            print(f"  {name}: {', '.join(sorted(digests))}")
 
 
 def _key(row):
@@ -474,13 +548,19 @@ def main():
     ap.add_argument("--json", help="write full results here")
     ap.add_argument("--baseline", help="frozen results to diff against")
     ap.add_argument("--max-empty-rate", type=float, default=0.25)
+    ap.add_argument("--max-tokens", type=int,
+                    help="uncached input + output per run; unset = track only")
+    ap.add_argument("--max-duration-ms", type=int,
+                    help="wall clock per run; unset = track only")
     ap.add_argument("--allow-lost-coverage", action="store_true",
                     help="do not fail when a check that used to score now "
                          "skips (use when intentionally retiring a check)")
     args = ap.parse_args()
 
     runs = [json.loads(l) for l in open(args.jsonl, encoding="utf-8") if l.strip()]
-    cfg = {"max_empty_rate": args.max_empty_rate, "expected": {}}
+    cfg = {"max_empty_rate": args.max_empty_rate, "expected": {},
+           "max_tokens": args.max_tokens,
+           "max_duration_ms": args.max_duration_ms}
     if args.expected:
         cfg["expected"] = {
             k: v for k, v in

@@ -13,7 +13,7 @@ from conftest import invoke, span, tool_call
 def test_tools_call_child_does_not_double_count():
     spans = (tool_call("cw_query", "triage-analysis-agent")
              + [invoke("triage-analysis-agent")])
-    runs, _ = t.convert(spans)
+    runs, _, _ = t.convert(spans)
     assert runs[0]["tool_names"] == ["cw_query"]
 
 
@@ -33,7 +33,7 @@ def test_child_agent_spans_group_by_name_not_parent():
         *tool_call("cw_query", "triage-analysis-agent"),
     ]
     spans[1]["parent"] = "somewhere-outside-the-subtree"
-    runs, _ = t.convert(spans)
+    runs, _, _ = t.convert(spans)
     assert {r["run_agent"] for r in runs} == {"triage-orchestrator",
                                               "triage-analysis-agent"}
 
@@ -63,7 +63,7 @@ def test_a2a_call_stays_in_caller_trajectory_and_callee_is_its_own_run():
         invoke("triage-orchestrator", user_text="Automated flow: triage 1"),
         invoke("triage-analysis-agent", user_text="intent=Full Triage"),
     ]
-    runs, _ = t.convert(spans)
+    runs, _, _ = t.convert(spans)
     by_agent = {r["run_agent"]: r for r in runs}
     assert by_agent["triage-orchestrator"]["tool_names"] == \
         ["triage-analysis-agent"]
@@ -137,7 +137,7 @@ def test_child_intent_falls_back_to_the_callers_handoff():
         invoke("triage-analysis-agent",
                user_text="Full Triage for ticket 1, no keyword"),
     ]
-    runs, _ = t.convert(spans)
+    runs, _, _ = t.convert(spans)
     analysis = next(r for r in runs if r["run_agent"] == "triage-analysis-agent")
     assert analysis["intent"] == "Full Triage"
     assert analysis["intent_source"] == "inbound"
@@ -242,23 +242,115 @@ def test_manifest_is_injected_for_the_toolbox_version_the_run_used(tmp_path):
         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/5/mcp", "a"),
         *tool_call("cw_resolve", "a"),
     ]
-    runs, _ = t.convert(spans, manifests)
+    runs, _, _ = t.convert(spans, manifests)
     assert runs[0]["tool_definitions"][0]["name"] == "cw_resolve"
     assert runs[0]["tool_definitions_source"] == "manifest:ConnectwiseMCP@5"
     assert runs[0]["has_tool_definitions"] is True
 
 
-def test_manifest_for_another_version_is_not_applied():
-    manifests = {("ConnectwiseMCP", "5"): [{"name": "cw_resolve"}]}
+def test_manifest_pinned_to_another_revision_is_not_applied():
+    """Pinning is for a proven contract change; otherwise use "*"."""
+    manifests = [{"toolbox": "ConnectwiseMCP", "versions": ["5"],
+                  "tools": [{"name": "cw_resolve"}]}]
     spans = [
         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/1/mcp", "a"),
         *tool_call("cw_resolve", "a"),
     ]
-    runs, _ = t.convert(spans, manifests)
+    runs, _, _ = t.convert(spans, manifests)
     assert runs[0]["tool_definitions"] == []
+
+
+def test_wildcard_manifest_covers_every_binding_revision():
+    """The revision in the toolbox URL is a binding edit counter, not a schema
+    version: the ops agent shows v1 and the analysis agent v5 for the same
+    toolbox, with byte-identical tool descriptions."""
+    manifests = [{"toolbox": "ConnectwiseMCP", "versions": ["*"],
+                  "tools": [{"name": "cw_resolve", "parameters": {}}]}]
+    for revision in ("1", "5", "17"):
+        spans = [
+            span(f"POST /api/p/toolboxes/ConnectwiseMCP/versions/{revision}/mcp",
+                 "a"),
+            *tool_call("cw_resolve", "a"),
+        ]
+        runs, _, _ = t.convert(spans, manifests)
+        assert runs[0]["tool_definitions"][0]["name"] == "cw_resolve"
+
+
+def test_manifest_without_a_versions_field_defaults_to_wildcard(tmp_path):
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}))
+    assert t.load_tool_manifests([str(man)])[0]["versions"] == ["*"]
+
+
+def test_single_version_key_is_still_accepted(tmp_path):
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}))
+    assert t.load_tool_manifests([str(man)])[0]["versions"] == ["3"]
 
 
 def test_base_tool_name_strips_the_foundry_server_prefix():
     assert t.base_tool_name("ConnectWise-PSA-ForAgents___cw_resolve") == \
         "cw_resolve"
     assert t.base_tool_name("load_skill") == "load_skill"
+
+
+# --- skills in force --------------------------------------------------------
+
+def test_skill_bodies_are_hashed_so_rules_are_identifiable():
+    """load_skill returns raw markdown with `name` and `description` in the
+    frontmatter but NO version, so the content hash is the only identity a
+    historical run has."""
+    body = "---\nname: normalization\ndescription: x\n---\n\n# Normalization\n"
+    spans = (tool_call("load_skill", "a", args={"skill_name": "normalization"},
+                       result=body)
+             + [invoke("a")])
+    runs, _, _ = t.convert(spans)
+    skill = runs[0]["skills_in_force"][0]
+    assert skill["skill_name"] == "normalization"
+    assert skill["bytes"] == len(body)
+    assert skill["truncated"] is False
+    assert len(skill["sha256"]) == 64
+
+
+def test_same_skill_content_hashes_identically_across_runs():
+    body = "---\nname: classification\n---\nrules"
+    digests = set()
+    for op in ("op1", "op2"):
+        spans = tool_call("load_skill", "a", op, args={"skill_name": "x"},
+                          result=body) + [invoke("a", op)]
+        runs, _, _ = t.convert(spans)
+        digests.add(runs[0]["skills_in_force"][0]["sha256"])
+    assert len(digests) == 1
+
+
+def test_a_truncated_skill_is_flagged_separately_from_a_truncated_result():
+    """A skill cut mid-payload means the agent worked from incomplete RULES."""
+    spans = (tool_call("load_skill", "a", args={"skill_name": "big"},
+                       result="x" * t.TRUNC_BOUNDARY)
+             + [invoke("a")])
+    runs, _, _ = t.convert(spans)
+    assert runs[0]["truncated_skills"] == 1
+    assert runs[0]["skills_in_force"][0]["truncated"] is True
+
+
+def test_skill_name_falls_back_to_the_frontmatter():
+    spans = tool_call("load_skill", "a", args={}, result="---\nname: orch\n---")
+    runs, _, _ = t.convert(spans + [invoke("a")])
+    assert runs[0]["skills_in_force"][0]["skill_name"] == "orch"
+
+
+def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
+    good = "---\nname: ok\n---\nbody"
+    spans = (tool_call("load_skill", "a", args={"skill_name": "ok"},
+                       result=good, ts="2026-09-03T17:00:00.000Z")
+             + tool_call("load_skill", "a", args={"skill_name": "cut"},
+                         result="y" * t.TRUNC_BOUNDARY,
+                         ts="2026-09-03T17:00:01.000Z")
+             + [invoke("a")])
+    _, _, bodies = t.convert(spans)
+    added, total = t.write_skill_registry(bodies, str(tmp_path))
+    assert (added, total) == (1, 1)
+    # idempotent: a second pass adds nothing
+    assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
+    index = json.loads((tmp_path / "index.json").read_text())
+    assert [v["skill_name"] for v in index.values()] == ["ok"]

@@ -40,65 +40,86 @@ used to exercise the mechanism. Do not score anything with it.
 
 ## Getting the real thing
 
-The toolbox is versioned, so this is a one-time extraction **per version**, not
-a per-run capture.
+Four routes, best first.
 
-1. Check whether the `tools/list` span already carries it. (It did not in the
-   September traces — there are no `tools/list` spans in the export at all, and
-   `mcp.method.name` only shows `initialize` and `tools/call`.)
+**0. Try `AIAgentConverter` before extracting anything.** It takes an Agent
+Service thread id and run id and returns `query`, `response`, `tool_calls` and
+**`tool_definitions`** — read from the Agent Service, not from telemetry. If it
+covers the ConnectWise tools, this whole directory becomes unnecessary. Your
+traces carry the thread id as `gen_ai.conversation.id` (`conv_...`). Half an
+hour to find out. See `docs/FOUNDRY.md`.
 
-   ```kusto
-   dependencies
-   | where name has "tools/list"
-   | extend d = customDimensions
-   | project timestamp, name, keys = bag_keys(d), dims = d
-   | take 5
-   ```
+**1. Call `tools/list` on the toolbox endpoint.** The URL is already in your
+traces — it is the span name of every MCP call:
 
-2. If not, export the toolbox definition from the Foundry portal, or capture
-   the raw `tools/list` JSON-RPC response from the MCP endpoint, then:
+```
+POST /api/projects/automation-solutions/toolboxes/ConnectwiseMCP/versions/5/mcp
+```
 
-   ```bash
-   python3 extract_tool_manifest.py --from-tools-list tools-list.json \
-       --toolbox ConnectwiseMCP --version 5 \
-       -o tool_manifests/connectwisemcp-v5.json
-   ```
+```bash
+python3 fetch_tool_manifest.py \
+    --host https://<your-foundry-host> \
+    --project automation-solutions \
+    --toolbox ConnectwiseMCP \
+    -o tool_manifests/connectwisemcp.json
+```
 
-3. A skeleton from the traces is available in the meantime — every tool the
-   agents actually called, with the description telemetry carries and the
-   argument keys observed, and `parameters: null` for each. Tools with a null
-   schema are skipped by the validator rather than guessed at.
+`az login` first, or paste a token with `--token`. `--print-url` shows the
+endpoint without calling it.
 
-   ```bash
-   python3 extract_tool_manifest.py \
-       --from-trace traces/2026-09-03-full-triage.csv \
-       --toolbox ConnectwiseMCP --version 5 \
-       -o tool_manifests/connectwisemcp-v5.json
-   ```
+**2. From a `tools/list` dump or portal export:**
 
-## Version-key everything
+```bash
+python3 extract_tool_manifest.py --from-tools-list tools-list.json \
+    --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
+```
 
-**Scoring old behaviour against a new schema silently corrupts results.** The
-converter matches a manifest to a run by the toolbox version in the run's span
-URLs (`/toolboxes/<toolbox>/versions/<v>/mcp`) and applies nothing when they
-do not match.
+**3. A skeleton from the traces, in the meantime** — every tool the agents
+actually called, with the description telemetry carries and the argument keys
+observed, and `parameters: null` for each. Tools with a null schema are skipped
+by the validator rather than guessed at:
 
-This is not hypothetical. In the frozen full-triage baseline:
+```bash
+make manifest-skeleton
+```
 
-| Agent | Toolbox version |
-|---|---|
-| `triage-analysis-agent` | ConnectwiseMCP **5** |
-| `connectwise-operations-agent` | ConnectwiseMCP **1** |
+There are no `tools/list` spans in the September exports — `mcp.method.name`
+only shows `initialize` and `tools/call` — so route 1 or 2 is needed. Worth
+re-checking after any telemetry change:
 
-The agent that writes to the system of record is four versions behind the one
-that reads. Worth confirming that is deliberate.
+```kusto
+dependencies
+| where name has "tools/list"
+| extend d = customDimensions
+| project timestamp, name, keys = bag_keys(d), dims = d
+| take 5
+```
+
+## The version in the URL is a binding revision, not a schema version
+
+In the frozen full-triage set the analysis agent shows ConnectwiseMCP **v5**
+and the ops agent **v1** — same toolbox, same orchestration. The `cw_resolve`,
+`cw_get_ticket` and `load_skill` descriptions are **byte-identical** across
+both, so the number tracks when each agent's binding was last edited, not the
+tool contract.
+
+So a manifest normally declares:
+
+```json
+"versions": ["*"]
+```
+
+Pin to specific revisions only when you have evidence the contract actually
+differs — compare `gen_ai.tool.description` across revisions first. The
+converter records the revisions each run used either way, so a genuine
+divergence stays visible.
 
 ## File format
 
 ```json
 {
   "toolbox": "ConnectwiseMCP",
-  "version": "5",
+  "versions": ["*"],
   "source": "where this came from, and when",
   "tools": [
     {
@@ -116,6 +137,8 @@ that reads. Worth confirming that is deliberate.
 - `parameters` is a JSON Schema object. `inputSchema` is accepted as an alias,
   so a raw `tools/list` entry can be dropped in unchanged.
 - `parameters: null` means "not known yet" — skipped, never guessed.
+- `versions` lists the binding revisions this manifest covers; `["*"]` is the
+  normal answer. A single `"version": "5"` is still accepted and means `["5"]`.
 
 The validator implements a deliberately small JSON Schema subset: `required`,
 `additionalProperties: false`, `type`, and `enum`. That is the six criteria

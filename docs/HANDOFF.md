@@ -10,15 +10,33 @@
 >   still missing. See `tool_manifests/README.md`.
 > - §10 item 3 (CI wiring) is built — `.github/workflows/evals.yml`.
 > - §10 item 5 (cascade check) is built — `no_search_cascade`, informational.
-> - §10 item 6: token data is now collected per run; no threshold is enforced.
+> - §10 item 4 (skill-by-reference): partially done, and the premise needs
+>   correcting. Skill bodies are now hashed per run with an optional content
+>   registry, so "which rules were in force" is answerable. But **every
+>   truncation in both frozen sets is a `cw_query` result, not `load_skill`** —
+>   load_skill is the largest payload yet survives past 8192 intact. Storing
+>   skills by reference is still worth doing for version comparison and Task
+>   Adherence; it is not the truncation fix. That belongs on `cw_query`
+>   (paging or field projection). Also: `load_skill` returns no version field,
+>   only `name` and `description` frontmatter.
+> - §10 item 6: token data is now collected per run and printed every run;
+>   gated only if you set a budget.
+> - §10 item 7 (Foundry submission): `submit_to_foundry.py`.
+> - §10 item 9 (statistics): handed to `microsoft/ai-agent-evals`, which does
+>   confidence intervals and significance testing. With a dev ConnectWise
+>   instance and a Foundry staging project now available, §5's replay set is
+>   viable and needs no harness of ours — see `replay/` and `docs/FOUNDRY.md`.
 > - The §2 numbers below were measured with two bugs live. `started` was empty
 >   on every run (the portal names the column `timestamp [UTC]`), and intent
 >   extraction never matched, because real hand-offs are `intent=Full Triage; …`
 >   and the pattern required `intent:`. The trajectory check was therefore
 >   skipping every run while the baseline diff read "no change". Both are
 >   fixed; baselines re-frozen; the gating totals (5/7 and 0/2) are unchanged.
-> - §11 says the toolbox is ConnectwiseMCP v5. It is v5 for
->   `triage-analysis-agent` and **v1** for `connectwise-operations-agent`.
+> - §11 says the toolbox is ConnectwiseMCP v5. The traces show v5 for
+>   `triage-analysis-agent` and v1 for `connectwise-operations-agent` — but the
+>   tool descriptions are byte-identical across both, so that number is a
+>   binding revision, not a schema version. Manifests declare `["*"]` by
+>   default.
 
 Everything needed to pick this up. Written for someone who has the repo but
 none of the history.

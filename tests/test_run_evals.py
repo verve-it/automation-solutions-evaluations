@@ -197,3 +197,43 @@ def test_only_gating_checks_decide_the_verdict():
 
 def test_every_gating_check_exists():
     assert e.GATING <= set(e.CHECKS)
+
+
+# --- cost / latency: tracked, not gated -------------------------------------
+
+def _usage(**kw):
+    base = {"llm_calls": 3, "uncached_input_tokens": 1000,
+            "output_tokens": 100, "cache_read_tokens": 5000,
+            "peak_input_tokens": 900}
+    base.update(kw)
+    return base
+
+
+def test_cost_latency_skips_when_no_threshold_is_set():
+    """Tracking from day one, gating once we know what normal looks like."""
+    res = e.check_cost_latency(run(usage=_usage(), duration_ms=1000), {})
+    assert res["passed"] is None
+    assert "tracking only" in res["reason"]
+
+
+def test_cost_latency_fails_only_against_an_explicit_budget():
+    r = run(usage=_usage(), duration_ms=600_000)
+    assert e.check_cost_latency(r, {"max_tokens": 500})["passed"] is False
+    assert e.check_cost_latency(r, {"max_duration_ms": 60_000})["passed"] is False
+    assert e.check_cost_latency(r, {"max_tokens": 10_000,
+                                    "max_duration_ms": 900_000})["passed"] is True
+
+
+def test_cost_latency_counts_uncached_input_plus_output_not_cached():
+    r = run(usage=_usage(uncached_input_tokens=100, output_tokens=10,
+                         cache_read_tokens=10_000_000), duration_ms=1)
+    assert e.check_cost_latency(r, {"max_tokens": 200})["passed"] is True
+
+
+def test_cost_latency_is_not_a_gating_check():
+    assert "cost_latency" not in e.GATING
+
+
+def test_truncated_skill_is_called_out_in_the_truncation_reason():
+    r = run(truncated_results=3, truncated_skills=1)
+    assert "SKILL" in e.check_no_truncation(r, {})["reason"]

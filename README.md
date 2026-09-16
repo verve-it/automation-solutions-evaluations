@@ -58,14 +58,18 @@ Only `export_traces.py` needs dependencies: `pip install -r requirements.txt`.
 export_traces.py          Log Analytics -> raw spans, unattended (for CI)
 trace_to_eval.py          raw spans -> eval_runs.jsonl, one row per agent run
 run_evals.py              scoring, reporting, baseline diff
-extract_tool_manifest.py  build tool_manifests/<toolbox>-v<n>.json
+fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
+extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
+submit_to_foundry.py      the same dataset through the Foundry judged evaluators
 
 expected.json             ground-truth trajectories, keyed "<agent>|<intent>"
 baselines/                frozen results — COMMIT THESE
 traces/                   raw exports, dated, committed
-tool_manifests/           MCP tool schemas, version-keyed (empty — see below)
+replay/                   dev-instance tickets re-triaged in staging
+tool_manifests/           MCP tool schemas (empty — see below)
 tests/                    unit tests + frozen-set replay
 docs/HANDOFF.md           full engineering context
+docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
 ```
 
 `expected.json` and `baselines/` are the real assets. The scripts are
@@ -96,7 +100,8 @@ each distinct `gen_ai.agent.name` inside it is a run.
 | `trajectory` | **yes** | In-order match vs ground truth, extras allowed. Reports precision / recall / F1. |
 | `no_tool_errors` | info | Any error. Too broad to gate — a legitimately empty result is not a defect. |
 | `no_search_cascade` | info | Four or more consecutive fruitless calls to one tool. Distinct from one bad call, and it burns the most time. |
-| `no_truncation` | info | Results at exactly 8192 chars, cut mid-payload. Telemetry problem, not model. |
+| `no_truncation` | info | Results at exactly 8192 chars, cut mid-payload. Telemetry problem, not model. A truncated *skill* is called out separately — incomplete rules, not incomplete data. |
+| `cost_latency` | info | Tokens and wall clock. **Tracked always, gated only if you set `--max-tokens` / `--max-duration-ms`.** |
 | `evaluator_ready` | info | Would Foundry evaluators accept this run. Dataset readiness. |
 
 Adding one is a function returning `_pass()`, `_fail(reason)` or
@@ -124,12 +129,12 @@ suite is red permanently and people route around it.
 
 | Gap | Blocks | Where |
 |---|---|---|
-| **MCP tool manifest** | 3 Foundry evaluators, generated arg validation | `tool_manifests/README.md` — the plumbing is done, the schemas are not |
-| Dataverse loading on the new pipeline | All outcome evaluation | Handoff §8. Has lead time; nothing about outcome quality is answerable until it has been running a while. |
-| Foundry submission | Portal visibility, LLM-judged evaluators | Handoff §9. Needs the manifest first. |
-| Cost / latency gates | Regression on spend | Token data is now collected per run (`usage` in each JSONL row); no threshold is enforced. |
-| Statistical treatment | Distinguishing flaky from broken | Single runs only, no pass@k. |
-| Replay set | Clean merge-gate signal | Needs a dev ConnectWise instance so writes are safe. Until then, lag mode. |
+| **MCP tool manifest** | 3 Foundry evaluators, generated arg validation | `tool_manifests/README.md`. Plumbing and two extraction paths are done; the schemas are not. Try `AIAgentConverter` first — it may close this outright. |
+| **Dataverse loading on the new pipeline** | All outcome evaluation | Handoff §8. Has lead time; nothing about outcome quality is answerable until it has been running a while. |
+| `replay/` ticket ids | The staging agent-change gate | `replay/README.md` — the workflow is written, the dev ticket ids are placeholders. |
+| Cost / latency budgets | Gating on spend | Tracked now; set `--max-tokens` / `--max-duration-ms` once you know what normal looks like. |
+| Skill versions | "Which rules were in force" across versions | `load_skill` returns no version. Hashing is the workaround; the fix is agent-side. |
+| Intent on the ops hand-off | Intent-keyed expectations for the ops agent | The orchestrator hands it a JSON write plan with no `intent=`, so those runs key on the bare agent name. |
 
 ## Gotchas
 
@@ -151,6 +156,12 @@ suite is red permanently and people route around it.
   8192 — treat `res_len == 8192` as suspect.
 - **Foundry Traces retains 90 days**; Dataverse rows are permanent.
 
+- **`load_skill` returns no version** — only `name` and `description` in the
+  frontmatter. Content hash is the only identity a historical run has, and a
+  truncated body hashes to the truncation rather than the skill.
+- **`ToolCallAccuracyEvaluator` returns _pass_ for tool types it does not
+  support.** Never let it be the gate. See `docs/FOUNDRY.md`.
+
 `tests/` locks in every one of these. If you are about to simplify one away,
 reproduce the case in a trace first.
 
@@ -158,7 +169,8 @@ reproduce the case in a trace first.
 
 - App Insights: `automation-solutions-resource-appinsights` (rg `Verve-CopilotCapacity`)
 - Foundry project: `automation-solutions`
-- MCP toolbox: `ConnectwiseMCP` — **v5 for the analysis agent, v1 for the ops
-  agent**. Worth confirming that is deliberate; the ops agent is the only one
-  that writes to a system of record.
+- MCP toolbox: `ConnectwiseMCP`. The number in the toolbox URL is a **binding
+  revision**, not a schema version — the ops agent shows v1 and the analysis
+  agent v5 for the same toolbox, with byte-identical tool descriptions. A
+  manifest normally declares `"versions": ["*"]`.
 - Content recording is **ON**
