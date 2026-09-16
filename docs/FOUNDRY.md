@@ -8,12 +8,18 @@ for little effort?*
 | Surface | What it scores | Data source | Where it runs | Judge cost |
 |---|---|---|---|---|
 | **Deterministic checks** (`run_evals.py`) | Process quality — wasted calls, dead ends, cascades, argument validity, trajectory | Recorded production traces | CI merge gate, nightly drift | none |
-| **`microsoft/ai-agent-evals`** | Foundry evaluator catalog, with confidence intervals and significance vs a baseline agent version | Agents **invoked** with a query set | CI on agent change, **staging only** | per run |
+| **Cassette replay** (`docs/REPLAY.md`) | Whether a changed agent still takes the recorded path, and where it diverges | Agents invoked against **recorded tool output** | Agent change | none |
+| **`microsoft/ai-agent-evals`** | Foundry evaluator catalog, with confidence intervals and significance vs a baseline agent version | Agents **invoked live** with a query set | Before release, **test project only** | per run |
 | **Foundry continuous evaluation** | Judged metrics on live traffic at a sampling rate | Production traces, sampled | Production, always on | per sampled run |
 
 They are not alternatives. The first scores what production actually did; the
-second scores what a changed agent *would* do; the third watches for drift
-without anyone asking.
+second scores what a changed agent *would* do, deterministically and for free;
+the third does the same live, at the cost of drifting data and real writes; the
+fourth watches for drift without anyone asking.
+
+Cassette replay is the per-change gate. The live staging replay drops to a
+weekly smoke test — it is the slowest, the most expensive, the least
+repeatable, and the only one that leaves state behind.
 
 ## What we handed to Foundry
 
@@ -62,12 +68,90 @@ Judged evaluation is slow and the scores wobble. The split:
 - **Nightly / weekly:** `submit_to_foundry.py --sample 20` for portal history.
 - **Always on:** continuous evaluation at a low sampling rate.
 
+## Branch to project
+
+| Branch | GitHub environment | Foundry project | What runs |
+|---|---|---|---|
+| any | — | none | `frozen-sets` — committed traces vs committed baselines. No Azure. |
+| `staging` | `test` | `automation-solutions-test` | `staging-replay` (**invokes agents**), drift, judged sample |
+| `main` | `production` | `automation-solutions` | drift, judged sample. **Never invokes agents.** |
+
+Everything except the replay reads recorded traces and writes evaluation
+results, which is why `main` can safely target production.
+
+**There is no production replay, and there must not be.** Running the replay
+against `automation-solutions` would re-triage real tickets, and
+`connectwise-operations-agent` would write the results into the system of
+record. `staging-replay.yml` hard-codes `automation-solutions-test` as a
+constant rather than reading it from a variable, so a mis-set environment
+variable cannot redirect it. Production is evaluated from traces only.
+
+A scheduled workflow always runs on the **default branch**, so deriving the
+target from the branch would silently send every nightly run at one project.
+The `plan` job handles that: on a schedule it fans out to both, on a push or
+dispatch it follows the branch, and `workflow_dispatch` can name one.
+
+### Variables per environment
+
+Set on the GitHub environment (`test` and `production`), not repo-wide:
+
+| Name | Kind | Example |
+|---|---|---|
+| `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | var | federated credential for that project |
+| `AZURE_AI_PROJECT_ENDPOINT` | var | the project endpoint; the replay guard checks this contains `automation-solutions-test` |
+| `AZURE_JUDGE_DEPLOYMENT` | var | the pinned judge deployment — see below |
+| `LOG_ANALYTICS_WORKSPACE_ID` | secret | that project's App Insights workspace |
+
+Add a required reviewer on the `production` environment if you want a human in
+the loop before anything touches it.
+
+## Choosing the judge model
+
+Four things decide this, in order.
+
+**1. It cannot be the same family as the agents.** A judge scores its own
+family's output higher — self-preference bias is well documented and gets
+*stronger* with more capable judges. Your agents run `gpt-5.6-luna`; pick a
+judge from a different family. This is the one rule worth breaking a cost
+target over.
+
+**2. These tasks are on the hard end.** Task Adherence has to read a 25,000-
+character skill file and decide whether the run followed it. Intent Resolution
+has to follow a hand-off across four agents. Tool Call Accuracy has to reason
+over a 55-call trajectory. That is reasoning-model territory, not a cheap
+chat model. Microsoft's own guidance: `gpt-5-mini` for a cost/performance
+balance, a reasoning model such as `o3-mini` or a later o-series mini for
+complex evaluation.
+
+**3. Cost barely matters here, because we sample.** Twenty rows weekly. Do not
+trade judge quality for a saving that rounds to nothing. Compare that with the
+agents themselves, which burn ~1M uncached tokens per triage.
+
+**4. Pin it, and treat a change like a baseline promotion.** The judge
+deployment *and* its model version are part of the measurement. Change either
+and every earlier score becomes incomparable — the same failure mode as
+rewriting a baseline in place. Pin the version on the deployment, record it in
+the run name, and when you do upgrade, re-run the previous sample on the new
+judge before trusting the trend.
+
+**Recommendation:** `o3-mini` (or the current o-series mini) pinned to an
+explicit model version, deployed once per environment as
+`AZURE_JUDGE_DEPLOYMENT`. Drop to `gpt-5-mini` only if throughput becomes a
+problem, and re-baseline when you do.
+
+**Calibrate it against your reviewers.** Once Dataverse AI Review is
+accumulating, you have something most teams never get: human labels on the
+same runs. Score a set the judge has already scored and check they agree. If
+they do not, the judge is wrong, not the reviewers. That calibration is worth
+more than any model choice above, and it is the point at which "what is
+industry standard" stops mattering because you have your own answer.
+
 ## Prerequisites
 
 | For | Needs |
 |---|---|
 | Continuous evaluation | App Insights connected to the Foundry project; the project managed identity holding Foundry User; a `create_agent_evaluation` call per run, so the **agents** call it, not us |
-| `ai-agent-evals` action | Staging project endpoint, a judge model deployment, federated credentials, and `replay/` populated with dev ticket ids |
+| `ai-agent-evals` action | The `test` environment's endpoint, a judge deployment, federated credentials, and `replay/` populated with dev ticket ids |
 | `submit_to_foundry.py` | `azure-ai-evaluation`, a judge deployment, and `tool_manifests/` filled or ToolCallAccuracy is meaningless |
 
 ## Sources
@@ -76,4 +160,6 @@ Judged evaluation is slow and the scores wobble. The split:
 - [Continuously evaluate your AI agents](https://learn.microsoft.com/en-us/azure/foundry-classic/how-to/continuous-evaluation-agents)
 - [microsoft/ai-agent-evals](https://github.com/microsoft/ai-agent-evals)
 - [Run an evaluation in a GitHub Action](https://learn.microsoft.com/en-us/azure/foundry/how-to/evaluation-github-action)
+- [General purpose evaluators](https://learn.microsoft.com/en-us/azure/foundry/concepts/evaluation-evaluators/general-purpose-evaluators) — judge model guidance
+- [Self-preference bias in LLM-as-a-judge](https://arxiv.org/pdf/2410.21819)
 - [Set up tracing for AI agents](https://learn.microsoft.com/en-us/azure/foundry/observability/how-to/trace-agent-setup)

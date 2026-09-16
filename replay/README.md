@@ -2,18 +2,21 @@
 
 A fixed list of dev-instance tickets re-triaged on each agent change, scored by
 the [`microsoft/ai-agent-evals`](https://github.com/microsoft/ai-agent-evals)
-action against the Foundry **staging** project.
+action against **`automation-solutions-test`**, from the `staging` branch.
 
 ## Why this is separate from everything else here
 
 Every other evaluation in this repo scores **recorded** traces. This one
-**invokes the agents**. That is only safe because staging is wired to the dev
-ConnectWise instance.
+**invokes the agents**. That is only safe because `automation-solutions-test`
+is wired to the dev ConnectWise instance.
 
-**Never point this at the production project.** The agents mutate the ticket
-they operate on, and `connectwise-operations-agent` writes to a system of
-record. That constraint is what makes the rest of this repo trace-scoring
-rather than a replay harness.
+**There is no `main` counterpart and there must not be.** Against
+`automation-solutions` this would re-triage real tickets, and
+`connectwise-operations-agent` would write the results into the system of
+record. `staging-replay.yml` hard-codes the required project name rather than
+reading it from a variable, so a mis-set environment variable cannot redirect
+it. That constraint is what makes the rest of this repo trace-scoring rather
+than a replay harness.
 
 ## Why the action rather than our own harness
 
@@ -38,3 +41,6 @@ regression case for each finding in §7 of `docs/HANDOFF.md` as it is fixed —
 that is how this set earns its keep over time.
 
 Fields prefixed `_` are notes for us; the action ignores them.
+
+The workflow fails the run if any `TICKET_ID_` placeholder is still in the
+file, so a half-populated set cannot look like a passing gate.

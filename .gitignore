@@ -7,6 +7,10 @@ artifacts/
 # Commit it only if you need the bodies without the traces to hand.
 skills/
 
+# Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one
+# only when it backs a gate and the trace it came from is not committed.
+cassettes/
+
 # Unattended export landing zone. Raw traces that matter get curated into
 # traces/ by hand with a dated name and a line in traces/README.md.
 traces/auto/
