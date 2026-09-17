@@ -1,0 +1,10 @@
+{
+ "cw_cost_latency": "5",
+ "cw_no_dead_ends": "5",
+ "cw_no_search_cascade": "5",
+ "cw_no_tool_errors": "5",
+ "cw_no_truncation": "5",
+ "cw_no_wasted_calls": "5",
+ "cw_trajectory": "5",
+ "cw_valid_tool_args": "5"
+}

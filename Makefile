@@ -6,7 +6,7 @@ OPS_WORST   := traces/2026-09-15-ops-worst-case.csv
 FT_BASELINE := baselines/full-triage-2026-09-16.json
 OW_BASELINE := baselines/ops-worst-case-2026-09-16.json
 
-.PHONY: help test evals evals-ops baselines manifest-skeleton foundry cassettes replay clean
+.PHONY: help test evals evals-ops baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay clean
 
 help:
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | \
@@ -43,7 +43,14 @@ replay:  ## serve a cassette as an MCP toolbox (no ConnectWise, no writes)
 	$(PY) replay_server.py $(CASSETTE) --tool-defs tool_manifests/ \
 	    --journal artifacts/replay-journal.json
 
-foundry:  ## convert to the Foundry evaluator schema (no judge calls)
+foundry-dataset:  ## build the Foundry evaluation dataset from the frozen set
+	$(PY) to_foundry_dataset.py $(FULL_TRIAGE) --expected expected.json \
+	    --tool-defs tool_manifests/ -o artifacts/foundry-dataset.jsonl
+
+foundry-register:  ## print the evaluator payloads without calling Foundry
+	$(PY) register_evaluators.py --dry-run
+
+foundry:  ## convert to the Foundry judged-evaluator schema (no judge calls)
 	$(PY) submit_to_foundry.py out/eval_runs.jsonl --dry-run --sample 0
 
 manifest-skeleton:  ## seed tool_manifests/ from the traces (no schemas)

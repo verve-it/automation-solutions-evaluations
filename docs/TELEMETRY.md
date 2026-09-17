@@ -153,3 +153,19 @@ the value and reversible by dictionary attack.
 
 What it cannot do is decide whether `Pro Care` is a product or a person. That
 is the review step, and it is why there is one.
+
+### The failure this guards against
+
+`Full Triage` looks like a name to any heuristic, and the proposer offers it.
+Accept it and the sweep rewrites every hand-off to
+`intent=NAME?_e22a669c`. Nothing reports an error: the scrub writes, the
+residual check passes, the dataset builds — and `expected.json` stops matching,
+so trajectory coverage silently drops from 7/7 to 3/7.
+
+`scrub_trace.py` now refuses a redaction list containing the orchestrator's
+intent enum, the agent names in `AGENT_NAMES`, or ConnectWise status
+vocabulary, before writing anything. `to_foundry_dataset.py` warns if a
+redaction token turns up in a `traj_key`.
+
+Neither replaces the review. They catch the one mistake that is otherwise
+invisible.

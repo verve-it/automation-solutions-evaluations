@@ -146,3 +146,73 @@ def test_scrub_row_rewrites_appgenaicontent_columns(pseudo):
     out = s.scrub_row({"c_tool_result": json.dumps({"company": "Mettle"})},
                       pseudo, sweeper)
     assert "Mettle" not in out["c_tool_result"]
+
+
+# --- protected vocabulary ---------------------------------------------------
+
+def test_intent_names_are_refused():
+    """Seen live: 'Full Triage' was swept, every hand-off became
+    `intent=NAME?_e22a669c`, and trajectory coverage dropped 7/7 -> 3/7 with
+    no error anywhere."""
+    protected = s.protected_vocabulary()
+    for intent in ("Full Triage", "Write Request", "Information Request"):
+        assert intent.lower() in protected
+
+
+def test_agent_names_are_refused():
+    """A redacted agent name stops matching AGENT_NAMES, so the child run
+    collapses into its caller's trajectory."""
+    protected = s.protected_vocabulary()
+    for agent in ("triage-orchestrator", "connectwise-operations-agent"):
+        assert agent in protected
+
+
+def test_a_real_identity_is_not_protected():
+    assert "eli seale" not in s.protected_vocabulary()
+
+
+def test_the_check_is_case_insensitive():
+    assert "full triage" in s.protected_vocabulary()
+
+
+# --- word boundaries --------------------------------------------------------
+
+def test_a_short_literal_does_not_eat_longer_words(pseudo):
+    """Seen live: 'Process' in the list turned 'Processing the request' into
+    'PERSON_36dc5581ing the request' across the whole corpus."""
+    sweeper = s.build_sweeper({"Process": "PERSON"}, pseudo)
+    out = s.sweep("Processing the request, processed already", pseudo, sweeper)
+    assert out == "Processing the request, processed already"
+
+
+def test_the_literal_itself_is_still_swept(pseudo):
+    sweeper = s.build_sweeper({"Process": "PERSON"}, pseudo)
+    assert "PERSON_" in s.sweep("the Process owner", pseudo, sweeper)
+
+
+def test_a_multiword_name_is_swept_inside_prose(pseudo):
+    sweeper = s.build_sweeper({"Eli Seale": "PERSON"}, pseudo)
+    out = s.sweep("## Request\nEli Seale's laptop", pseudo, sweeper)
+    assert "Eli Seale" not in out and "PERSON_" in out
+
+
+def test_emails_keep_working_with_boundaries(pseudo):
+    sweeper = s.build_sweeper({"eli@verveit.com": "EMAIL"}, pseudo)
+    out = s.sweep("write to eli@verveit.com now", pseudo, sweeper)
+    assert "eli@verveit.com" not in out
+
+
+def test_a_literal_ending_in_punctuation_still_matches(pseudo):
+    """`\\b` next to a non-word character never matches, so it must not be
+    added there."""
+    sweeper = s.build_sweeper({"(209) 244-7120": "PHONE"}, pseudo)
+    out = s.sweep("call (209) 244-7120 today", pseudo, sweeper)
+    assert "244-7120" not in out
+
+
+def test_residual_check_uses_the_same_boundaries():
+    """Otherwise 'Process' reads as residual inside 'Processing', which the
+    sweep deliberately left alone, and the scrub reports a failure it did
+    not have."""
+    assert s.still_present("Process", "the Process owner") is True
+    assert s.still_present("Process", "Processing only") is False
