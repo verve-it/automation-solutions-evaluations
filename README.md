@@ -67,6 +67,11 @@ run_evals.py              scoring, reporting, baseline diff
 fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
 extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
 submit_to_foundry.py      the same dataset through the Foundry judged evaluators
+to_foundry_dataset.py     a trace -> a Foundry evaluation dataset
+register_evaluators.py    publish the checks to the Foundry evaluator catalog
+run_cloud_eval.py         upload the dataset and run them in Foundry
+check_cloud_eval.py       wait for a run and diff its scores against local
+foundry_evaluators/       the checks as code-based evaluators (uploaded)
 scrub_trace.py            redact customer data before committing a trace
 make_cassette.py          a recorded trace -> a replay cassette
 replay_server.py          an MCP server answering from a cassette; no writes
