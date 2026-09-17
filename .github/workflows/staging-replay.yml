@@ -17,6 +17,9 @@
 #
 # Triggered from the agents repo after a release to staging:
 #
+# On a push to `staging` it re-runs against vars.DEFAULT_AGENT_IDS. To compare
+# a specific version, dispatch it or have the agents repo fire:
+#
 #   curl -X POST -H "Accept: application/vnd.github+json" \
 #     -H "Authorization: Bearer $GITHUB_TOKEN" \
 #     https://api.github.com/repos/verve-it/automation-solutions-evaluations/dispatches \
@@ -60,7 +63,7 @@ jobs:
   replay:
     name: replay against automation-solutions-test
     runs-on: ubuntu-latest
-    environment: test
+    environment: staging
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +81,7 @@ jobs:
           ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
         run: |
           if [ -z "$ENDPOINT" ]; then
-            echo "::error::AZURE_AI_PROJECT_ENDPOINT is not set on the 'test' environment."
+            echo "::error::AZURE_AI_PROJECT_ENDPOINT is not set on the 'staging' environment."
             exit 1
           fi
           case "$ENDPOINT" in
@@ -96,15 +99,41 @@ jobs:
             exit 1
           fi
 
+      # A push to `staging` carries no inputs and no client_payload, so
+      # without a fallback the action would be handed an empty agent-ids and
+      # fail somewhere less obvious. DEFAULT_AGENT_IDS on the `staging`
+      # environment is the currently deployed agent to re-run against.
+      - name: Resolve which agent to evaluate
+        id: agents
+        env:
+          FROM_INPUT: ${{ github.event.inputs.agent-ids }}
+          FROM_DISPATCH: ${{ github.event.client_payload.agent_ids }}
+          FROM_VAR: ${{ vars.DEFAULT_AGENT_IDS }}
+          BASE_INPUT: ${{ github.event.inputs.baseline-agent-id }}
+          BASE_DISPATCH: ${{ github.event.client_payload.baseline_agent_id }}
+          BASE_VAR: ${{ vars.DEFAULT_BASELINE_AGENT_ID }}
+        run: |
+          IDS="${FROM_INPUT:-${FROM_DISPATCH:-$FROM_VAR}}"
+          BASE="${BASE_INPUT:-${BASE_DISPATCH:-$BASE_VAR}}"
+          if [ -z "$IDS" ]; then
+            echo "::error::No agent to evaluate. Pass agent-ids on dispatch, send agent_ids in the repository_dispatch payload, or set DEFAULT_AGENT_IDS on the 'staging' environment. Format: agent-name:version"
+            exit 1
+          fi
+          echo "evaluating : $IDS"
+          echo "baseline   : ${BASE:-none (no significance test)}"
+          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
+          echo "baseline=$BASE" >> "$GITHUB_OUTPUT"
+
+      # The queries in replay/full-triage.json are ORCHESTRATOR-shaped
+      # (`entityType=ticket ...`). agent-ids must name the orchestrator; it
+      # invokes the child agents itself. Evaluating a child agent directly
+      # needs its own data file with `intent=...; ticketId=...` queries,
+      # because a child does not accept the orchestrator's input contract.
       - name: Replay and evaluate
         uses: microsoft/ai-agent-evals@v3-beta
         with:
           azure-ai-project-endpoint: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
           deployment-name: ${{ vars.AZURE_JUDGE_DEPLOYMENT }}
-          agent-ids: >-
-            ${{ github.event.inputs.agent-ids
-                || github.event.client_payload.agent_ids }}
-          baseline-agent-id: >-
-            ${{ github.event.inputs.baseline-agent-id
-                || github.event.client_payload.baseline_agent_id }}
+          agent-ids: ${{ steps.agents.outputs.ids }}
+          baseline-agent-id: ${{ steps.agents.outputs.baseline }}
           data-path: ${{ github.workspace }}/replay/full-triage.json
