@@ -23,11 +23,15 @@
 #                    failures in §7 of the handoff would have been caught the
 #                    day they started.
 #
-#   judged sample    weekly, as a final step of the drift job on the same
-#                    freshly exported traces. LLM-judged evaluators over a
-#                    sample, uploaded for portal history. Never per-commit:
-#                    judges are slow and the scores wobble. See
-#                    docs/FOUNDRY.md.
+#   Foundry scoring  part of the nightly drift job: the same runs are scored
+#                    by the registered custom evaluators in Foundry, so the
+#                    results live in the project rather than only in a CI
+#                    artifact. GitHub still does the scheduling; Foundry does
+#                    the scoring and keeps the history.
+#
+#   judged sample    weekly, on the same freshly exported traces. LLM-judged
+#                    evaluators over a sample. Never per-commit: judges are
+#                    slow and the scores wobble. See docs/FOUNDRY.md.
 #
 # The trace jobs gate on DELTA, not absolute pass rates. Known failures stay
 # failing without blocking unrelated work; a regression, or a check that stops
@@ -198,11 +202,35 @@ jobs:
               --baseline baselines/full-triage-2026-09-16.json \
               --json "artifacts/drift-$(date -u +%Y%m%dT%H%M%SZ).json"
 
-      # Sampled, not swept: judged evaluation costs inference per row, so this
-      # runs weekly, never per-commit. The judge deployment is pinned per
-      # environment — changing it invalidates comparison with every earlier
-      # run, exactly like changing a baseline. See docs/FOUNDRY.md.
-      - name: Judge a sample and upload to Foundry
+      # The same runs, scored by the registered evaluators in Foundry, so the
+      # results live in the project rather than only in this artifact zip.
+      # The dataset is built here rather than read from azure_ai_traces
+      # because that path sees only invoke_agent spans and so has no tool
+      # results — see docs/FOUNDRY.md.
+      #
+      # Versions are pinned from evaluator-versions.json. An unpinned run
+      # floats to whatever was registered last, and then a "regression" may
+      # just be a re-registration.
+      - name: Build the Foundry dataset
+        run: |
+          python to_foundry_dataset.py artifacts/spans.json \
+              --expected expected.json \
+              --tool-defs tool_manifests/ \
+              --no-messages \
+              -o artifacts/foundry-dataset.jsonl
+
+      - name: Score it in Foundry
+        run: |
+          python run_cloud_eval.py artifacts/foundry-dataset.jsonl \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --name "drift-${{ matrix.environment }}" \
+              --dataset-version "$(date -u +%Y%m%dT%H%M%SZ)" \
+              --wait
+
+      # Judged evaluators are slow and their scores wobble, so they run
+      # weekly over a sample rather than nightly over everything.
+      - name: Judge a sample
         if: >-
           github.event.schedule == '0 7 * * 1'
           || github.event.inputs.judged == 'true'

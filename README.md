@@ -1,20 +1,18 @@
 # Triage Automation Evals
 
 Deterministic evaluation of the ConnectWise triage agents, scored from
-recorded traces.
+recorded traces, locally and in Microsoft Foundry.
 
 Four Foundry agents propose and execute changes to support tickets. Before
 pushing more autonomy to production we need to know whether they are behaving
-well, and to be able to tell when a change makes them worse. The evaluation
-that existed before this was an LLM reading the workflow output with no
-reference and declaring it good. This replaces that with checks that read what
-the tools actually returned.
+well, and to tell when a change makes them worse. The evaluation that existed
+before this was an LLM reading the workflow output with no reference and
+declaring it good. This replaces that with checks that read what the tools
+actually returned.
 
-`docs/HANDOFF.md` is the full engineering context: what is not built, why the
-design is what it is, and where this sits against industry practice. Read it
-before changing anything structural.
+---
 
-## Runs are not repeatable — this is the central constraint
+## The constraint everything follows from
 
 The agents mutate the ticket they operate on, and `connectwise-operations-agent`
 writes to a system of record. Re-running a triage produces different results
@@ -22,197 +20,291 @@ because the first run already changed the data.
 
 **Never point an evaluator at a live agent against production ConnectWise.**
 
-What that rules out is re-running agents against production. It does not rule
-out replaying them against **recorded tool output**: `make_cassette.py` and
-`replay_server.py` serve an agent the exact responses the recorded run got,
-performing no writes and making no ConnectWise request. See `docs/REPLAY.md`.
+That rules out re-running agents against production. It does not rule out
+replaying them against *recorded tool output* — see
+[Cassette replay](#cassette-replay-built-not-wired). Exactly one thing in this
+repo invokes agents at all: `staging-replay.yml`, pinned to the test project
+and the dev instance.
 
-Only one thing in this repo invokes agents at all — `staging-replay.yml`,
-pinned to the test project and the dev ConnectWise instance. Everything else
-touches nothing.
+---
 
 ## Quickstart
 
-Nothing to install for the frozen sets — the converter and the scorer are
-stdlib-only.
-
-```bash
-make test        # unit tests + replay both frozen sets against their baselines
-make evals       # score the known-good set
-make evals-ops   # score the known-bad set
-```
-
-By hand:
-
 ```powershell
-python3 trace_to_eval.py traces/2026-09-03-full-triage.csv -o out --tool-defs tool_manifests/
-python3 run_evals.py out/eval_runs.jsonl --expected expected.json --baseline baselines/full-triage-2026-09-16.json --json artifacts/run.json
+python -m pytest tests/ -q                          # 228 tests, offline
+python trace_to_eval.py traces/2026-09-03-full-triage.json -o out
+python run_evals.py out/eval_runs.jsonl --expected expected.json
 ```
 
-**This project is developed on Windows.** Use `python`, not `python3`, and
-note that PowerShell's line-continuation character is a backtick `` ` ``, not
-a backslash — every command in these docs is written on one line to avoid it.
+Developed on **Windows**: use `python`, not `python3`. PowerShell's line
+continuation is a backtick, so commands here are written on one line. `make`
+targets assume a POSIX shell — use WSL or run the commands directly.
 
-`make` targets assume a POSIX shell. On Windows run the commands directly, or
-use WSL / Git Bash.
+The converter and the scorer are stdlib-only on purpose: scoring a frozen
+trace set must need nothing installed. Only the Azure-facing scripts need
+`pip install -r requirements.txt`.
 
-Only `export_traces.py` needs dependencies: `pip install -r requirements.txt`.
+---
 
-## Layout
+## What each piece does
 
-```
-export_traces.py          Log Analytics -> raw spans, unattended (for CI)
-trace_to_eval.py          raw spans -> eval_runs.jsonl, one row per agent run
-run_evals.py              scoring, reporting, baseline diff
-fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
-extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
-submit_to_foundry.py      the same dataset through the Foundry judged evaluators
-to_foundry_dataset.py     a trace -> a Foundry evaluation dataset
-register_evaluators.py    publish the checks to the Foundry evaluator catalog
-run_cloud_eval.py         upload the dataset and run them in Foundry
-check_cloud_eval.py       wait for a run and diff its scores against local
-foundry_evaluators/       the checks as code-based evaluators (uploaded)
-scrub_trace.py            redact customer data before committing a trace
-make_cassette.py          a recorded trace -> a replay cassette
-replay_server.py          an MCP server answering from a cassette; no writes
+### Local pipeline
 
-expected.json             ground-truth trajectories, keyed "<agent>|<intent>"
-baselines/                frozen results — COMMIT THESE
-traces/                   raw exports, dated, committed
-replay/                   dev-instance tickets re-triaged in staging
-tool_manifests/           MCP tool schemas (empty — see below)
-tests/                    unit tests + frozen-set replay
-docs/HANDOFF.md           full engineering context
-docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
-docs/REPLAY.md            stubbing the tools with recorded output
-docs/REPO-BOUNDARY.md     why the agents live in a different repo
-docs/TELEMETRY.md         where the content lives, and the 2026-09-30 change
-```
+| Script | Does |
+|---|---|
+| `export_traces.py` | Log Analytics → raw spans. Joins `AppGenAIContent` for the payloads (see [Telemetry](#telemetry)). |
+| `trace_to_eval.py` | spans → one JSONL row per **AI Run** (one agent's execution) |
+| `run_evals.py` | scores the eight checks, diffs against a frozen baseline, sets the exit code |
+| `scrub_trace.py` | redacts customer data before a trace is committed |
 
-The Foundry agents live in a **separate repo**. Anything that can change what
-an agent does belongs there; anything that only measures belongs here. See
-`docs/REPO-BOUNDARY.md`.
+### Foundry
 
-`expected.json` and `baselines/` are the real assets. The scripts are
-replaceable; the curated expectations and the frozen results are not.
+| Script | Does |
+|---|---|
+| `to_foundry_dataset.py` | trace → Foundry evaluation dataset |
+| `register_evaluators.py` | publishes the checks to the evaluator catalog, writes the version lock |
+| `run_cloud_eval.py` | uploads the dataset, creates the eval and run, pins versions |
+| `check_cloud_eval.py` | waits for a run, fetches scores, diffs them against local |
+| `submit_to_foundry.py` | the judged evaluators (Task Adherence, Intent Resolution) over a sample |
+| `diagnose_schema.py` | probes what the datasource validator accepts |
 
-## The pipeline
+### Tool manifests
 
-```
-Log Analytics                  export_traces.py    (lag mode, or explicit ids)
-  |  raw dependency spans, customDimensions intact
-  v
-trace_to_eval.py               one JSONL row per AI Run
-  |  + tool_manifests/, matched on the run's MCP toolbox version
-  v
-run_evals.py                   deterministic checks, baseline diff, exit code
-```
+| Script | Does |
+|---|---|
+| `fetch_tool_manifest.py` | `tools/list` against a Foundry toolbox → a manifest |
+| `extract_tool_manifest.py` | a manifest from a `tools/list` dump, or a skeleton from a trace |
 
-An **AI Run** is one agent's execution. `operation_Id` is one orchestration;
-each distinct `gen_ai.agent.name` inside it is a run.
+### Cassette replay (built, not wired)
 
-## Checks
+| Script | Does |
+|---|---|
+| `make_cassette.py` | a recorded trace → a replay cassette |
+| `replay_server.py` | an MCP server answering from a cassette. No ConnectWise request, no writes. |
 
-| Check | Gating | What it catches |
+---
+
+## The checks
+
+| Check | Gating | Catches |
 |---|---|---|
-| `no_wasted_calls` | **yes** | Calls that could not have succeeded: `missing_script`, `invalid_reference_type`, `invalid_entity`, `invalid_projection_field`, `empty_failed` |
-| `valid_tool_args` | **yes** | Arguments that violate the tool's own schema — required, type, enum, unexpected. Generated from `tool_manifests/`, skips cleanly without one. |
-| `no_dead_ends` | **yes** | Succeeded but returned nothing. The hallucinated-entity signal. |
-| `trajectory` | **yes** | In-order match vs ground truth, extras allowed. Reports precision / recall / F1. |
-| `no_tool_errors` | info | Any error. Too broad to gate — a legitimately empty result is not a defect. |
-| `no_search_cascade` | info | Four or more consecutive fruitless calls to one tool. Distinct from one bad call, and it burns the most time. |
-| `no_truncation` | info | Results at exactly 8192 chars, cut mid-payload. Telemetry problem, not model. A truncated *skill* is called out separately — incomplete rules, not incomplete data. |
-| `cost_latency` | info | Tokens and wall clock. **Tracked always, gated only if you set `--max-tokens` / `--max-duration-ms`.** |
-| `evaluator_ready` | info | Would Foundry evaluators accept this run. Dataset readiness. |
+| `no_wasted_calls` | **yes** | calls that could not have succeeded: `missing_script`, `invalid_reference_type`, `invalid_entity`, `invalid_projection_field`, `empty_failed` |
+| `valid_tool_args` | **yes** | arguments violating the tool's own JSON schema. Generated from `tool_manifests/`; skips without one. |
+| `no_dead_ends` | **yes** | succeeded but returned nothing — the hallucinated-entity signal |
+| `trajectory` | **yes** | in-order match vs ground truth, extras allowed |
+| `no_tool_errors` | info | any error. Too broad to gate. |
+| `no_search_cascade` | info | four or more consecutive fruitless calls to one tool |
+| `no_truncation` | info | results cut at exactly 8192 chars |
+| `cost_latency` | info | tokens and wall clock. Tracked always, gated only with `--max-tokens` / `--max-duration-ms`. |
 
 Adding one is a function returning `_pass()`, `_fail(reason)` or
-`_skip(reason)`, registered in the `CHECKS` dict in `run_evals.py`. `_skip`
-keeps a run out of the denominator so a missing expectation does not read as a
-failure. Move checks between gating and informational as you learn what is
-actionable.
+`_skip(reason)`, registered in `CHECKS` in `run_evals.py`, plus a `grade_*` in
+`foundry_evaluators/checks.py` if it should also run in Foundry.
 
 Keep check *logic* as code and check *expectations* as data. Do not build a
-generic "evaluate any agent" framework; that ends as abstraction fitting
-nothing with a config language nobody reads.
+generic "evaluate any agent" framework.
 
-## Exit codes
+### Exit codes
 
 - **Without `--baseline`** — any gating failure exits 1.
 - **With `--baseline`** — only a *regression* exits 1, plus **lost coverage**:
   a check that produced a verdict in the baseline and now skips. That case
-  looks like silence rather than a failure, and it is how the intent-keying
-  break went unnoticed.
+  looks like silence rather than failure, and it is how an earlier
+  intent-keying break went unnoticed.
 
-The second is the CI mode. Gate on delta while known issues are open, or the
-suite is red permanently and people route around it.
+---
 
-## Branch to Foundry project
+## Running it
 
-| Branch | Environment | Project | Invokes agents? |
-|---|---|---|---|
-| any | — | none | no — frozen sets only |
-| `staging` | `staging` | `automation-solutions-test` | **yes**, via `staging-replay.yml` |
-| `main` | `prod` | `automation-solutions` | **never** |
+### Automatic
 
-Cassette replay (`docs/REPLAY.md`) invokes no agents from this repo and touches
-no ConnectWise at all, so it is safe to build from production traces on any
-branch.
-
-There is no production replay and there must not be: invoking agents re-triages
-real tickets and the ops agent writes to the system of record. Production is
-evaluated from recorded traces only. Full detail, plus judge model choice, in
-`docs/FOUNDRY.md`.
-
-## What is not built
-
-| Gap | Blocks | Where |
+| When | What | Touches Foundry |
 |---|---|---|
-| **MCP tool manifest** | 3 Foundry evaluators, generated arg validation | `tool_manifests/README.md`. Plumbing and two extraction paths are done; the schemas are not. Try `AIAgentConverter` first — it may close this outright. |
-| **Dataverse loading on the new pipeline** | All outcome evaluation | Handoff §8. Has lead time; nothing about outcome quality is answerable until it has been running a while. |
-| `replay/` ticket ids | The staging agent-change gate | `replay/README.md` — the workflow is written, the dev ticket ids are placeholders. |
-| Cost / latency budgets | Gating on spend | Tracked now; set `--max-tokens` / `--max-duration-ms` once you know what normal looks like. |
-| Skill versions | "Which rules were in force" across versions | `load_skill` returns no version. Hashing is the workaround; the fix is agent-side. |
-| Intent on the ops hand-off | Intent-keyed expectations for the ops agent | The orchestrator hands it a JSON write plan with no `intent=`, so those runs key on the bare agent name. |
+| every push / PR | `frozen-sets` — committed traces vs committed baselines | no |
+| nightly 06:00 UTC | `drift` — export → convert → score → **score in Foundry** | yes |
+| Monday 07:00 UTC | the above plus the judged sample | yes |
+| push to `staging` touching `replay/**` | `staging-replay` — **invokes agents** in the test project | yes |
+
+GitHub Actions does the scheduling; Foundry does the scoring and keeps the
+history.
+
+### By hand
+
+```powershell
+# register once, and after any change to foundry_evaluators/
+python register_evaluators.py --project-endpoint $env:AZURE_AI_PROJECT_ENDPOINT --model-deployment $env:AZURE_JUDGE_DEPLOYMENT
+
+# build the dataset and score it
+python to_foundry_dataset.py traces/2026-09-03-full-triage.json --expected expected.json --tool-defs tool_manifests/ --no-messages -o artifacts/foundry-dataset.jsonl
+python run_cloud_eval.py artifacts/foundry-dataset.jsonl --name full-triage --dataset-version 2026-09-17 --wait --trace traces/2026-09-03-full-triage.json
+```
+
+### Adding a trace to the frozen set
+
+```powershell
+python export_traces.py --workspace $LAW_ID --operation-ids <ids> --since <date> -o traces/raw.json
+python scrub_trace.py traces/raw.json --learn redact.json
+#   REVIEW redact.json by hand — delete ConnectWise vocabulary, add identities
+$env:SCRUB_SALT = "<a secret you do not commit>"
+python scrub_trace.py traces/raw.json --redact-file redact.json -o traces/<date>-<name>.json --verify
+python trace_to_eval.py traces/<date>-<name>.json -o out
+python run_evals.py out/eval_runs.jsonl --expected expected.json --json baselines/<name>-<date>.json
+```
+
+**Never commit a raw export.** See [Scrubbing](#scrubbing).
+
+### Promoting a baseline
+
+When a change legitimately improves things, the new results become the
+baseline. Commit it **in the same commit as the change that caused it**, along
+with `evaluator-versions.json`, so the history explains itself.
+
+---
+
+## Where everything is stored
+
+| What | Where | Retention |
+|---|---|---|
+| Traces, scrubbed | git — `traces/` | forever |
+| Ground truth | git — `expected.json` | forever |
+| Frozen baselines | git — `baselines/` | forever |
+| Evaluator source | git — `foundry_evaluators/` | forever |
+| Evaluator version lock | git — `evaluator-versions.json` | forever |
+| Registered evaluators | **Foundry** — evaluator catalog | versioned |
+| Evaluation datasets | **Foundry** — `triage-eval-runs` | versioned |
+| Runs and scores | **Foundry** — portal history | project retention |
+| Raw telemetry | App Insights + `AppGenAIContent` | 90 days |
+| CI artifacts | GitHub Actions | 90 days |
+| Redaction lists, the salt, cassettes, `out/`, `skills/` | **nowhere** — gitignored, local only | — |
+
+The redaction list is a catalogue of exactly the customer data you removed.
+Keep it and the salt outside the repo.
+
+---
+
+## Telemetry
+
+**From 2026-09-30 the seven `gen_ai.*` content attributes stop being written
+into the span tables** — only a pointer remains, and the values live in
+`AppGenAIContent`. A span-only export after that date looks well-formed and
+contains no content.
+
+`export_traces.py` joins that table by default. It needs **Privileged
+Monitoring Data Reader** on top of Log Analytics Reader. Reading from
+`AppGenAIContent` also avoids the 8192-character property cap, which is what
+truncated `cw_query` results in the original traces.
+
+Full detail in [`docs/TELEMETRY.md`](docs/TELEMETRY.md).
+
+---
+
+## Scrubbing
+
+`protectGenAISensitiveData` restricts tool content to Privileged Monitoring
+Data Reader. Committing a raw export replaces that with "has repo access",
+permanently, in git history. The September traces carry **67 real e-mail
+addresses**, contact and company names, a site address and phone numbers.
+
+Two steps on purpose — an automatic sweep fails both ways, silently:
+
+- **under-redaction:** key-based redaction left 663 of 675 occurrences of one
+  contact name. Almost none of it is in a structured field.
+- **over-redaction:** an auto-sweep learned `Priority 4` and `AI Triage
+  Complete` as entities. Sweeping a status rewrites the trajectory and the
+  frozen set stops matching.
+
+`--verify` scores the trace before and after and fails if any check verdict
+differs. The scrubber refuses a list containing the intent enum, the agent
+names, or ConnectWise status vocabulary.
+
+---
+
+## Foundry
+
+The checks are registered as versioned code-based evaluators, so they sit in
+the catalog beside Microsoft's, apply to any agent on the same tool surface,
+and can run in continuous evaluation.
+
+**The dataset is built here rather than read from `azure_ai_traces`**, because
+that path reads only `invoke_agent` spans, and those carry `tool_call` but no
+`tool_result`. Four of the eight checks read results.
+
+**What the port costs:** a code-based evaluator returns one float, 0.0–1.0, in
+a sandbox with no network. `run_evals.py` returns a verdict *and* a reason —
+"4 avoidable call(s): empty_failedx2, missing_scriptx1" — and a score cannot
+say why. So `run_evals.py` stays as the local gate that explains itself and as
+the baseline-diff regression gate, which Foundry has no equivalent for.
+
+Fidelity is tested: both frozen trace sets are scored with `run_evals.py` and
+with the ported functions and every comparable verdict must match — **56
+verdicts, 0 mismatches**.
+
+Full detail, including the eight payload rejections it took to get a run
+through, in [`docs/FOUNDRY.md`](docs/FOUNDRY.md).
+
+---
 
 ## Gotchas
 
 - **The export must keep `customDimensions` intact.** A flattening projection
   strips every `gen_ai.*` attribute.
-- **JSON export is safer than CSV.** CSV escaping of `customDimensions` has
-  caused parse failures.
-- **Adding an agent means updating `AGENT_NAMES` in `trace_to_eval.py`**, or
+- **Adding an agent means updating `AGENT_NAMES`** in `trace_to_eval.py`, or
   its runs silently collapse into the caller's trajectory.
 - **Every MCP call emits two spans** — `execute_tool <x>` carries the payload,
   `tools/call <x>` is empty, and both set
   `gen_ai.operation.name = execute_tool`. Filter on the span *name*.
-- **Grouping is by `gen_ai.agent.name`, not the span tree.** A child agent's
-  spans hang off a parent id outside the caller's subtree.
+- **Grouping is by `gen_ai.agent.name`, not the span tree.**
 - **`invoke_agent` spans carry a roll-up of token usage.** Counting them and
   the chat spans doubles every figure.
-- **App Insights property cap is 8192 chars**, which is what truncates
-  `cw_query` results in the committed traces. Reading the payload from
-  `AppGenAIContent` instead of the span property bag avoids it — those are
-  real columns, not property-bag entries. See `docs/TELEMETRY.md`.
-- **From 2026-09-30 the seven `gen_ai.*` content attributes are no longer
-  written into the span tables** — only a pointer remains. A span-only export
-  is empty of content after that date.
-- **Foundry Traces retains 90 days**; Dataverse rows are permanent.
-
-- **`load_skill` returns no version** — only `name` and `description` in the
-  frontmatter. Content hash is the only identity a historical run has, and a
-  truncated body hashes to the truncation rather than the skill.
-- **`ToolCallAccuracyEvaluator` returns _pass_ for tool types it does not
-  support.** Never let it be the gate. See `docs/FOUNDRY.md`.
+- **`load_skill` returns no version** — only `name` and `description`
+  frontmatter. Content hash is the only identity a historical run has.
+- **A nested object cannot hold a non-string value** in a Foundry evaluation
+  dataset, whatever the schema declares. Arrays are fine.
+- **`ToolCallAccuracyEvaluator` returns _pass_ for tool types it cannot read.**
+  Never let it be the gate.
+- **The toolbox version in a span URL is a binding revision**, not a schema
+  version.
 
 `tests/` locks in every one of these. If you are about to simplify one away,
 reproduce the case in a trace first.
 
-## Environment
+---
 
-- App Insights: `automation-solutions-resource-appinsights` (rg `Verve-CopilotCapacity`)
-- Foundry project: `automation-solutions`
-- MCP toolbox: `ConnectwiseMCP`. The number in the toolbox URL is a **binding
-  revision**, not a schema version — the ops agent shows v1 and the analysis
-  agent v5 for the same toolbox, with byte-identical tool descriptions. A
-  manifest normally declares `"versions": ["*"]`.
-- Content recording is **ON**
+## Repository layout
+
+```
+export_traces.py  trace_to_eval.py  run_evals.py      the local pipeline
+scrub_trace.py                                        redaction before commit
+to_foundry_dataset.py  register_evaluators.py
+run_cloud_eval.py  check_cloud_eval.py                the Foundry path
+foundry_evaluators/                                   the checks, as uploaded
+make_cassette.py  replay_server.py                    record/replay stub
+fetch_tool_manifest.py  extract_tool_manifest.py      tool schemas
+
+expected.json             ground truth, keyed "<agent>|<intent>"
+evaluator-versions.json   the registered versions a run pins
+baselines/                frozen results — COMMIT THESE
+traces/                   raw exports, dated, scrubbed, committed
+tool_manifests/           MCP tool schemas — EMPTY, see below
+replay/                   dev tickets for the staging replay
+tests/                    unit tests + frozen-set replay
+docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY
+```
+
+The Foundry agents live in a **separate repo**. Anything that can change what
+an agent does belongs there; anything that only measures belongs here. See
+[`docs/REPO-BOUNDARY.md`](docs/REPO-BOUNDARY.md).
+
+---
+
+## What is not done
+
+| Gap | Blocks | Where |
+|---|---|---|
+| **`tool_manifests/` is empty** | `valid_tool_args` scores 1.0 vacuously on 5 of 7 rows — green without checking anything | `tool_manifests/README.md` |
+| **Dataverse loading** | all outcome evaluation. Every check is process quality; a run can pass all eight having proposed the wrong company. | handoff §8 |
+| Cassette replay has no driver | the deterministic agent-change gate | `docs/REPLAY.md` |
+| `replay/` ticket ids | the staging replay | `replay/README.md` |
+| Cost / latency budgets | gating on spend | set `--max-tokens` |
+| Skill versions | "which rules were in force" across versions | `load_skill` returns no version |
+| Intent on the ops hand-off | intent-keyed expectations for the ops agent | the orchestrator sends a JSON write plan with no `intent=` |
