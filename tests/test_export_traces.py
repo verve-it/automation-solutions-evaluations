@@ -120,3 +120,30 @@ def test_datetimes_are_serialised_for_the_converter():
 
 def test_dict_custom_dimensions_survive_unchanged():
     assert x._jsonable({"gen_ai.agent.name": "a"}) == {"gen_ai.agent.name": "a"}
+
+
+# --- AppGenAIContent join ---------------------------------------------------
+
+def test_spans_query_joins_the_content_table_by_default():
+    q = x.spans_query("AppDependencies", ["abc"])
+    assert "AppGenAIContent" in q
+    assert "ToolCallResult" in q and "ToolDefinitions" in q
+    assert "$left.id == $right.SpanId" in q
+
+
+def test_content_join_can_be_disabled():
+    q = x.spans_query("AppDependencies", ["abc"], content=False)
+    assert "AppGenAIContent" not in q
+
+
+def test_join_is_leftouter_so_spans_without_content_survive():
+    """Most spans carry no gen_ai content at all; an inner join would drop
+    them and lose the trajectory."""
+    assert "kind=leftouter" in x.spans_query("dependencies", ["abc"])
+
+
+def test_content_join_projects_every_column_the_converter_merges():
+    import trace_to_eval
+    q = x.spans_query("dependencies", ["abc"])
+    for column in trace_to_eval.CONTENT_COLUMNS:
+        assert column in q, f"{column} missing from the export projection"

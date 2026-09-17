@@ -354,3 +354,69 @@ def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
     assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
     index = json.loads((tmp_path / "index.json").read_text())
     assert [v["skill_name"] for v in index.values()] == ["ok"]
+
+
+# --- AppGenAIContent migration ---------------------------------------------
+
+def test_content_columns_override_the_property_bag():
+    """From 2026-09-30 the span tables carry a pointer, not the payload, so
+    the AppGenAIContent column is the only real source."""
+    row = {"customDimensions": json.dumps({t.K_TOOL_RES: "pointer:abc"}),
+           "c_tool_result": '{"count": 3}'}
+    merged = t.merge_content_columns(row, t._as_dict(row["customDimensions"]))
+    assert merged[t.K_TOOL_RES] == '{"count": 3}'
+
+
+def test_content_columns_undo_the_8192_truncation():
+    """ToolCallResult is a real column, not a property-bag entry, so the
+    App Insights property cap never applied to it."""
+    truncated = "x" * t.TRUNC_BOUNDARY
+    full = "x" * 20000
+    row = {"customDimensions": json.dumps({t.K_TOOL_RES: truncated}),
+           "c_tool_result": full}
+    merged = t.merge_content_columns(row, t._as_dict(row["customDimensions"]))
+    assert len(merged[t.K_TOOL_RES]) == 20000
+
+
+def test_an_empty_content_column_leaves_the_property_bag_alone():
+    """During the dual-write window a span may have the value inline and no
+    joined row; the leftouter join then yields empty columns."""
+    row = {"c_tool_result": "", "c_input": None}
+    merged = t.merge_content_columns(row, {t.K_TOOL_RES: "inline value"})
+    assert merged[t.K_TOOL_RES] == "inline value"
+
+
+def test_every_sensitive_attribute_has_a_column_mapping():
+    """The seven attributes App Insights moves to AppGenAIContent. Six are
+    consumed here; gen_ai.evaluation.explanation is not read by any check."""
+    assert set(t.CONTENT_COLUMNS.values()) == {
+        t.K_IN_MSGS, t.K_OUT_MSGS, t.K_SYS,
+        t.K_TOOL_DEFS, t.K_TOOL_ARGS, t.K_TOOL_RES,
+    }
+
+
+def test_a_full_row_with_content_columns_converts_normally():
+    rows = [{
+        "timestamp [UTC]": "9/3/2026, 5:29:42.893 PM",
+        "name": "execute_tool cw_query",
+        "id": "s1", "operation_Id": "op1", "operation_ParentId": "",
+        "duration": "10", "success": "True",
+        "customDimensions": json.dumps({
+            "gen_ai.agent.name": "triage-analysis-agent",
+            "gen_ai.tool.name": "cw_query",
+            "_MS.GenAIContentId": "abc",
+        }),
+        "c_tool_args": '{"entity": "service/tickets"}',
+        "c_tool_result": '{"count": 0}',
+    }]
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(rows, fh)
+    try:
+        spans = t.load_spans(path)
+        runs, _, _ = t.convert(spans)
+    finally:
+        os.unlink(path)
+    assert runs[0]["tool_names"] == ["cw_query"]
+    assert runs[0]["empty_results"], "dead end should be detected from the column"

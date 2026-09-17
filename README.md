@@ -44,16 +44,17 @@ make evals-ops   # score the known-bad set
 
 By hand:
 
-```bash
-python3 trace_to_eval.py traces/2026-09-03-full-triage.csv -o out \
-    --tool-defs tool_manifests/
-python3 run_evals.py out/eval_runs.jsonl \
-    --expected expected.json \
-    --baseline baselines/full-triage-2026-09-16.json \
-    --json artifacts/run.json
+```powershell
+python3 trace_to_eval.py traces/2026-09-03-full-triage.csv -o out --tool-defs tool_manifests/
+python3 run_evals.py out/eval_runs.jsonl --expected expected.json --baseline baselines/full-triage-2026-09-16.json --json artifacts/run.json
 ```
 
-`python` not `python3` on Windows.
+**This project is developed on Windows.** Use `python`, not `python3`, and
+note that PowerShell's line-continuation character is a backtick `` ` ``, not
+a backslash — every command in these docs is written on one line to avoid it.
+
+`make` targets assume a POSIX shell. On Windows run the commands directly, or
+use WSL / Git Bash.
 
 Only `export_traces.py` needs dependencies: `pip install -r requirements.txt`.
 
@@ -66,6 +67,7 @@ run_evals.py              scoring, reporting, baseline diff
 fetch_tool_manifest.py    tools/list against a Foundry toolbox -> a manifest
 extract_tool_manifest.py  a manifest from a tools/list dump, or a trace skeleton
 submit_to_foundry.py      the same dataset through the Foundry judged evaluators
+scrub_trace.py            redact customer data before committing a trace
 make_cassette.py          a recorded trace -> a replay cassette
 replay_server.py          an MCP server answering from a cassette; no writes
 
@@ -79,6 +81,7 @@ docs/HANDOFF.md           full engineering context
 docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
 docs/REPLAY.md            stubbing the tools with recorded output
 docs/REPO-BOUNDARY.md     why the agents live in a different repo
+docs/TELEMETRY.md         where the content lives, and the 2026-09-30 change
 ```
 
 The Foundry agents live in a **separate repo**. Anything that can change what
@@ -181,9 +184,13 @@ evaluated from recorded traces only. Full detail, plus judge model choice, in
   spans hang off a parent id outside the caller's subtree.
 - **`invoke_agent` spans carry a roll-up of token usage.** Counting them and
   the chat spans doubles every figure.
-- **App Insights property cap is 8192 chars.** `gen_ai.*` attributes are
-  largely exempt (59,270 observed) but some paths still truncate at exactly
-  8192 — treat `res_len == 8192` as suspect.
+- **App Insights property cap is 8192 chars**, which is what truncates
+  `cw_query` results in the committed traces. Reading the payload from
+  `AppGenAIContent` instead of the span property bag avoids it — those are
+  real columns, not property-bag entries. See `docs/TELEMETRY.md`.
+- **From 2026-09-30 the seven `gen_ai.*` content attributes are no longer
+  written into the span tables** — only a pointer remains. A span-only export
+  is empty of content after that date.
 - **Foundry Traces retains 90 days**; Dataverse rows are permanent.
 
 - **`load_skill` returns no version** — only `name` and `description` in the

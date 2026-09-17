@@ -155,8 +155,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Federated credential, no client secret. The identity needs Log
-      # Analytics Reader on that environment's workspace.
+      # Federated credential, no client secret. The identity needs BOTH:
+      #   Log Analytics Reader            — the span tables
+      #   Privileged Monitoring Data Reader — AppGenAIContent
+      # The second is new. Without it the export returns spans with no
+      # gen_ai.* content and every check scores an empty run.
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
