@@ -61,10 +61,9 @@ production. Every call is answered from the recording. No ConnectWise request
 is made and no write is performed — a write returns the response the real
 write returned.
 
-```bash
+```powershell
 python3 make_cassette.py traces/2026-09-15-ops-worst-case.csv -o cassettes/
-python3 replay_server.py cassettes/2026-09-15-73d29f4c3a13.json \
-    --tool-defs tool_manifests/ --journal artifacts/replay-journal.json
+python3 replay_server.py cassettes/2026-09-15-73d29f4c3a13.json --tool-defs tool_manifests/ --journal artifacts/replay-journal.json
 ```
 
 ### Ordered, not a dictionary

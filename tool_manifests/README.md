@@ -26,9 +26,8 @@ Every `cw_resolve` failure in the baseline would have been caught this way. To
 see that with your own eyes, run the known-bad set against the hand-written
 test fixture:
 
-```bash
-python3 trace_to_eval.py traces/2026-09-15-ops-worst-case.csv -o out-ops \
-    --tool-defs tests/fixtures/connectwisemcp-v1-partial.json
+```powershell
+python3 trace_to_eval.py traces/2026-09-15-ops-worst-case.csv -o out-ops --tool-defs tests/fixtures/connectwisemcp-v1-partial.json
 python3 run_evals.py out-ops/eval_runs.jsonl --expected expected.json
 ```
 
@@ -56,12 +55,8 @@ traces — it is the span name of every MCP call:
 POST /api/projects/automation-solutions/toolboxes/ConnectwiseMCP/versions/5/mcp
 ```
 
-```bash
-python3 fetch_tool_manifest.py \
-    --host https://<your-foundry-host> \
-    --project automation-solutions \
-    --toolbox ConnectwiseMCP \
-    -o tool_manifests/connectwisemcp.json
+```powershell
+python3 fetch_tool_manifest.py --host https://<your-foundry-host> --project automation-solutions --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
 `az login` first, or paste a token with `--token`. `--print-url` shows the
@@ -69,9 +64,8 @@ endpoint without calling it.
 
 **2. From a `tools/list` dump or portal export:**
 
-```bash
-python3 extract_tool_manifest.py --from-tools-list tools-list.json \
-    --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
+```powershell
+python3 extract_tool_manifest.py --from-tools-list tools-list.json --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
 **3. A skeleton from the traces, in the meantime** — every tool the agents

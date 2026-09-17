@@ -127,6 +127,11 @@ Set on the GitHub environment (`staging` and `prod`), not repo-wide:
 | `DEFAULT_BASELINE_AGENT_ID` | var | `staging` only, optional: the version to compare against |
 | `LOG_ANALYTICS_WORKSPACE_ID` | secret | that project's App Insights workspace |
 
+The identity needs **Log Analytics Reader** *and* **Privileged Monitoring Data
+Reader**. The second is required to read `AppGenAIContent` — see
+`docs/TELEMETRY.md`. Without it the export succeeds and returns spans with no
+`gen_ai.*` content, and every check scores an empty run.
+
 Add a required reviewer on the `prod` environment if you want a human in the
 loop before anything touches it, and give each environment its own app
 registration — then a mistake in a staging workflow physically cannot reach

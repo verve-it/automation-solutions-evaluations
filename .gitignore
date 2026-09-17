@@ -7,6 +7,13 @@ artifacts/
 # Commit it only if you need the bodies without the traces to hand.
 skills/
 
+# Redaction lists are a catalogue of exactly the customer data we are
+# removing — never commit one. Keep them beside the raw export, outside the
+# repo, or in a secret store.
+redact*.json
+reviewed*.json
+*.redactions.json
+
 # Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one
 # only when it backs a gate and the trace it came from is not committed.
 cassettes/
