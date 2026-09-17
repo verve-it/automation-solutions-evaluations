@@ -73,8 +73,12 @@ Judged evaluation is slow and the scores wobble. The split:
 | Branch | GitHub environment | Foundry project | What runs |
 |---|---|---|---|
 | any | — | none | `frozen-sets` — committed traces vs committed baselines. No Azure. |
-| `staging` | `test` | `automation-solutions-test` | `staging-replay` (**invokes agents**), drift, judged sample |
-| `main` | `production` | `automation-solutions` | drift, judged sample. **Never invokes agents.** |
+| `staging` | `staging` | `automation-solutions-test` | `staging-replay` (**invokes agents**), drift, judged sample |
+| `main` | `prod` | `automation-solutions` | drift, judged sample. **Never invokes agents.** |
+
+The branch and the GitHub environment share the name `staging`; `main` maps to
+the `prod` environment. The Foundry projects keep their own names, so the
+`staging` environment points at `automation-solutions-test`.
 
 Everything except the replay reads recorded traces and writes evaluation
 results, which is why `main` can safely target production.
@@ -91,19 +95,47 @@ target from the branch would silently send every nightly run at one project.
 The `plan` job handles that: on a schedule it fans out to both, on a push or
 dispatch it follows the branch, and `workflow_dispatch` can name one.
 
+### What a push actually runs
+
+Pushing this repo does **not** run anything against Foundry. Only `frozen-sets`
+runs on a push, and it is entirely offline — committed traces against committed
+baselines, no Azure, no secrets, no agents.
+
+| Trigger | Runs | Touches Foundry |
+|---|---|---|
+| push / PR, any branch | `frozen-sets` | no |
+| push to `staging` touching `replay/**` | `staging-replay` | **yes — invokes agents in `automation-solutions-test`** |
+| nightly 06:00 UTC | `drift` on **both** environments | reads App Insights |
+| Monday 07:00 UTC | `drift` + judged sample | reads App Insights, calls the judge |
+| manual dispatch | whatever you pick | depends |
+| `repository_dispatch: agent-change` | `staging-replay` | **yes — invokes agents** |
+
+So the branch mapping decides *which project the scheduled and dispatched jobs
+read from*, not what a push does. A push to `main` runs the offline gate and
+nothing else.
+
 ### Variables per environment
 
-Set on the GitHub environment (`test` and `production`), not repo-wide:
+Set on the GitHub environment (`staging` and `prod`), not repo-wide:
 
 | Name | Kind | Example |
 |---|---|---|
 | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | var | federated credential for that project |
 | `AZURE_AI_PROJECT_ENDPOINT` | var | the project endpoint; the replay guard checks this contains `automation-solutions-test` |
 | `AZURE_JUDGE_DEPLOYMENT` | var | the pinned judge deployment — see below |
+| `DEFAULT_AGENT_IDS` | var | `staging` only: `agent-name:version` to replay when a push supplies none |
+| `DEFAULT_BASELINE_AGENT_ID` | var | `staging` only, optional: the version to compare against |
 | `LOG_ANALYTICS_WORKSPACE_ID` | secret | that project's App Insights workspace |
 
-Add a required reviewer on the `production` environment if you want a human in
-the loop before anything touches it.
+Add a required reviewer on the `prod` environment if you want a human in the
+loop before anything touches it, and give each environment its own app
+registration — then a mistake in a staging workflow physically cannot reach
+production. Federated credential subjects:
+
+```
+repo:verve-it/automation-solutions-evaluations:environment:staging
+repo:verve-it/automation-solutions-evaluations:environment:prod
+```
 
 ## Choosing the judge model
 
@@ -151,7 +183,7 @@ industry standard" stops mattering because you have your own answer.
 | For | Needs |
 |---|---|
 | Continuous evaluation | App Insights connected to the Foundry project; the project managed identity holding Foundry User; a `create_agent_evaluation` call per run, so the **agents** call it, not us |
-| `ai-agent-evals` action | The `test` environment's endpoint, a judge deployment, federated credentials, and `replay/` populated with dev ticket ids |
+| `ai-agent-evals` action | The `staging` environment's endpoint, a judge deployment, federated credentials, and `replay/` populated with dev ticket ids |
 | `submit_to_foundry.py` | `azure-ai-evaluation`, a judge deployment, and `tool_manifests/` filled or ToolCallAccuracy is meaningless |
 
 ## Sources

@@ -78,7 +78,12 @@ tests/                    unit tests + frozen-set replay
 docs/HANDOFF.md           full engineering context
 docs/FOUNDRY.md           what Foundry does for us and what we do ourselves
 docs/REPLAY.md            stubbing the tools with recorded output
+docs/REPO-BOUNDARY.md     why the agents live in a different repo
 ```
+
+The Foundry agents live in a **separate repo**. Anything that can change what
+an agent does belongs there; anything that only measures belongs here. See
+`docs/REPO-BOUNDARY.md`.
 
 `expected.json` and `baselines/` are the real assets. The scripts are
 replaceable; the curated expectations and the frozen results are not.
@@ -138,8 +143,8 @@ suite is red permanently and people route around it.
 | Branch | Environment | Project | Invokes agents? |
 |---|---|---|---|
 | any | — | none | no — frozen sets only |
-| `staging` | `test` | `automation-solutions-test` | **yes**, via `staging-replay.yml` |
-| `main` | `production` | `automation-solutions` | **never** |
+| `staging` | `staging` | `automation-solutions-test` | **yes**, via `staging-replay.yml` |
+| `main` | `prod` | `automation-solutions` | **never** |
 
 Cassette replay (`docs/REPLAY.md`) invokes no agents from this repo and touches
 no ConnectWise at all, so it is safe to build from production traces on any

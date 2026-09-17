@@ -1,7 +1,10 @@
 # Branch maps to Foundry project:
 #
-#   staging  ->  automation-solutions-test    (GitHub environment: test)
-#   main     ->  automation-solutions         (GitHub environment: production)
+#   staging branch ->  automation-solutions-test   (GitHub environment: staging)
+#   main branch    ->  automation-solutions        (GitHub environment: prod)
+#
+# The branch and the environment share the name `staging`; `main` maps to
+# `prod`. The Foundry project keeps its own name, automation-solutions-test.
 #
 # Both jobs below score RECORDED traces and upload evaluation results. Neither
 # ever invokes an agent, which is why main can safely target production. The
@@ -48,7 +51,7 @@ on:
       environment:
         description: "Which Foundry project to target"
         type: choice
-        options: [auto, test, production]
+        options: [auto, staging, prod]
         default: auto
       judged:
         description: "Also run the judged sample (costs inference)"
@@ -122,11 +125,11 @@ jobs:
           if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "auto" ]; then
             PICK="[\"$REQUESTED\"]"
           elif [ "$EVENT" = "schedule" ]; then
-            PICK='["test","production"]'
+            PICK='["staging","prod"]'
           elif [ "$REF" = "main" ]; then
-            PICK='["production"]'
+            PICK='["prod"]'
           else
-            PICK='["test"]'
+            PICK='["staging"]'
           fi
           echo "environments=$PICK" >> "$GITHUB_OUTPUT"
           echo "targets: $PICK"

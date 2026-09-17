@@ -27,6 +27,51 @@ a flaky agent from a broken one — for no code. Set `baseline-agent-id` to the
 currently deployed version and the report says whether a change is real or
 noise.
 
+## Which agent do you name?
+
+`agent-ids` is `agent-name:version`, and it must match the **input contract of
+the queries in the data file**.
+
+`full-triage.json` holds **orchestrator-shaped** queries:
+
+```
+entityType=ticket
+entityId=805392
+context=Automated flow: triage ticket and automatically approve writeplan
+```
+
+So `agent-ids` is `triage-orchestrator:<version>`. The orchestrator invokes
+`triage-analysis-agent`, `triage-evaluation-agent` and
+`connectwise-operations-agent` itself — you do not list them, and listing them
+would send each of them an input contract it does not accept.
+
+To evaluate a child agent on its own, give it its own data file with its own
+input shape:
+
+| Agent | Query shape | Data file |
+|---|---|---|
+| `triage-orchestrator` | `entityType=ticket\nentityId=…\ncontext=…` | `full-triage.json` |
+| `triage-analysis-agent` | `intent=Full Triage; ticketId=…; mode=Automation; context=…` | not written yet |
+| `triage-evaluation-agent` | `intent=Write Request; ticketId=…; …` | not written yet |
+| `connectwise-operations-agent` | a JSON write plan | not written yet |
+
+Those shapes come straight from the recorded hand-offs in
+`traces/2026-09-03-full-triage.csv`; copy one and change the ticket id.
+
+Where the version comes from: the Foundry project's agent list. The recorded
+traces carry it as `gen_ai.agent.version` — orchestrator 45, analysis 82,
+evaluation 20, ops 16 at the time of the September traces.
+
+`baseline-agent-id` is the version you are comparing against, normally the one
+currently deployed. With it, the action reports whether a difference is
+statistically significant rather than noise. Without it you get scores but no
+significance test.
+
+Set `DEFAULT_AGENT_IDS` (and optionally `DEFAULT_BASELINE_AGENT_ID`) on the
+`staging` GitHub environment so a push to the `staging` branch has something to
+run against. A dispatch or a `repository_dispatch` from the agents repo
+overrides it.
+
 ## Tickets are single-use
 
 A ticket is only useful once: after the first run it has been triaged, so its
