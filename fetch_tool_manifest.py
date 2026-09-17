@@ -54,8 +54,9 @@ def _token(explicit, scope):
 
 def _post(url, token, payload, session=None):
     body = json.dumps(payload).encode()
-    headers = {"Authorization": f"Bearer {token}",
-               "Content-Type": "application/json", "Accept": ACCEPT}
+    headers = {"Content-Type": "application/json", "Accept": ACCEPT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if session:
         headers["Mcp-Session-Id"] = session
     req = urllib.request.Request(url, data=body, headers=headers,
@@ -108,13 +109,47 @@ def fetch_tools(url, token):
     return reply.get("result", {}).get("tools", [])
 
 
+def fetch_tools_via_sdk(host, project, toolbox, revision):
+    """Let the SDK talk to the toolbox, so it supplies the api-version.
+
+    The raw endpoint rejects a request without `?api-version=`, and guessing
+    the right value is a round-trip each time.
+    """
+    from azure.ai.projects import AIProjectClient
+    from azure.identity import DefaultAzureCredential
+
+    endpoint = f"{host.rstrip('/')}/api/projects/{project}"
+    client = AIProjectClient(endpoint=endpoint,
+                             credential=DefaultAzureCredential())
+    try:
+        box = client.toolboxes.get_version(name=toolbox, version=str(revision))
+    except AttributeError:
+        box = client.toolboxes.get(name=toolbox)
+
+    for attr in ("tools", "tool_definitions", "definitions"):
+        found = getattr(box, attr, None)
+        if found:
+            return [t if isinstance(t, dict) else
+                    getattr(t, "as_dict", lambda: vars(t))() for t in found]
+    raise SystemExit(
+        "the toolbox object carries no tool list under tools / "
+        "tool_definitions / definitions. Its attributes are: "
+        + ", ".join(a for a in dir(box) if not a.startswith("_")))
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", required=True,
+    ap.add_argument("--url",
+                    help="the MCP endpoint directly, skipping the Foundry "
+                         "path. This is what a toolbox actually points at: "
+                         "`toolboxes.get_version` returns the server "
+                         "registration, whose `server_url` is the MCP server "
+                         "itself. Going straight there needs no api-version.")
+    ap.add_argument("--host",
                     help="Foundry host, e.g. https://<resource>.services.ai.azure.com")
-    ap.add_argument("--project", required=True)
+    ap.add_argument("--project")
     ap.add_argument("--toolbox", required=True)
     ap.add_argument("--revision", default="5",
                     help="binding revision from the span URL (default 5); "
@@ -123,20 +158,44 @@ def main():
                     help="comma-separated binding revisions this manifest "
                          "covers. Default '*' — the revision is a binding "
                          "edit counter, not a schema version.")
+    ap.add_argument("--api-version", default="2025-05-01",
+                    help="the data-plane API version. The endpoint rejects a "
+                         "request without one; if this value is wrong the "
+                         "error says so. `--via-sdk` avoids guessing.")
+    ap.add_argument("--via-sdk", action="store_true",
+                    help="use AIProjectClient.toolboxes instead of raw HTTP, "
+                         "so the SDK supplies the api-version")
     ap.add_argument("--scope", default=DEFAULT_SCOPE)
     ap.add_argument("--token", help="bearer token; overrides DefaultAzureCredential")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="send no Authorization header. A toolbox's MCP "
+                         "server may hold its own credentials through the "
+                         "project connection rather than expecting yours.")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--print-url", action="store_true",
                     help="print the endpoint and exit")
     args = ap.parse_args()
 
-    url = (f"{args.host.rstrip('/')}/api/projects/{args.project}"
-           f"/toolboxes/{args.toolbox}/versions/{args.revision}/mcp")
+    if args.url:
+        url = args.url
+    elif args.host and args.project:
+        url = (f"{args.host.rstrip('/')}/api/projects/{args.project}"
+               f"/toolboxes/{args.toolbox}/versions/{args.revision}/mcp"
+               f"?api-version={args.api_version}")
+    else:
+        sys.exit("give --url (the MCP server), or --host and --project. "
+                 "Find the server_url with:\n"
+                 "  toolboxes.get_version(name=<toolbox>, version=<n>).tools")
     if args.print_url:
         print(url)
         return 0
 
-    tools = fetch_tools(url, _token(args.token, args.scope))
+    if args.via_sdk:
+        tools = fetch_tools_via_sdk(args.host, args.project, args.toolbox,
+                                    args.revision)
+    else:
+        token = None if args.no_auth else _token(args.token, args.scope)
+        tools = fetch_tools(url, token)
     manifest = {
         "toolbox": args.toolbox,
         "versions": [v.strip() for v in args.versions.split(",")],

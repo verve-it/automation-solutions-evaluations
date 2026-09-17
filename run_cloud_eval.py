@@ -204,6 +204,28 @@ def main():
     only = set(n.strip() for n in args.only.split(",")) if args.only else None
 
     custom = [n for n in checks.EVALUATORS if not only or n in only]
+
+    # cw_valid_tool_args scores 1.0 when there is no schema to validate
+    # against, and a 1.00 in the portal reads as a clean pass — green without
+    # having checked anything, the same silent-pass shape as ToolCallAccuracy
+    # reporting success for a tool type it cannot read. With no schemas at
+    # all, drop it so its absence is visible; with some, say how many rows
+    # are vacuous so the number is not mistaken for a result.
+    if "cw_valid_tool_args" in custom:
+        with_defs = sum(1 for r in rows if r.get("tool_definitions"))
+        if not with_defs:
+            custom.remove("cw_valid_tool_args")
+            only = set(custom)
+            print("SKIPPING cw_valid_tool_args: no row carries "
+                  "tool_definitions, so it would score 1.0 without "
+                  "validating anything. Fill tool_manifests/ — see "
+                  "tool_manifests/README.md.")
+        elif with_defs < len(rows):
+            print(f"WARNING cw_valid_tool_args has schemas for "
+                  f"{with_defs}/{len(rows)} row(s). The other "
+                  f"{len(rows) - with_defs} will score 1.00 without "
+                  "validating anything — that is missing coverage, not a "
+                  "pass. Fill tool_manifests/.")
     lock = {} if args.no_lock else load_lock(args.lock)
     if lock:
         print("pinned evaluators  : "

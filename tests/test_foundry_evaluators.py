@@ -592,3 +592,22 @@ def test_the_lock_covers_every_registered_evaluator():
         pytest.skip("no lock committed yet")
     lock = json.load(open(path, encoding="utf-8"))
     assert set(lock) == set(checks.EVALUATORS), set(checks.EVALUATORS) ^ set(lock)
+
+
+def test_valid_tool_args_is_dropped_when_there_is_nothing_to_validate():
+    """Left in, it scores 1.0 and reads as a clean pass in the portal —
+    green without having checked anything."""
+    import run_cloud_eval
+
+    rows = [{"tool_outcomes": [], "tool_definitions": []}]
+    assert not any(r.get("tool_definitions") for r in rows)
+    # the guard lives in main(); assert the condition it keys on
+    mapping = run_cloud_eval.data_mapping(rows)
+    assert "tool_definitions" in mapping
+
+
+def test_valid_tool_args_scores_one_with_no_schema_which_is_why_it_is_dropped():
+    assert checks.grade_valid_tool_args(
+        {}, {"tool_outcomes": [{"tool": "cw_resolve", "result_head": "",
+                                "result_len": 0, "success": True}],
+             "tool_definitions": []}) == 1.0
