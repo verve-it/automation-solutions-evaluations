@@ -62,9 +62,9 @@ def test_longest_literal_wins(pseudo):
 
 
 def test_emails_and_phones_go_without_being_declared(pseudo):
-    out = s.sweep("contact eli@verveit.com or 209-244-7120 today", pseudo, None)
-    assert "eli@verveit.com" not in out and "EMAIL_" in out
-    assert "209-244-7120" not in out and "PHONE_" in out
+    out = s.sweep("contact tech@example.com or 555-0100-999 today", pseudo, None)
+    assert "tech@example.com" not in out and "EMAIL_" in out
+    assert "555-0100-999" not in out and "PHONE_" in out
 
 
 def test_sweeping_preserves_json_structure(pseudo):
@@ -123,8 +123,8 @@ def test_a_real_name_survives_the_skill_filter():
 
 def test_emails_are_proposed():
     rows = [row(**{"gen_ai.tool.call.result":
-                   json.dumps({"text": "write to eli@verveit.com"})})]
-    assert s.propose(rows).get("eli@verveit.com") == "EMAIL"
+                   json.dumps({"text": "write to tech@example.com"})})]
+    assert s.propose(rows).get("tech@example.com") == "EMAIL"
 
 
 # --- applying ---------------------------------------------------------------
@@ -198,9 +198,9 @@ def test_a_multiword_name_is_swept_inside_prose(pseudo):
 
 
 def test_emails_keep_working_with_boundaries(pseudo):
-    sweeper = s.build_sweeper({"eli@verveit.com": "EMAIL"}, pseudo)
-    out = s.sweep("write to eli@verveit.com now", pseudo, sweeper)
-    assert "eli@verveit.com" not in out
+    sweeper = s.build_sweeper({"tech@example.com": "EMAIL"}, pseudo)
+    out = s.sweep("write to tech@example.com now", pseudo, sweeper)
+    assert "tech@example.com" not in out
 
 
 def test_a_literal_ending_in_punctuation_still_matches(pseudo):
@@ -236,7 +236,7 @@ def test_a_non_json_payload_is_scanned_for_names_and_phones():
     passed and the data shipped.
     """
     found = s.propose([_nonjson(
-        "Contacted Jeff Gilbert at 209-244-7120 "
+        "Contacted Jeff Gilbert at 555-0100-999 "
         "(jeff.gilbert@example.com) about the laptop. Not valid JSON {")])
     assert "jeff.gilbert@example.com" in found
     # CAPPHRASE takes the whole capitalised run, sentence-initial word
@@ -306,3 +306,64 @@ def test_a_candidate_list_can_never_be_committed(tmp_path):
         out = subprocess.run(["git", "check-ignore", "-q", name],
                              cwd=repo, capture_output=True)
         assert out.returncode == 0, f"{name} is NOT gitignored"
+
+
+# --- salt discipline --------------------------------------------------------
+
+def test_the_fingerprint_identifies_the_salt_without_revealing_it():
+    a, b = s.salt_fingerprint("a" * 32), s.salt_fingerprint("a" * 32)
+    c = s.salt_fingerprint("b" * 32)
+    assert a == b and a != c
+    assert len(a) == 12 and all(ch in "0123456789abcdef" for ch in a)
+    assert "a" * 32 not in a
+
+
+def test_the_fingerprint_does_not_leak_a_token():
+    """It must not be derivable from, or usable to derive, any pseudonym."""
+    salt = "s" * 32
+    p = s.Pseudonymiser(salt)
+    tok = p.token("Jeff Gilbert", "PERSON")
+    assert s.salt_fingerprint(salt) not in tok
+    assert tok.split("_")[1] not in s.salt_fingerprint(salt)
+
+
+def test_two_traces_scrubbed_with_one_salt_agree_on_a_person():
+    """The property the fingerprint exists to make checkable."""
+    a = s.Pseudonymiser("x" * 32).token("Jeff Gilbert", "PERSON")
+    b = s.Pseudonymiser("x" * 32).token("Jeff Gilbert", "PERSON")
+    assert a == b
+    assert s.Pseudonymiser("y" * 32).token("Jeff Gilbert", "PERSON") != a
+
+
+def test_a_short_salt_is_refused(tmp_path, monkeypatch, capsys):
+    """A short salt is brute-forceable against a known name list, which is
+    the attack the pseudonyms exist to stop."""
+    trace = tmp_path / "t.json"
+    trace.write_text(json.dumps([_nonjson("hello")]))
+    redact = tmp_path / "r.json"
+    redact.write_text(json.dumps({"hello": "VALUE"}))
+    out = tmp_path / "o.json"
+    monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
+                                     "--redact-file", str(redact),
+                                     "--salt", "short", "-o", str(out)])
+    with pytest.raises(SystemExit) as exc:
+        s.main()
+    assert "at least" in str(exc.value)
+    assert not out.exists(), "a refused scrub must not write anything"
+
+
+def test_a_scrub_writes_a_sidecar_naming_its_salt(tmp_path, monkeypatch):
+    trace = tmp_path / "t.json"
+    trace.write_text(json.dumps([_nonjson("contact Jeff Gilbert")]))
+    redact = tmp_path / "r.json"
+    redact.write_text(json.dumps({"Jeff Gilbert": "PERSON"}))
+    out = tmp_path / "o.json"
+    salt = "z" * 32
+    monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
+                                     "--redact-file", str(redact),
+                                     "--salt", salt, "-o", str(out)])
+    assert s.main() == 0
+    side = json.loads((tmp_path / "o.json.scrub.json").read_text())
+    assert side["salt_fingerprint"] == s.salt_fingerprint(salt)
+    assert side["literals"] == 1
+    assert salt not in json.dumps(side), "the sidecar must never carry the salt"

@@ -65,6 +65,15 @@ on:
 permissions:
   contents: read
   id-token: write              # workload identity for az login
+                               #
+                               # The Azure jobs below declare `environment:`,
+                               # so the OIDC subject is
+                               #   repo:<owner>/<repo>:environment:<staging|prod>
+                               # NOT the ref form every tutorial shows. A
+                               # federated credential configured for
+                               # refs/heads/<branch> fails here with
+                               # AADSTS70021, which reads like a bad client id.
+                               # See docs/CREDENTIALS.md.
 
 jobs:
   # ---------------------------------------------------------------- merge gate

@@ -27,6 +27,10 @@ single target. Tokens are salted; keep the salt out of the repo.
 
 from __future__ import annotations
 import argparse, csv, hashlib, json, os, re, sys
+import datetime as _dt
+
+# 16 hex chars of entropy is the floor; `secrets.token_hex(16)` gives 32.
+MIN_SALT_LEN = 16
 
 # Structured ConnectWise fields that hold customer data. Used only to PROPOSE
 # candidates during --learn; nothing is redacted without a reviewed list.
@@ -110,9 +114,23 @@ def protected_vocabulary():
             }}
 
 
+def salt_fingerprint(salt):
+    """A non-reversible id for a salt, safe to commit.
+
+    Two traces scrubbed with the same salt give the same person the same
+    token; with different salts they do not, and nothing in the files says
+    so. This makes that visible without storing the secret: it is a hash of
+    a fixed constant under the salt, so it identifies the salt without
+    helping anyone recover it or any token.
+    """
+    return hashlib.sha256(b"scrub-salt-fingerprint-v1|"
+                          + salt.encode()).hexdigest()[:12]
+
+
 class Pseudonymiser:
     def __init__(self, salt):
         self.salt = salt.encode()
+        self.fingerprint = salt_fingerprint(salt)
         self.seen = {}
 
     def token(self, value, kind="VALUE"):
@@ -418,6 +436,11 @@ def main():
     if not args.salt:
         sys.exit("--salt or $SCRUB_SALT is required; without one the tokens "
                  "are a plain hash and trivially reversible")
+    if len(args.salt) < MIN_SALT_LEN:
+        sys.exit(f"the salt is {len(args.salt)} characters; use at least "
+                 f"{MIN_SALT_LEN}. A short salt is brute-forceable against a "
+                 "known name list, which is exactly the attack the "
+                 "pseudonyms exist to stop.")
 
     with open(args.redact_file, encoding="utf-8") as fh:
         redactions = json.load(fh)
@@ -446,6 +469,20 @@ def main():
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(scrubbed, fh, ensure_ascii=False)
     print(f"{len(rows)} span(s), {len(redactions)} literal(s) -> {args.out}")
+
+    # Sidecar, not a key in the file: the output is an array of spans and
+    # load_rows would hand an extra element to the converter.
+    sidecar = args.out + ".scrub.json"
+    with open(sidecar, "w", encoding="utf-8") as fh:
+        json.dump({"salt_fingerprint": pseudo.fingerprint,
+                   "literals": len(redactions),
+                   "tokens_issued": len(pseudo.seen),
+                   "source": os.path.basename(args.trace),
+                   "scrubbed_utc": _dt.datetime.now(_dt.timezone.utc)
+                                      .replace(microsecond=0).isoformat()},
+                  fh, indent=1)
+        fh.write("\n")
+    print(f"salt fingerprint {pseudo.fingerprint} -> {sidecar}")
 
     # A scrubber is never provably complete; prove at least that everything
     # declared is gone.

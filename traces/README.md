@@ -144,3 +144,45 @@ a tool argument.
 
 If a phone number or an account number ever arrives as a JSON number rather
 than a string, this is where it will survive. The residual check will say so.
+
+## The salt
+
+`scrub_trace.py` needs `--salt` or `$SCRUB_SALT`, at least 16 characters. It
+refuses without one, because unsalted tokens are a plain hash of the value and
+trivially reversible against a name list.
+
+**One salt for this repo, for ever.** The same salt gives the same person the
+same token in every trace, so a cascade of retries against one customer still
+reads as one customer after scrubbing — across files, not just within one.
+Change the salt and that property silently disappears.
+
+Keep it where CI can read it and people cannot: a GitHub Actions secret named
+`SCRUB_SALT`, mirrored into your password manager. It is **not** in this repo
+and must never be. Generate one with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(16))"
+```
+
+### Telling whether two traces share a salt
+
+Every scrub writes `<trace>.scrub.json` beside the output:
+
+```json
+{"salt_fingerprint": "f0039a8c92d3", "literals": 18, "tokens_issued": 18,
+ "source": "2026-09-15-ops-worst-case.json", "scrubbed_utc": "..."}
+```
+
+The fingerprint is a hash of a fixed constant under the salt. It identifies
+which salt was used without storing it and without helping anyone recover a
+token. Two traces with the same fingerprint are comparable; different
+fingerprints mean the same person has two different tokens and you should not
+read across them.
+
+> **Current state:** `2026-09-03-full-triage.json` and
+> `2026-09-15-ops-worst-case.json` were scrubbed with **different** salts, and
+> neither predates the sidecar, so neither carries a fingerprint. Nothing joins
+> across traces today so no check is affected. Before the next export, settle
+> on the repo salt and re-run both reviewed redaction lists with it — the
+> scrub is deterministic, so the result is byte-stable and the sidecars will
+> then agree.
