@@ -1,5 +1,40 @@
 # Traces
 
+> ## ACTION REQUIRED: both committed sets still carry customer data
+>
+> `scrub_trace.py --learn` scanned only for e-mail addresses in any payload
+> that failed `json.loads`. **40% of the payloads in these files are in that
+> category** — 239 of 598 in `2026-09-03-full-triage.csv`, including 117 tool
+> results and 60 input-message blobs, which is exactly where customer data
+> lives. Names and phone numbers there were never proposed, so never
+> reviewed, never redacted, and never reported as residual by `--verify`.
+> The scrub passed and the data shipped.
+>
+> The bug is fixed (see `scrub_trace.py`'s `scan_text`), but **the fix does
+> not retroactively clean these files.** Re-running the learner over them now
+> proposes 302 candidates against the previous 104, and the new ones include
+> real personal names, customer company names, and 43 real phone numbers.
+>
+> To remediate:
+>
+> ```bash
+> python3 scrub_trace.py traces/2026-09-03-full-triage.csv --learn candidates.json
+> # review candidates.json by hand -- delete every entry that is ConnectWise
+> # vocabulary rather than customer data; protected terms are withheld for you
+> python3 scrub_trace.py traces/2026-09-03-full-triage.csv \
+>     --redact-file candidates.json --verify -o traces/2026-09-03-full-triage.csv
+> ```
+>
+> Then re-freeze the baselines and confirm no verdict moved. Repeat for
+> `2026-09-15-ops-worst-case.csv`. Until that is done, treat this directory as
+> containing production customer data and do not share the repo outside the
+> people who already have ConnectWise access.
+>
+> Rewriting the files is not enough on its own — the data is in git history
+> too. Decide with whoever owns the repo whether history needs rewriting or
+> the repo re-creating.
+
+
 Raw span exports. Dated, named for what they contain, and **committed** — each
 one is the input to a frozen baseline in `baselines/`, so the suite is
 reproducible without Azure access.

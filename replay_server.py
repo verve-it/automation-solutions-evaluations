@@ -178,16 +178,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self):
+        if not self.token:
+            return True
+        return self.headers.get("Authorization", "") == f"Bearer {self.token}"
+
     def do_GET(self):
+        # `/` is a health check and says nothing but that the process is up,
+        # so it stays open for readiness probes. `/summary` is the journal:
+        # tool names, canonicalised arguments carrying ticket and company
+        # identifiers, and every attempted write. docs/REPLAY.md tells you to
+        # expose this server to Foundry, so it takes the same bearer check as
+        # do_POST rather than none at all.
         if self.path.rstrip("/") == "/summary":
+            if not self._authorized():
+                return self._send({"error": "unauthorized"}, 401)
             return self._send(self.cassette.summary())
         self._send({"status": "ok", "mode": "replay"})
 
     def do_POST(self):
-        if self.token:
-            auth = self.headers.get("Authorization", "")
-            if auth != f"Bearer {self.token}":
-                return self._send({"error": "unauthorized"}, 401)
+        if not self._authorized():
+            return self._send({"error": "unauthorized"}, 401)
 
         length = int(self.headers.get("Content-Length") or 0)
         try:

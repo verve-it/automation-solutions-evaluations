@@ -206,6 +206,29 @@ def propose(rows):
             return
         found.setdefault(v, kind)
 
+    def scan_text(text, parent_key=None, names=True):
+        """Every scalar heuristic, over one string.
+
+        Shared by walk()'s str leaves and the non-JSON fallback below. They
+        used to differ: the fallback ran EMAIL only, so a name or phone in a
+        payload that failed json.loads was never proposed and so never
+        reviewed, never redacted, and never reported as residual.
+        """
+        key = (parent_key or "").lower()
+        if key in SENSITIVE_KEYS and key not in NEVER_PROPOSE:
+            note(text, _kind_for(key))
+        for m in EMAIL_RE.finditer(text):
+            note(m.group(0), "EMAIL")
+        for m in PHONE_RE.finditer(text):
+            note(m.group(0), "PHONE")
+        for m in (CAPPHRASE_RE.finditer(text) if names else ()):
+            phrase = m.group(0)
+            words = [w.strip(".'`-").lower() for w in phrase.split()]
+            # Every word vocabulary -> not a name. Any word not in the
+            # stoplist -> propose it and let the reviewer decide.
+            if any(w and w not in PHRASE_STOPWORDS for w in words):
+                note(phrase, "NAME?")
+
     def walk(obj, parent_key=None, in_schema=False, names=True):
         if isinstance(obj, dict):
             # A tool definition or a call_tool envelope is schema, end to end.
@@ -221,20 +244,7 @@ def propose(rows):
         elif isinstance(obj, str):
             if in_schema:
                 return
-            key = (parent_key or "").lower()
-            if key in SENSITIVE_KEYS and key not in NEVER_PROPOSE:
-                note(obj, _kind_for(key))
-            for m in EMAIL_RE.finditer(obj):
-                note(m.group(0), "EMAIL")
-            for m in PHONE_RE.finditer(obj):
-                note(m.group(0), "PHONE")
-            for m in (CAPPHRASE_RE.finditer(obj) if names else ()):
-                phrase = m.group(0)
-                words = [w.strip(".'`-").lower() for w in phrase.split()]
-                # Every word vocabulary -> not a name. Any word not in the
-                # stoplist -> propose it and let the reviewer decide.
-                if any(w and w not in PHRASE_STOPWORDS for w in words):
-                    note(phrase, "NAME?")
+            scan_text(obj, parent_key, names)
 
     for row in rows:
         for attr, raw in payloads_of(row):
@@ -245,8 +255,12 @@ def propose(rows):
             try:
                 walk(json.loads(raw), names=names)
             except (json.JSONDecodeError, TypeError):
-                for m in EMAIL_RE.finditer(raw):
-                    note(m.group(0), "EMAIL")
+                # Not JSON — a prose tool result, a truncated blob, a plain
+                # message. 40% of the payloads in the committed traces land
+                # here, tool results and input messages among them, which is
+                # exactly where customer data is. Scan the raw text with the
+                # same heuristics rather than only for e-mails.
+                scan_text(raw, names=names)
     return found
 
 
@@ -375,10 +389,23 @@ def main():
 
     if args.learn:
         candidates = propose(rows)
+        # Drop protected vocabulary here rather than refusing at apply time.
+        # Proposing a term that can only be rejected wastes review attention,
+        # and review attention is the scarce resource that decides whether a
+        # real name gets caught.
+        protected = protected_vocabulary()
+        dropped = sorted(k for k in candidates
+                         if k.strip().lower() in protected)
+        for k in dropped:
+            del candidates[k]
         with open(args.learn, "w", encoding="utf-8") as fh:
             json.dump(dict(sorted(candidates.items())), fh, indent=1,
                       ensure_ascii=False)
         print(f"{len(candidates)} candidate(s) -> {args.learn}")
+        if dropped:
+            print(f"{len(dropped)} protected term(s) withheld (the checks "
+                  f"score these): {', '.join(repr(k) for k in dropped[:8])}"
+                  + (" ..." if len(dropped) > 8 else ""))
         print("\nREVIEW THIS FILE BEFORE APPLYING IT. Delete every entry that "
               "is ConnectWise vocabulary rather than customer data — a value "
               "the checks score, such as a status, a priority or a board "

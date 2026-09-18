@@ -420,3 +420,51 @@ def test_a_full_row_with_content_columns_converts_normally():
         os.unlink(path)
     assert runs[0]["tool_names"] == ["cw_query"]
     assert runs[0]["empty_results"], "dead end should be detected from the column"
+
+
+# --- intent must name a real intent -----------------------------------------
+
+def _dims(text):
+    return {t.K_IN_MSGS: json.dumps([{"role": "user", "content": text}])}
+
+
+def test_a_doc_line_cannot_repoint_the_trajectory_key():
+    """Skill files are pasted into the input messages.
+
+    _INTENT_RE takes any `intent:`/`intent=` value, so the first match could
+    be documentation rather than the hand-off. An arbitrary value used to be
+    accepted, producing a traj_key no expectation uses -- the trajectory
+    check then skipped, silently, on a run that had a perfectly good intent
+    further down the same blob.
+    """
+    blob = ("# Orchestration skill\n"
+            "Set intent: <the classified intent> before delegating.\n"
+            "---\n"
+            "intent=Full Triage; ticketId=805392")
+    intent, source = t.extract_intent(_dims(blob), [])
+    assert intent == "Full Triage", (intent, source)
+    assert source == "declared"
+
+
+def test_an_unknown_intent_is_not_an_intent():
+    """None falls back to the bare agent name, which is the documented
+    behaviour for an intent we cannot resolve. Returning the raw string
+    instead produced a key nothing matches."""
+    intent, source = t.extract_intent(_dims("intent=Sandwich Making"), [])
+    assert intent is None and source == "unknown", (intent, source)
+
+
+def test_a_real_intent_still_resolves():
+    intent, source = t.extract_intent(
+        _dims("intent=Write Request; ticketId=1"), [])
+    assert intent == "Write Request" and source == "declared"
+
+
+def test_inbound_and_delegated_are_constrained_too():
+    assert t.extract_intent({}, [], inbound="Nonsense") == (None, "unknown")
+    assert t.extract_intent({}, [], inbound="write request") == \
+        ("Write Request", "inbound")
+    steps = [{"is_a2a": True, "tool": "x", "arguments": "intent=Nonsense"}]
+    assert t.extract_intent({}, steps) == (None, "unknown")
+    steps = [{"is_a2a": True, "tool": "x", "arguments": "intent=Full Triage"}]
+    assert t.extract_intent({}, steps) == ("Full Triage", "delegated")

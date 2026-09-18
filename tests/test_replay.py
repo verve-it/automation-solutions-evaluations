@@ -275,3 +275,35 @@ def test_a_token_is_enforced_when_set(server):
         assert exc.value.code == 401
     finally:
         rs.Handler.token = None
+
+
+def test_the_token_also_guards_the_summary(server):
+    """do_GET used to skip the check entirely.
+
+    /summary is the journal — tool names, canonicalised arguments carrying
+    ticket and company identifiers, every attempted write — on a server
+    docs/REPLAY.md tells you to expose to Foundry.
+    """
+    url, _ = server
+    rs.Handler.token = "s3cret"
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(url + "/summary")
+        assert exc.value.code == 401
+
+        req = urllib.request.Request(
+            url + "/summary", headers={"Authorization": "Bearer s3cret"})
+        assert "matched" in json.loads(urllib.request.urlopen(req).read())
+    finally:
+        rs.Handler.token = None
+
+
+def test_the_health_check_stays_open(server):
+    """A readiness probe carries no token and leaks nothing."""
+    url, _ = server
+    rs.Handler.token = "s3cret"
+    try:
+        body = json.loads(urllib.request.urlopen(url + "/").read())
+        assert body == {"status": "ok", "mode": "replay"}
+    finally:
+        rs.Handler.token = None
