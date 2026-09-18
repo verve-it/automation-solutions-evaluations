@@ -1,44 +1,79 @@
-# Two triggers, per §5 of docs/HANDOFF.md.
+# Branch maps to Foundry project:
+#
+#   staging branch ->  automation-solutions-test   (GitHub environment: staging)
+#   main branch    ->  automation-solutions        (GitHub environment: prod)
+#
+# The branch and the environment share the name `staging`; `main` maps to
+# `prod`. The Foundry project keeps its own name, automation-solutions-test.
+#
+# Both jobs below score RECORDED traces and upload evaluation results. Neither
+# ever invokes an agent, which is why main can safely target production. The
+# one workflow that does invoke agents, staging-replay.yml, is pinned to
+# staging and to the test project with no production counterpart.
+#
+# Three triggers, per §5 of docs/HANDOFF.md.
 #
 #   merge gate       every push / PR. Replays the committed trace sets against
 #                    the committed baselines. Gates changes to the EVAL CODE.
-#                    No Azure, no network, no secrets.
+#                    No Azure, no network, no secrets, either branch.
 #
-#   drift detection  nightly over the last 24h of production traces. Gates
-#                    changes nobody here made: ConnectWise schema changes, MCP
-#                    version bumps, model drift. The cw_resolve failures in
-#                    §7 of the handoff would have been caught the day they
-#                    started.
+#   drift detection  nightly over the last 24h of that branch's project.
+#                    Catches changes nobody here made: ConnectWise schema
+#                    changes, MCP version bumps, model drift. The cw_resolve
+#                    failures in §7 of the handoff would have been caught the
+#                    day they started.
 #
-# Both gate on DELTA, not on absolute pass rates. Known failures stay failing
-# without blocking unrelated work; a regression, or a check that stops
+#   Foundry scoring  part of the nightly drift job: the same runs are scored
+#                    by the registered custom evaluators in Foundry, so the
+#                    results live in the project rather than only in a CI
+#                    artifact. GitHub still does the scheduling; Foundry does
+#                    the scoring and keeps the history.
+#
+#   judged sample    weekly, on the same freshly exported traces. LLM-judged
+#                    evaluators over a sample. Never per-commit: judges are
+#                    slow and the scores wobble. See docs/FOUNDRY.md.
+#
+# The trace jobs gate on DELTA, not absolute pass rates. Known failures stay
+# failing without blocking unrelated work; a regression, or a check that stops
 # scoring, goes red. Gating on absolutes while §7 is open makes the suite
-# permanently red and people route around it. Tighten once §7 is cleared.
-#
-# Agent-side changes (prompt, skill file, MCP version) cannot trigger this
-# repo directly — this repo is deliberately separate, see §3 of the handoff.
-# Have the agents repo call the `agent-change` dispatch below after a release.
+# permanently red and people route around it.
 
 name: evals
 
 on:
   push:
-    branches: [develop, main]
+    branches: [main, staging, develop]
   pull_request:
   schedule:
-    - cron: "0 6 * * *"        # 06:00 UTC daily
+    - cron: "0 6 * * *"        # 06:00 UTC daily  — drift
+    - cron: "0 7 * * 1"        # 07:00 UTC Monday — judged sample
   workflow_dispatch:
     inputs:
       hours:
-        description: "Hours of production traces to evaluate"
+        description: "Hours of traces to evaluate"
         default: "24"
-      reason:
-        description: "e.g. agent-change: triage-analysis-agent v83"
-        default: "manual"
+      environment:
+        description: "Which Foundry project to target"
+        type: choice
+        options: [auto, staging, prod]
+        default: auto
+      judged:
+        description: "Also run the judged sample (costs inference)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   id-token: write              # workload identity for az login
+                               #
+                               # The Azure jobs below declare `environment:`,
+                               # so the OIDC subject is
+                               #   repo:<owner>/<repo>:environment:<staging|prod>
+                               # NOT the ref form every tutorial shows. A
+                               # federated credential configured for
+                               # refs/heads/<branch> fails here with
+                               # AADSTS70021, which reads like a bad client id.
+                               # See docs/CREDENTIALS.md.
 
 jobs:
   # ---------------------------------------------------------------- merge gate
@@ -59,20 +94,20 @@ jobs:
 
       - name: Score the known-good set
         run: |
-          python trace_to_eval.py traces/2026-09-03-full-triage.csv \
+          python trace_to_eval.py traces/2026-09-03-full-triage.json \
               -o out --tool-defs tool_manifests/
           python run_evals.py out/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/full-triage-2026-09-16.json \
+              --baseline baselines/full-triage-2026-09-18.json \
               --json artifacts/full-triage.json
 
       - name: Score the known-bad set
         run: |
-          python trace_to_eval.py traces/2026-09-15-ops-worst-case.csv \
+          python trace_to_eval.py traces/2026-09-15-ops-worst-case.json \
               -o out-ops --tool-defs tool_manifests/
           python run_evals.py out-ops/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/ops-worst-case-2026-09-16.json \
+              --baseline baselines/ops-worst-case-2026-09-18.json \
               --json artifacts/ops-worst-case.json
 
       - uses: actions/upload-artifact@v4
@@ -81,12 +116,49 @@ jobs:
           name: frozen-set-results
           path: artifacts/
 
+  # ------------------------------------------------------------------ plan
+  # Which Foundry projects this run touches.
+  #
+  # A scheduled workflow always runs on the DEFAULT branch, so deriving the
+  # environment from github.ref_name would quietly send every nightly run at
+  # one project for ever. Drift is worth having on both, so on a schedule this
+  # fans out; on a push or a dispatch it follows the branch.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.pick.outputs.environments }}
+    steps:
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
+          REQUESTED: ${{ github.event.inputs.environment }}
+        run: |
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "auto" ]; then
+            PICK="[\"$REQUESTED\"]"
+          elif [ "$EVENT" = "schedule" ]; then
+            PICK='["staging","prod"]'
+          elif [ "$REF" = "main" ]; then
+            PICK='["prod"]'
+          else
+            PICK='["staging"]'
+          fi
+          echo "environments=$PICK" >> "$GITHUB_OUTPUT"
+          echo "targets: $PICK"
+
   # ----------------------------------------------------------------- drift
-  production-drift:
-    name: production drift
+  drift:
+    name: drift (${{ matrix.environment }})
+    needs: plan
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: evals          # holds the workload-identity federation
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(needs.plan.outputs.environments) }}
+    environment:
+      name: ${{ matrix.environment }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -96,18 +168,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Federated credential, no client secret. The identity needs Log
-      # Analytics Reader on the workspace.
+      # Federated credential, no client secret. The identity needs BOTH:
+      #   Log Analytics Reader            — the span tables
+      #   Privileged Monitoring Data Reader — AppGenAIContent
+      # The second is new. Without it the export returns spans with no
+      # gen_ai.* content and every check scores an empty run.
       - uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Lag mode: evaluate whatever production produced since the last run.
-      # A replay set over a dev ConnectWise instance is the better signal, but
-      # the agents mutate the ticket they operate on, so replaying against
-      # production is not an option. See §5 of the handoff.
+      - name: Show target
+        run: |
+          echo "environment : ${{ matrix.environment }}"
+          echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
+
+      # Lag mode: evaluate whatever the project produced since the last run.
+      # Reading traces only — nothing here invokes an agent, so this is safe
+      # against production.
       - name: Export traces
         run: |
           python export_traces.py \
@@ -119,7 +198,7 @@ jobs:
       - name: Convert
         run: |
           python trace_to_eval.py artifacts/spans.json -o out \
-              --tool-defs tool_manifests/
+              --tool-defs tool_manifests/ --skill-registry artifacts/skills
 
       # New orchestrations are not in any baseline, so this reports rather
       # than gates until a baseline covering them is promoted. What it does
@@ -129,12 +208,52 @@ jobs:
         run: |
           python run_evals.py out/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/full-triage-2026-09-16.json \
+              --baseline baselines/full-triage-2026-09-18.json \
               --json "artifacts/drift-$(date -u +%Y%m%dT%H%M%SZ).json"
+
+      # The same runs, scored by the registered evaluators in Foundry, so the
+      # results live in the project rather than only in this artifact zip.
+      # The dataset is built here rather than read from azure_ai_traces
+      # because that path sees only invoke_agent spans and so has no tool
+      # results — see docs/FOUNDRY.md.
+      #
+      # Versions are pinned from evaluator-versions.json. An unpinned run
+      # floats to whatever was registered last, and then a "regression" may
+      # just be a re-registration.
+      - name: Build the Foundry dataset
+        run: |
+          python foundry/to_foundry_dataset.py artifacts/spans.json \
+              --expected expected.json \
+              --tool-defs tool_manifests/ \
+              --no-messages \
+              -o artifacts/foundry-dataset.jsonl
+
+      - name: Score it in Foundry
+        run: |
+          python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --name "drift-${{ matrix.environment }}" \
+              --dataset-version "$(date -u +%Y%m%dT%H%M%SZ)" \
+              --wait
+
+      # Judged evaluators are slow and their scores wobble, so they run
+      # weekly over a sample rather than nightly over everything.
+      - name: Judge a sample
+        if: >-
+          github.event.schedule == '0 7 * * 1'
+          || github.event.inputs.judged == 'true'
+        run: |
+          python foundry/submit_to_foundry.py out/eval_runs.jsonl \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --sample 20 \
+              --name "triage-evals-${{ matrix.environment }}-$(date -u +%Y%m%d)" \
+              --out artifacts/foundry-input.jsonl
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: drift-results
+          name: drift-${{ matrix.environment }}
           path: artifacts/
           retention-days: 90     # matches Foundry trace retention

@@ -16,35 +16,22 @@ case, and they move independently.
 
 | Baseline | Trace set | Gating | What it is for |
 |---|---|---|---|
-| `full-triage-2026-09-16.json` | `traces/2026-09-03-full-triage.csv` | 5/7 runs pass | Known-good. Two full orchestrations, seven agent runs, 715 spans. |
-| `ops-worst-case-2026-09-16.json` | `traces/2026-09-15-ops-worst-case.csv` | 0/2 runs pass | Known-bad. The two worst observed ops runs. |
+| `full-triage-2026-09-18.json` | `traces/2026-09-03-full-triage.json` | 5/7 runs pass | Known-good. Two full orchestrations, seven agent runs, 715 spans. |
+| `ops-worst-case-2026-09-18.json` | `traces/2026-09-15-ops-worst-case.json` | 0/2 runs pass | Known-bad. The two worst observed ops runs. |
 
-Keep both. **If a change makes the known-bad set start passing, suspect the
-check before celebrating.**
+Re-frozen 2026-09-18 when the traces moved to their scrubbed JSON forms. Two
+things changed and both are improvements, not drift:
 
-## Regenerating
+- `no_truncation` goes 5/7 → 7/7 on the known-good set. The JSON export
+  carries the `AppGenAIContent` join, so tool results are no longer cut at
+  8192 chars. The truncation was a telemetry artifact, never agent behaviour.
+- `valid_tool_args` goes 6/6 → 5/6, catching `reference_type='severity'`
+  from the tool schema. See `tool_manifests/README.md`.
 
-```bash
-make baselines        # rewrites both from the committed traces
-```
+Gating verdicts are otherwise unchanged, and the ops scrub changed no verdict
+at all — `--verify` confirmed 18 identical before the file was written.
 
-## Promoting
-
-When a change improves things, the new results become the baseline. Commit the
-new baseline **in the same commit as the change that caused it**, so the
-history explains itself. Never rewrite a baseline in place under its old date —
-add a new dated file and retire the old one to `archive/`.
-
-`run_evals.py --baseline` gates on **delta**: regressions fail the build,
-existing failures do not, and a check that used to produce a verdict and now
-skips fails as lost coverage. Gating on absolute pass rates while known issues
-are open makes the suite permanently red and people route around it. Tighten to
-absolutes once §7 of `docs/HANDOFF.md` is cleared.
-
-## archive/
-
-Superseded baselines, kept because they are the record of how the system
-behaved at the time.
+## Superseded
 
 - `baseline-2026-09-16-pre-intent-fix.json` — the first frozen set. Produced
   before the converter recognised the portal's `timestamp [UTC]` column or the

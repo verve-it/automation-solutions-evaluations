@@ -150,8 +150,9 @@
     "reason": ""
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": true,
+    "reason": "51 call(s) validated",
+    "checked": 51
    },
    "no_tool_errors": {
     "passed": false,
@@ -185,8 +186,8 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": true,
@@ -240,8 +241,9 @@
     "reason": ""
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": true,
+    "reason": "9 call(s) validated",
+    "checked": 9
    },
    "no_tool_errors": {
     "passed": true,
@@ -271,8 +273,8 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": true,
@@ -416,8 +418,9 @@
     "count": 4
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": true,
+    "reason": "32 call(s) validated",
+    "checked": 32
    },
    "no_tool_errors": {
     "passed": false,
@@ -451,8 +454,8 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": false,
@@ -583,8 +586,10 @@
     "count": 1
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": false,
+    "reason": "1 bad argument(s) in 8 validated call(s): cw_resolve: 'reference_type'='severity' not in [agreement, agreement_type, board, company, configuration, configuration_type, +14 more]",
+    "count": 1,
+    "checked": 8
    },
    "no_tool_errors": {
     "passed": false,
@@ -616,12 +621,13 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": false,
   "failed_gating": [
+   "valid_tool_args",
    "no_wasted_calls"
   ]
  }
