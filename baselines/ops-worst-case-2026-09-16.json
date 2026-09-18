@@ -48,8 +48,9 @@
     "count": 5
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": true,
+    "reason": "27 call(s) validated",
+    "checked": 27
    },
    "no_tool_errors": {
     "passed": false,
@@ -83,8 +84,8 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": false,
@@ -134,8 +135,9 @@
     "count": 3
    },
    "valid_tool_args": {
-    "passed": null,
-    "reason": "no tool schemas (run the converter with --tool-defs)"
+    "passed": true,
+    "reason": "13 call(s) validated",
+    "checked": 13
    },
    "no_tool_errors": {
     "passed": false,
@@ -170,15 +172,15 @@
     "reason": "tracking only — no --max-tokens/--max-duration-ms set"
    },
    "evaluator_ready": {
-    "passed": false,
-    "reason": "missing tool_definitions"
+    "passed": true,
+    "reason": ""
    }
   },
   "passed": false,
   "failed_gating": [
-   "no_dead_ends",
+   "trajectory",
    "no_wasted_calls",
-   "trajectory"
+   "no_dead_ends"
   ]
  }
 ]

@@ -237,3 +237,49 @@ def test_cost_latency_is_not_a_gating_check():
 def test_truncated_skill_is_called_out_in_the_truncation_reason():
     r = run(truncated_results=3, truncated_skills=1)
     assert "SKILL" in e.check_no_truncation(r, {})["reason"]
+
+
+# --- tracking is not gated on llm_calls -------------------------------------
+
+def _rollup_row(**kw):
+    """A run whose tokens came from the invoke_agent roll-up: real spend,
+    llm_calls 0 because no chat span carried usage."""
+    row = {"traj_key": "agent|Full Triage", "duration_ms": 1000,
+           "usage": {"llm_calls": 0, "uncached_input_tokens": 1234,
+                     "cache_read_tokens": 99, "output_tokens": 56,
+                     "peak_input_tokens": 1234, "usage_source": "rollup"},
+           "skills_in_force": []}
+    row.update(kw)
+    return row
+
+
+def test_tracking_prints_when_usage_came_from_the_rollup(capsys):
+    """The gate was `if not any(usage.llm_calls)`, which is 0 for every
+    roll-up run -- so the whole TRACKING table vanished for runs that had
+    perfectly good token figures."""
+    e.print_tracking([_rollup_row()])
+    out = capsys.readouterr().out
+    assert "TRACKING" in out
+    assert "1,234" in out
+
+
+def test_tracking_still_stays_quiet_with_no_usage_at_all(capsys):
+    e.print_tracking([_rollup_row(usage={"llm_calls": 0,
+                                         "usage_source": "none"})])
+    assert "TRACKING" not in capsys.readouterr().out
+
+
+def test_skill_drift_is_reported_independently_of_usage(capsys):
+    """It shared print_tracking's early return, so a roll-up run set
+    reported no drift rather than no usage."""
+    rows = [_rollup_row(usage={"usage_source": "none"},
+                        skills_in_force=[{"skill_name": "normalization",
+                                          "sha256": "a" * 64,
+                                          "truncated": False}]),
+            _rollup_row(usage={"usage_source": "none"},
+                        skills_in_force=[{"skill_name": "normalization",
+                                          "sha256": "b" * 64,
+                                          "truncated": False}])]
+    e.print_skill_drift(rows)
+    out = capsys.readouterr().out
+    assert "SKILL DRIFT" in out and "normalization" in out

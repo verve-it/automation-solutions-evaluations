@@ -11,20 +11,20 @@
 
   "data": [
     {
-      "query": "entityType=ticket\nentityId=TICKET_ID_NEW_UNTRIAGED\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
+      "query": "entityType=ticket\nentityId=1025731\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
       "_intent": "Full Triage"
     },
     {
-      "query": "entityType=ticket\nentityId=TICKET_ID_MISSING_COMPANY\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
+      "query": "entityType=ticket\nentityId=1025732\ncontext=Automated flow: triage ticket and automatically approve writeplan to connectwise",
       "_intent": "Full Triage",
       "_why": "Upstream proposed a company that does not exist in ConnectWise. Burned ~34 calls before the write correctly refused. Regression case for the cascading dead-end search."
     },
     {
-      "query": "entityType=ticket\nentityId=TICKET_ID_RESOLVED\ncontext=Review this resolved ticket for closure readiness",
+      "query": "entityType=ticket\nentityId=1025733\ncontext=Review this resolved ticket for closure readiness",
       "_intent": "Resolved Ticket Review"
     },
     {
-      "query": "entityType=ticket\nentityId=TICKET_ID_ANY\ncontext=What is the current status and priority of this ticket?",
+      "query": "entityType=ticket\nentityId=1025734\ncontext=What is the current status and priority of this ticket?",
       "_intent": "Information Request",
       "_why": "Read-only path: the orchestrator should go straight to ConnectwiseMCP, not route to a child agent."
     }

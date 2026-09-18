@@ -6,9 +6,19 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Root first, then the script directories. The scripts live in subdirectories
+# but are still single-file modules, not a package — each puts REPO on
+# sys.path itself when run directly, and this does the same for the tests so
+# they keep importing by bare name.
+for _d in (REPO,
+           os.path.join(REPO, "foundry"),
+           os.path.join(REPO, "replay"),
+           os.path.join(REPO, "tools"),
+           os.path.join(REPO, "foundry_evaluators")):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 
 def span(name, agent, op_id="op1", *, ts="2026-09-03T17:00:00.000Z",

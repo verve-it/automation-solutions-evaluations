@@ -7,6 +7,21 @@ artifacts/
 # Commit it only if you need the bodies without the traces to hand.
 skills/
 
+# Redaction lists are a catalogue of exactly the customer data we are
+# removing — never commit one. Keep them beside the raw export, outside the
+# repo, or in a secret store. `--learn` writes one of these, and the name it
+# is given is whatever the caller passes, so cover the names the docs use.
+redact*.json
+reviewed*.json
+candidates*.json
+*-candidates.json
+scrub-*.json
+*.redactions.json
+
+# Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one
+# only when it backs a gate and the trace it came from is not committed.
+cassettes/
+
 # Unattended export landing zone. Raw traces that matter get curated into
 # traces/ by hand with a dated name and a line in traces/README.md.
 traces/auto/
@@ -26,3 +41,8 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Scratch parameter files for `az ad app federated-credential create`. No
+# secret in them -- name, issuer, subject, audience -- but they are scratch
+# and belong in the temp directory. See docs/CREDENTIALS.md.
+fed-*.json

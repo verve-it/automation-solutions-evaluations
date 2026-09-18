@@ -1,16 +1,24 @@
 # Agent-change gate: re-triage a fixed set of dev-instance tickets in the
-# Foundry STAGING project and score them with the Foundry evaluator catalog.
+# Foundry TEST project and score them with the Foundry evaluator catalog.
 #
-# This is the one place we invoke agents rather than score recorded traces.
-# It is safe only because staging is wired to the dev ConnectWise instance.
-# Never repoint it at the production project — the agents mutate the ticket
-# they operate on and the ops agent writes to a system of record.
+# This is the one workflow that INVOKES agents rather than scoring recorded
+# traces. It is safe only because automation-solutions-test is wired to the
+# dev ConnectWise instance.
+#
+# It is pinned to the `staging` branch and the test project, and it has no
+# production counterpart on purpose. "main deploys to production" does not
+# apply here: running this against automation-solutions would re-triage real
+# tickets and the ops agent would write the results into the system of record.
+# Production is evaluated from recorded traces only — see evals.yml.
 #
 # The action reports confidence intervals and tests for statistical
 # significance against `baseline-agent-id`, which is handoff §10 item 9
 # (telling a flaky agent from a broken one) for no code of ours.
 #
-# Triggered from the agents repo after a release:
+# Triggered from the agents repo after a release to staging:
+#
+# On a push to `staging` it re-runs against vars.DEFAULT_AGENT_IDS. To compare
+# a specific version, dispatch it or have the agents repo fire:
 #
 #   curl -X POST -H "Accept: application/vnd.github+json" \
 #     -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -26,6 +34,11 @@
 name: staging replay
 
 on:
+  push:
+    branches: [staging]
+    paths:
+      - "replay/**"
+      - ".github/workflows/staging-replay.yml"
   workflow_dispatch:
     inputs:
       agent-ids:
@@ -41,11 +54,16 @@ permissions:
   id-token: write
   contents: read
 
+env:
+  # Hard-coded rather than read from a variable. A mis-set environment
+  # variable must not be able to point agent invocation at production.
+  REQUIRED_PROJECT: automation-solutions-test
+
 jobs:
   replay:
-    name: replay against staging
+    name: replay against automation-solutions-test
     runs-on: ubuntu-latest
-    environment: staging          # holds the staging federation + endpoint
+    environment: staging
     steps:
       - uses: actions/checkout@v4
 
@@ -56,29 +74,66 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # This job invokes agents, which writes to ConnectWise. Fail loudly
-      # rather than discover the mistake in a production ticket's audit trail.
-      - name: Refuse to run outside staging
+      # This job writes to ConnectWise. Fail loudly rather than discover the
+      # mistake in a production ticket's audit trail.
+      - name: Refuse to run outside the test project
         env:
           ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
         run: |
+          if [ -z "$ENDPOINT" ]; then
+            echo "::error::AZURE_AI_PROJECT_ENDPOINT is not set on the 'staging' environment."
+            exit 1
+          fi
           case "$ENDPOINT" in
-            *staging*|*stg*|*dev*)
-              echo "endpoint looks like staging: ok" ;;
+            *"$REQUIRED_PROJECT"*)
+              echo "endpoint targets $REQUIRED_PROJECT: ok" ;;
             *)
-              echo "::error::AZURE_AI_PROJECT_ENDPOINT does not look like staging. Refusing to invoke agents."
+              echo "::error::Endpoint does not target $REQUIRED_PROJECT. This job invokes agents and writes to ConnectWise. Refusing."
               exit 1 ;;
           esac
 
+      - name: Check the replay set has real ticket ids
+        run: |
+          if grep -q 'TICKET_ID_' replay/full-triage.json; then
+            echo "::error::replay/full-triage.json still has TICKET_ID_ placeholders. See replay/README.md."
+            exit 1
+          fi
+
+      # A push to `staging` carries no inputs and no client_payload, so
+      # without a fallback the action would be handed an empty agent-ids and
+      # fail somewhere less obvious. DEFAULT_AGENT_IDS on the `staging`
+      # environment is the currently deployed agent to re-run against.
+      - name: Resolve which agent to evaluate
+        id: agents
+        env:
+          FROM_INPUT: ${{ github.event.inputs.agent-ids }}
+          FROM_DISPATCH: ${{ github.event.client_payload.agent_ids }}
+          FROM_VAR: ${{ vars.DEFAULT_AGENT_IDS }}
+          BASE_INPUT: ${{ github.event.inputs.baseline-agent-id }}
+          BASE_DISPATCH: ${{ github.event.client_payload.baseline_agent_id }}
+          BASE_VAR: ${{ vars.DEFAULT_BASELINE_AGENT_ID }}
+        run: |
+          IDS="${FROM_INPUT:-${FROM_DISPATCH:-$FROM_VAR}}"
+          BASE="${BASE_INPUT:-${BASE_DISPATCH:-$BASE_VAR}}"
+          if [ -z "$IDS" ]; then
+            echo "::error::No agent to evaluate. Pass agent-ids on dispatch, send agent_ids in the repository_dispatch payload, or set DEFAULT_AGENT_IDS on the 'staging' environment. Format: agent-name:version"
+            exit 1
+          fi
+          echo "evaluating : $IDS"
+          echo "baseline   : ${BASE:-none (no significance test)}"
+          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
+          echo "baseline=$BASE" >> "$GITHUB_OUTPUT"
+
+      # The queries in replay/full-triage.json are ORCHESTRATOR-shaped
+      # (`entityType=ticket ...`). agent-ids must name the orchestrator; it
+      # invokes the child agents itself. Evaluating a child agent directly
+      # needs its own data file with `intent=...; ticketId=...` queries,
+      # because a child does not accept the orchestrator's input contract.
       - name: Replay and evaluate
         uses: microsoft/ai-agent-evals@v3-beta
         with:
           azure-ai-project-endpoint: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
           deployment-name: ${{ vars.AZURE_JUDGE_DEPLOYMENT }}
-          agent-ids: >-
-            ${{ github.event.inputs.agent-ids
-                || github.event.client_payload.agent_ids }}
-          baseline-agent-id: >-
-            ${{ github.event.inputs.baseline-agent-id
-                || github.event.client_payload.baseline_agent_id }}
+          agent-ids: ${{ steps.agents.outputs.ids }}
+          baseline-agent-id: ${{ steps.agents.outputs.baseline }}
           data-path: ${{ github.workspace }}/replay/full-triage.json
