@@ -261,7 +261,11 @@ def validate_args(args, schema):
                 f"'{name}' should be {spec['type']}, got "
                 f"{type(value).__name__}")
         if "enum" in spec and value not in spec["enum"]:
-            allowed = ", ".join(map(str, spec["enum"][:6]))
+            # Show a prefix, but never let it read as the whole enum: with 20
+            # reference types a bare six-value list looks like the valid set.
+            head = [str(v) for v in spec["enum"][:6]]
+            rest = len(spec["enum"]) - len(head)
+            allowed = ", ".join(head) + (f", +{rest} more" if rest > 0 else "")
             problems.append(f"'{name}'={value!r} not in [{allowed}]")
     return problems
 
@@ -431,6 +435,7 @@ def print_report(rows):
     print("\n  * = gating check")
 
     print_tracking(rows)
+    print_skill_drift(rows)
 
 
 def print_tracking(rows):
@@ -439,7 +444,10 @@ def print_tracking(rows):
     Token figures are uncached input plus output; the sum of per-turn prompts
     is not a spend figure.
     """
-    if not any(r.get("usage", {}).get("llm_calls") for r in rows):
+    # Gate on there being usage at all, not on llm_calls. llm_calls counts
+    # chat spans, and is 0 whenever the figures came from the invoke_agent
+    # roll-up instead -- exactly the runs whose spend you still want to see.
+    if not any(_has_usage(r) for r in rows):
         return
     w = max(len(r["traj_key"]) for r in rows) + 2
     print(f"\nTRACKING (not gated)\n{'AGENT [INTENT]':<{w}}"
@@ -460,6 +468,23 @@ def print_tracking(rows):
               f"{r.get('duration_ms', 0) / 1000:>7.1f}s")
     print(f"{'TOTAL':<{w}}{'':>5}{tot_in:>13,}{tot_cached:>11,}{tot_out:>8,}")
 
+
+USAGE_FIELDS = ("llm_calls", "uncached_input_tokens", "cache_read_tokens",
+                "output_tokens", "prompt_tokens_sum")
+
+
+def _has_usage(row):
+    u = row.get("usage") or {}
+    return any(u.get(f) for f in USAGE_FIELDS)
+
+
+def print_skill_drift(rows):
+    """Same skill, different content, across runs being compared.
+
+    Printed regardless of usage: it was inside print_tracking and shared its
+    early return, so a set of runs whose tokens came from the roll-up
+    reported no drift rather than no usage.
+    """
     # A skill file cut mid-payload means the agent worked from incomplete
     # rules, which is a different failure from incomplete data.
     hashes = defaultdict(set)

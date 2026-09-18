@@ -4,10 +4,13 @@
 > `README.md` is the current state. Since this was written:
 >
 > - §10 item 1 (unattended trace export) is built — `export_traces.py`.
-> - §10 item 2 (MCP manifest) is *plumbed*, not filled: the converter takes
->   `--tool-defs`, `run_evals.py` generates argument validation from it, and
->   `extract_tool_manifest.py` builds the file. The schemas themselves are
->   still missing. See `tool_manifests/README.md`.
+> - §10 item 2 (MCP manifest) is built **and filled** — all 20 ConnectWise
+>   tools, from the `cwpsa-mcp` source. `evaluator_ready` went 2/7 → 6/7 and
+>   0/2 → 2/2. But §6's claim that this would catch the `cw_resolve`
+>   failures is **false**: the real server declares `reference_type` as a
+>   bare string with no `enum`, so `valid_tool_args` passes the known-bad
+>   set. §6 was measured against a hand-written fixture that invented the
+>   enum. See `tool_manifests/README.md`.
 > - §10 item 3 (CI wiring) is built — `.github/workflows/evals.yml`.
 > - §10 item 5 (cascade check) is built — `no_search_cascade`, informational.
 > - §10 item 4 (skill-by-reference): partially done, and the premise needs
@@ -21,7 +24,7 @@
 >   only `name` and `description` frontmatter.
 > - §10 item 6: token data is now collected per run and printed every run;
 >   gated only if you set a budget.
-> - §10 item 7 (Foundry submission): `submit_to_foundry.py`.
+> - §10 item 7 (Foundry submission): `foundry/submit_to_foundry.py`.
 > - §10 item 9 (statistics): handed to `microsoft/ai-agent-evals`, which does
 >   confidence intervals and significance testing. With a dev ConnectWise
 >   instance and a Foundry staging project now available, §5's replay set is
@@ -345,6 +348,23 @@ Every `cw_resolve` failure in the baseline would have been caught by a
 generated check, and so would every future one, across every agent and every
 flow, with nobody writing a check. It is the difference between an eval suite
 that grows linearly with the agent count and one that does not.
+
+> **Correction, 2026-09-17.** The manifest is now filled from the real
+> `cwpsa-mcp` source and this paragraph is **wrong**. `cw_resolve` declares
+> `reference_type: str` with no `enum` — the valid set lives in the docstring,
+> which a JSON Schema validator cannot read. **Fixed upstream in `cbf4e2b`:**
+> `reference_type` is now a closed 20-value `Literal`, the manifest carries the
+> enum, and `"severity"` is caught by the schema before the call.
+>
+> The paragraph is still half wrong, and the half that matters. Of the fourteen
+> tool errors in the two frozen sets, exactly **one** is an argument error.
+> `type`, `subtype`, `item` and `site` are valid types that returned nothing —
+> resolver bugs, not argument bugs, also fixed in `cbf4e2b` but by different
+> means. No schema catches those. The general claim in the next sentence holds;
+> "every `cw_resolve` failure" was never true.
+> The paragraph was measured against a hand-written fixture that invented the
+> enum. The last sentence still holds; the first does not until the tools
+> declare `Literal` types. See `tool_manifests/README.md`.
 
 ### How to get it
 

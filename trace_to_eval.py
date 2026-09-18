@@ -214,6 +214,40 @@ def normalise_timestamp(raw):
     return dt.isoformat(timespec="milliseconds") + "Z"
 
 
+# AppGenAIContent columns -> the gen_ai.* attribute they replace. From
+# 2026-09-30 App Insights stops writing these seven values into the span
+# property bag and leaves only a pointer (_MS.GenAIContentId), so a span
+# export alone is empty of content. export_traces.py joins the table and
+# emits these columns; merging them back here keeps every downstream check
+# working either side of that change.
+#
+# It also undoes the 8192-character truncation: these are real columns, not
+# property-bag entries, so the App Insights property cap never applied.
+CONTENT_COLUMNS = {
+    "c_input":       K_IN_MSGS,
+    "c_output":      K_OUT_MSGS,
+    "c_system":      K_SYS,
+    "c_tool_defs":   K_TOOL_DEFS,
+    "c_tool_args":   K_TOOL_ARGS,
+    "c_tool_result": K_TOOL_RES,
+}
+
+
+def merge_content_columns(row, dims):
+    """Overlay AppGenAIContent columns onto a span's customDimensions.
+
+    The column wins when it has a value: after the migration the property bag
+    holds a pointer rather than the payload, and before it the bag may hold a
+    truncated copy of what the column has in full.
+    """
+    merged = dict(dims)
+    for column, attr in CONTENT_COLUMNS.items():
+        value = _col(row, column)
+        if value not in (None, ""):
+            merged[attr] = value
+    return merged
+
+
 def load_spans(path):
     with open(path, "r", encoding="utf-8-sig") as fh:
         head = fh.read(1)
@@ -226,6 +260,7 @@ def load_spans(path):
     for r in rows:
         d = _as_dict(_col(r, "customDimensions", "CustomDimensions", "Properties",
                           "dims"))
+        d = merge_content_columns(r, d)
         spans.append({
             "timestamp": normalise_timestamp(
                 _col(r, "timestamp", "TimeGenerated")),
@@ -358,11 +393,36 @@ def _flatten_text(obj, out=None):
 
 
 def _normalise_intent(raw):
-    r = raw.strip().strip('.,;')
+    """Canonical casing for a supported intent, else None.
+
+    Only SUPPORTED_INTENTS members are returned. An arbitrary string used to
+    come back, which meant any `intent:`-looking line anywhere in the input
+    messages — and those carry pasted skill files — could repoint `traj_key`
+    to a key no expectation uses, silently skipping the trajectory check.
+    That contradicts extract_intent's own promise that a guessed intent never
+    matches an intent-keyed expectation. None falls back to the bare agent
+    name, which is the documented behaviour for an intent we cannot resolve.
+    """
+    r = (raw or "").strip().strip('.,;')
     for known in SUPPORTED_INTENTS:
         if r.lower() == known.lower():
             return known
-    return r or None
+    return None
+
+
+def _first_supported_intent(text):
+    """First `intent:`/`intent=` value in `text` that names a real intent.
+
+    Iterates rather than taking match one: skill files are pasted into the
+    input messages, so the first match can be documentation. Requiring a
+    SUPPORTED_INTENTS member means a doc line only matters if it names an
+    actual intent, and then the next real hand-off still wins.
+    """
+    for m in _INTENT_RE.finditer(text or ""):
+        intent = _normalise_intent(m.group(1))
+        if intent:
+            return intent
+    return None
 
 
 def extract_intent(run_dims, steps, inbound=None):
@@ -385,19 +445,21 @@ def extract_intent(run_dims, steps, inbound=None):
     intent-keyed expectations from matching a run whose intent we guessed.
     """
     blob = " ".join(_flatten_text(_json_or_raw(run_dims.get(K_IN_MSGS))))
-    m = _INTENT_RE.search(blob)
-    if m:
-        return _normalise_intent(m.group(1)), "declared"
+    declared = _first_supported_intent(blob)
+    if declared:
+        return declared, "declared"
 
     if inbound:
-        return _normalise_intent(inbound), "inbound"
+        normalised = _normalise_intent(inbound)
+        if normalised:
+            return normalised, "inbound"
 
     for st in steps:
         if not st.get("is_a2a"):
             continue
-        m = _INTENT_RE.search(st.get("arguments", "") or "")
-        if m:
-            return _normalise_intent(m.group(1)), "delegated"
+        delegated = _first_supported_intent(st.get("arguments", "") or "")
+        if delegated:
+            return delegated, "delegated"
 
     return None, "unknown"
 
@@ -846,6 +908,23 @@ def main():
 
     manifests = load_tool_manifests(args.tool_defs)
     spans = load_spans(args.spans)
+
+    # A span export taken after 2026-09-30 without the AppGenAIContent join
+    # still has the attribute KEYS, holding pointers instead of payloads.
+    # Every check would then quietly score empty runs, so say so loudly.
+    pointered = sum(1 for s in spans
+                    if s["d"].get("_MS.GenAIContentId")
+                    and not s["d"].get(K_IN_MSGS)
+                    and not s["d"].get(K_TOOL_RES)
+                    and not s["d"].get(K_TOOL_ARGS))
+    if pointered and pointered == sum(1 for s in spans
+                                      if s["d"].get("_MS.GenAIContentId")):
+        print(f"WARNING: {pointered} span(s) carry _MS.GenAIContentId with no "
+              "gen_ai content. App Insights stopped writing these values into "
+              "the span tables on 2026-09-30 — re-export with the "
+              "AppGenAIContent join (export_traces.py does this by default) "
+              "or every check will score an empty run.\n")
+
     runs, summary, skill_bodies = convert(spans, manifests)
     os.makedirs(args.out, exist_ok=True)
 

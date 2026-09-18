@@ -354,3 +354,117 @@ def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
     assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
     index = json.loads((tmp_path / "index.json").read_text())
     assert [v["skill_name"] for v in index.values()] == ["ok"]
+
+
+# --- AppGenAIContent migration ---------------------------------------------
+
+def test_content_columns_override_the_property_bag():
+    """From 2026-09-30 the span tables carry a pointer, not the payload, so
+    the AppGenAIContent column is the only real source."""
+    row = {"customDimensions": json.dumps({t.K_TOOL_RES: "pointer:abc"}),
+           "c_tool_result": '{"count": 3}'}
+    merged = t.merge_content_columns(row, t._as_dict(row["customDimensions"]))
+    assert merged[t.K_TOOL_RES] == '{"count": 3}'
+
+
+def test_content_columns_undo_the_8192_truncation():
+    """ToolCallResult is a real column, not a property-bag entry, so the
+    App Insights property cap never applied to it."""
+    truncated = "x" * t.TRUNC_BOUNDARY
+    full = "x" * 20000
+    row = {"customDimensions": json.dumps({t.K_TOOL_RES: truncated}),
+           "c_tool_result": full}
+    merged = t.merge_content_columns(row, t._as_dict(row["customDimensions"]))
+    assert len(merged[t.K_TOOL_RES]) == 20000
+
+
+def test_an_empty_content_column_leaves_the_property_bag_alone():
+    """During the dual-write window a span may have the value inline and no
+    joined row; the leftouter join then yields empty columns."""
+    row = {"c_tool_result": "", "c_input": None}
+    merged = t.merge_content_columns(row, {t.K_TOOL_RES: "inline value"})
+    assert merged[t.K_TOOL_RES] == "inline value"
+
+
+def test_every_sensitive_attribute_has_a_column_mapping():
+    """The seven attributes App Insights moves to AppGenAIContent. Six are
+    consumed here; gen_ai.evaluation.explanation is not read by any check."""
+    assert set(t.CONTENT_COLUMNS.values()) == {
+        t.K_IN_MSGS, t.K_OUT_MSGS, t.K_SYS,
+        t.K_TOOL_DEFS, t.K_TOOL_ARGS, t.K_TOOL_RES,
+    }
+
+
+def test_a_full_row_with_content_columns_converts_normally():
+    rows = [{
+        "timestamp [UTC]": "9/3/2026, 5:29:42.893 PM",
+        "name": "execute_tool cw_query",
+        "id": "s1", "operation_Id": "op1", "operation_ParentId": "",
+        "duration": "10", "success": "True",
+        "customDimensions": json.dumps({
+            "gen_ai.agent.name": "triage-analysis-agent",
+            "gen_ai.tool.name": "cw_query",
+            "_MS.GenAIContentId": "abc",
+        }),
+        "c_tool_args": '{"entity": "service/tickets"}',
+        "c_tool_result": '{"count": 0}',
+    }]
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(rows, fh)
+    try:
+        spans = t.load_spans(path)
+        runs, _, _ = t.convert(spans)
+    finally:
+        os.unlink(path)
+    assert runs[0]["tool_names"] == ["cw_query"]
+    assert runs[0]["empty_results"], "dead end should be detected from the column"
+
+
+# --- intent must name a real intent -----------------------------------------
+
+def _dims(text):
+    return {t.K_IN_MSGS: json.dumps([{"role": "user", "content": text}])}
+
+
+def test_a_doc_line_cannot_repoint_the_trajectory_key():
+    """Skill files are pasted into the input messages.
+
+    _INTENT_RE takes any `intent:`/`intent=` value, so the first match could
+    be documentation rather than the hand-off. An arbitrary value used to be
+    accepted, producing a traj_key no expectation uses -- the trajectory
+    check then skipped, silently, on a run that had a perfectly good intent
+    further down the same blob.
+    """
+    blob = ("# Orchestration skill\n"
+            "Set intent: <the classified intent> before delegating.\n"
+            "---\n"
+            "intent=Full Triage; ticketId=805392")
+    intent, source = t.extract_intent(_dims(blob), [])
+    assert intent == "Full Triage", (intent, source)
+    assert source == "declared"
+
+
+def test_an_unknown_intent_is_not_an_intent():
+    """None falls back to the bare agent name, which is the documented
+    behaviour for an intent we cannot resolve. Returning the raw string
+    instead produced a key nothing matches."""
+    intent, source = t.extract_intent(_dims("intent=Sandwich Making"), [])
+    assert intent is None and source == "unknown", (intent, source)
+
+
+def test_a_real_intent_still_resolves():
+    intent, source = t.extract_intent(
+        _dims("intent=Write Request; ticketId=1"), [])
+    assert intent == "Write Request" and source == "declared"
+
+
+def test_inbound_and_delegated_are_constrained_too():
+    assert t.extract_intent({}, [], inbound="Nonsense") == (None, "unknown")
+    assert t.extract_intent({}, [], inbound="write request") == \
+        ("Write Request", "inbound")
+    steps = [{"is_a2a": True, "tool": "x", "arguments": "intent=Nonsense"}]
+    assert t.extract_intent({}, steps) == (None, "unknown")
+    steps = [{"is_a2a": True, "tool": "x", "arguments": "intent=Full Triage"}]
+    assert t.extract_intent({}, steps) == ("Full Triage", "delegated")
