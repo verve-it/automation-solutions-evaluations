@@ -81,9 +81,10 @@ over exactly this.
 
 ## Two things it may also fix
 
-**`ToolDefinitions` is a column.** Check whether it is populated for the
-ConnectwiseMCP tools before extracting a manifest by hand — it may close
-`tool_manifests/` outright.
+**`ToolDefinitions` is a column.** `tool_manifests/` is filled from the
+`cwpsa-mcp` source, so this is no longer the only route — but a populated
+`ToolDefinitions` would give the **deployed** contract rather than the
+contract the source implies, which is strictly better. Worth checking.
 
 ```kusto
 AppGenAIContent

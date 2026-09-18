@@ -9,6 +9,17 @@ reproducible without Azure access.
 | `2026-09-03-full-triage.csv` | 2026-09-03 | Two complete Full Triage orchestrations, 7 agent runs, 715 spans. The known-good set. |
 | `2026-09-15-ops-worst-case.csv` | 2026-09-15 | The two worst observed `connectwise-operations-agent` runs, unlinked (single-agent traces). The known-bad set. |
 
+> **Both sets predate `cwpsa-mcp` `cbf4e2b`** (see
+> `docs/MCP-SERVER-FINDINGS.md`). Several failures in the known-bad set —
+> the empty `type`/`subtype`/`item` resolves, the four-deep `cw_resolve`
+> cascade they caused — are server bugs that no longer exist. That does
+> not weaken these sets as the regression gate for the **eval code**,
+> which is what they are for: the spans are fixed input and the scores
+> must not drift. It does mean they are no longer reproducible agent
+> behaviour. Do not read `ops-worst-case` as a live statement about how
+> the ops agent behaves today; capture a fresh known-bad set once there
+> are post-fix traces worth freezing.
+
 `traces/auto/` is where `export_traces.py` lands unattended exports. It is
 gitignored: promote a run into a dated file here by hand, with a row in this
 table, when it is worth freezing a baseline against.

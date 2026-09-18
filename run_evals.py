@@ -261,7 +261,11 @@ def validate_args(args, schema):
                 f"'{name}' should be {spec['type']}, got "
                 f"{type(value).__name__}")
         if "enum" in spec and value not in spec["enum"]:
-            allowed = ", ".join(map(str, spec["enum"][:6]))
+            # Show a prefix, but never let it read as the whole enum: with 20
+            # reference types a bare six-value list looks like the valid set.
+            head = [str(v) for v in spec["enum"][:6]]
+            rest = len(spec["enum"]) - len(head)
+            allowed = ", ".join(head) + (f", +{rest} more" if rest > 0 else "")
             problems.append(f"'{name}'={value!r} not in [{allowed}]")
     return problems
 
