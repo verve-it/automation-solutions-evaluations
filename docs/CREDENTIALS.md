@@ -32,14 +32,12 @@ The Azure-touching jobs run **under a GitHub environment**:
       name: ${{ matrix.environment }}     # staging | prod
 ```
 
-When a job declares an environment, the OIDC token's subject claim is
-
-```
-repo:verve-it/automation-solutions-evaluations:environment:staging
-```
-
-**not** the branch form `…:ref:refs/heads/staging`. Almost every tutorial shows
-the branch form, because most jobs do not use environments. Configure the
+When a job declares an environment, the OIDC token's subject claim ends
+`:environment:staging`, **not** the branch form `:ref:refs/heads/staging`.
+Almost every tutorial shows the branch form, because most jobs do not use
+environments. (The full subject also carries numeric ids — see "The subject is
+not what the tutorials say" below. Two independent departures from the usual
+example, and you need both right.) Configure the
 branch subject here and `azure/login` fails with `AADSTS70021: No matching
 federated identity record found` — which reads like a broken client id rather
 than a wrong subject.
@@ -67,8 +65,11 @@ command line is the most common way this step goes wrong, and `az` accepts
 committed.
 
 ```powershell
-$repo    = "verve-it/automation-solutions-evaluations"
-$envName = "staging"                       # then repeat with: prod
+# Immutable subject claim -- see "The subject is not what the tutorials say"
+# below. These ids are this repository's, and are stable for its lifetime.
+$org      = "verve-it";                        $orgId  = "205844247"
+$repoName = "automation-solutions-evaluations"; $repoId = "1373336364"
+$envName  = "staging"                      # then repeat with: prod
 $fed     = Join-Path $env:TEMP "fed-$envName.json"
 
 $appId = az ad app create --display-name "evals-ci-$envName" --query appId -o tsv
@@ -78,7 +79,7 @@ az ad sp create --id $appId
 {
   "name": "github-$envName",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:${repo}:environment:$envName",
+  "subject": "repo:${org}@${orgId}/${repoName}@${repoId}:environment:$envName",
   "audiences": ["api://AzureADTokenExchange"]
 }
 "@ | Set-Content -Path $fed -Encoding ascii
@@ -111,7 +112,7 @@ cat > "$FED" <<JSON
 {
   "name": "github-$ENV",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:$REPO:environment:$ENV",
+  "subject": "repo:verve-it@205844247/automation-solutions-evaluations@1373336364:environment:$ENV",
   "audiences": ["api://AzureADTokenExchange"]
 }
 JSON
@@ -123,7 +124,52 @@ The parameters file holds a name, an issuer, a subject and an audience. There
 is no secret in it — a stray copy is clutter, not a disclosure. Delete it and
 move on. `.gitignore` covers `fed-*.json` as a backstop.
 
+### The subject is not what the tutorials say — immutable IDs
+
+**This repository uses GitHub's immutable subject claim format.** The token it
+presents is not
+
+```
+repo:verve-it/automation-solutions-evaluations:environment:staging
+```
+
+but
+
+```
+repo:verve-it@205844247/automation-solutions-evaluations@1373336364:environment:staging
+```
+
+— the organisation and repository numeric database IDs appended to each name.
+GitHub made this the default for repositories created after 2026-07-15, and for
+any repository renamed or transferred after that date. This one was created
+2026-09-16, so it was never on the old format.
+
+Azure federated credentials match the subject as an **exact string**, not a
+pattern, so a credential configured with the plain form never matches. The
+failure is `AADSTS700213`, and its message helpfully prints the subject that
+was actually presented — which is the authoritative source for these ids, more
+so than looking them up.
+
+The ids are stable for the life of the repository. For this one:
+
+| | |
+|---|---|
+| organisation `verve-it` | `205844247` |
+| repository `automation-solutions-evaluations` | `1373336364` |
+
+So the subject to configure is:
+
+```
+repo:verve-it@205844247/automation-solutions-evaluations@1373336364:environment:staging
+repo:verve-it@205844247/automation-solutions-evaluations@1373336364:environment:prod
+```
+
+Substitute that for `$subject` in the command above. If you already created a
+credential with the plain form, it is inert — delete it, or it will confuse
+the next person reading the list.
+
 ### Read the subject back before moving on
+
 
 ```powershell
 az ad app federated-credential list --id $appId --query "[].subject" -o tsv
@@ -132,7 +178,7 @@ az ad app federated-credential list --id $appId --query "[].subject" -o tsv
 It must print, exactly:
 
 ```
-repo:verve-it/automation-solutions-evaluations:environment:staging
+repo:verve-it@205844247/automation-solutions-evaluations@1373336364:environment:staging
 ```
 
 A subject missing the `repo:` prefix, or carrying `ref:refs/heads/...`, creates
