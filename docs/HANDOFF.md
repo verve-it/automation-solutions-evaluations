@@ -24,7 +24,7 @@
 >   only `name` and `description` frontmatter.
 > - §10 item 6: token data is now collected per run and printed every run;
 >   gated only if you set a budget.
-> - §10 item 7 (Foundry submission): `submit_to_foundry.py`.
+> - §10 item 7 (Foundry submission): `foundry/submit_to_foundry.py`.
 > - §10 item 9 (statistics): handed to `microsoft/ai-agent-evals`, which does
 >   confidence intervals and significance testing. With a dev ConnectWise
 >   instance and a Foundry staging project now available, §5's replay set is

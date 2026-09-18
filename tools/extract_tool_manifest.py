@@ -10,6 +10,11 @@ version, not a per-run capture.
 
 Two inputs, best first:
 
+  --from-url <endpoint>      call `tools/list` on the running MCP server. The
+                             ground truth: it is the DEPLOYED contract, not
+                             what the source implies. Needs a token unless the
+                             server holds its own credentials.
+
   --from-tools-list <file>   the raw JSON-RPC `tools/list` response, or the
                              toolbox definition exported from the Foundry
                              portal. Produces a complete manifest.
@@ -29,12 +34,22 @@ Two inputs, best first:
                              re-run with --from-tools-list. A null schema is
                              skipped by the validator rather than guessed at.
 
-    python3 extract_tool_manifest.py --from-trace traces/2026-09-03-full-triage.csv \\
+    python3 extract_tool_manifest.py --from-trace traces/2026-09-03-full-triage.json \\
         --toolbox ConnectwiseMCP --version 5 -o tool_manifests/connectwisemcp-v5.json
 """
 
 from __future__ import annotations
+
+# This script lives in a subdirectory but imports the converter and scorer
+# from the repo root, so put the root on sys.path before those imports. Keeps
+# `python3 tools/extract_tool_manifest.py` working from anywhere, with no package
+# conversion and no editable install. REPO_ROOT is also how sibling
+# directories such as foundry_evaluators/ are located.
+import os, sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 import argparse, datetime as _dt, json, os, subprocess, sys
+import urllib.error, urllib.request
 
 
 def _git_rev(repo):
@@ -50,6 +65,111 @@ from collections import defaultdict
 from trace_to_eval import (K_TOOL, K_TOOL_ARGS, K_TOOL_DESC, base_tool_name,
                            find_toolboxes, is_tool_span, load_spans,
                            unwrap_call_tool, AGENT_NAMES)
+
+
+DEFAULT_SCOPE = "https://ai.azure.com/.default"
+# MCP streamable HTTP replies with either JSON or an SSE stream.
+ACCEPT = "application/json, text/event-stream"
+
+
+def _token(explicit, scope):
+    if explicit:
+        return explicit
+    env = os.environ.get("FOUNDRY_TOKEN")
+    if env:
+        return env
+    try:
+        from azure.identity import DefaultAzureCredential
+    except ImportError:
+        sys.exit("azure-identity not installed and no --token/FOUNDRY_TOKEN. "
+                 "pip install -r requirements.txt, or paste a token from "
+                 f"`az account get-access-token --scope {scope}`")
+    return DefaultAzureCredential().get_token(scope).token
+
+
+def _post(url, token, payload, session=None):
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json", "Accept": ACCEPT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if session:
+        headers["Mcp-Session-Id"] = session
+    req = urllib.request.Request(url, data=body, headers=headers,
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return (resp.read().decode("utf-8", "replace"),
+                    resp.headers.get("Mcp-Session-Id"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        sys.exit(f"HTTP {exc.code} from {url}\n{detail}\n\n"
+                 "401/403 usually means the wrong token scope — try "
+                 f"--scope https://cognitiveservices.azure.com/.default")
+
+
+def _parse(raw):
+    """A streamable-HTTP endpoint may answer with SSE; take the last frame."""
+    raw = raw.strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        return json.loads(raw)
+    frames = [l[len("data:"):].strip() for l in raw.splitlines()
+              if l.startswith("data:")]
+    if not frames:
+        sys.exit(f"unrecognised response: {raw[:300]}")
+    return json.loads(frames[-1])
+
+
+def fetch_tools(url, token):
+    """initialize -> notifications/initialized -> tools/list, per the MCP
+    streamable-HTTP handshake. The session id comes back on the initialize
+    response and must be echoed on every later request."""
+    raw, session = _post(url, token, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "triage-automation-evals",
+                                  "version": "1"}},
+    })
+    _parse(raw)
+    _post(url, token,
+          {"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
+
+    raw, _ = _post(url, token,
+                   {"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                    "params": {}}, session)
+    reply = _parse(raw)
+    if "error" in reply:
+        sys.exit(f"tools/list failed: {reply['error']}")
+    return reply.get("result", {}).get("tools", [])
+
+
+def fetch_tools_via_sdk(host, project, toolbox, revision):
+    """Let the SDK talk to the toolbox, so it supplies the api-version.
+
+    The raw endpoint rejects a request without `?api-version=`, and guessing
+    the right value is a round-trip each time.
+    """
+    from azure.ai.projects import AIProjectClient
+    from azure.identity import DefaultAzureCredential
+
+    endpoint = f"{host.rstrip('/')}/api/projects/{project}"
+    client = AIProjectClient(endpoint=endpoint,
+                             credential=DefaultAzureCredential())
+    try:
+        box = client.toolboxes.get_version(name=toolbox, version=str(revision))
+    except AttributeError:
+        box = client.toolboxes.get(name=toolbox)
+
+    for attr in ("tools", "tool_definitions", "definitions"):
+        found = getattr(box, attr, None)
+        if found:
+            return [t if isinstance(t, dict) else
+                    getattr(t, "as_dict", lambda: vars(t))() for t in found]
+    raise SystemExit(
+        "the toolbox object carries no tool list under tools / "
+        "tool_definitions / definitions. Its attributes are: "
+        + ", ".join(a for a in dir(box) if not a.startswith("_")))
 
 
 def from_tools_list(payload):
@@ -165,6 +285,13 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--from-url", metavar="ENDPOINT",
+                     help="the MCP server's endpoint. Go at the server "
+                          "directly: the Foundry toolbox path "
+                          "(/api/projects/<p>/toolboxes/<t>/versions/<v>/mcp) "
+                          "rejects az tokens and API keys with "
+                          "AgenticIdentityToken and is reachable only from "
+                          "inside an agent run.")
     src.add_argument("--from-tools-list", metavar="FILE")
     src.add_argument("--from-source", metavar="REPO",
                      help="a checkout of the MCP server")
@@ -176,10 +303,24 @@ def main():
                          "toolbox URL tracks when an agent's binding was last "
                          "edited, not the tool contract. Pin only with "
                          "evidence the contract differs.")
+    ap.add_argument("--scope", default=DEFAULT_SCOPE,
+                    help="token scope for --from-url")
+    ap.add_argument("--token",
+                    help="bearer token for --from-url; overrides "
+                         "DefaultAzureCredential")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="send no Authorization header. An MCP server may "
+                         "hold its own credentials through the project "
+                         "connection rather than expecting yours.")
     ap.add_argument("-o", "--out", required=True)
     args = ap.parse_args()
 
-    if args.from_tools_list:
+    if args.from_url:
+        token = None if args.no_auth else _token(args.token, args.scope)
+        tools = from_tools_list({"tools": fetch_tools(args.from_url, token)})
+        source = (f"tools/list against {args.from_url} on "
+                  f"{_dt.date.today().isoformat()}. The deployed contract.")
+    elif args.from_tools_list:
         with open(args.from_tools_list, encoding="utf-8") as fh:
             tools = from_tools_list(json.load(fh))
         source = f"tools/list: {os.path.basename(args.from_tools_list)}"

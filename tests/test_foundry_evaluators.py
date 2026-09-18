@@ -22,8 +22,8 @@ import to_foundry_dataset                              # noqa: E402
 import trace_to_eval                                   # noqa: E402
 from conftest import REPO                              # noqa: E402
 
-SETS = ["traces/2026-09-03-full-triage.csv",
-        "traces/2026-09-15-ops-worst-case.csv"]
+SETS = ["traces/2026-09-03-full-triage.json",
+        "traces/2026-09-15-ops-worst-case.json"]
 
 # registered evaluator -> the run_evals check it reproduces
 PAIRS = [
@@ -241,7 +241,7 @@ def test_dataset_carries_ground_truth_for_the_trajectory_evaluator():
 def test_cli_builds_a_dataset(tmp_path):
     out = tmp_path / "ds.jsonl"
     subprocess.run(
-        [sys.executable, "to_foundry_dataset.py", SETS[0],
+        [sys.executable, os.path.join("foundry", "to_foundry_dataset.py"), SETS[0],
          "--expected", "expected.json", "-o", str(out)],
         cwd=REPO, check=True, capture_output=True, text=True)
     rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()
@@ -252,7 +252,7 @@ def test_cli_builds_a_dataset(tmp_path):
 def test_register_dry_run_calls_nothing(tmp_path):
     out = tmp_path / "payloads.json"
     result = subprocess.run(
-        [sys.executable, "register_evaluators.py", "--dry-run",
+        [sys.executable, os.path.join("foundry", "register_evaluators.py"), "--dry-run",
          "--out", str(out)],
         cwd=REPO, check=True, capture_output=True, text=True)
     assert "nothing was called" in result.stdout
@@ -613,7 +613,7 @@ def test_registration_writes_the_lock(tmp_path):
     lock = tmp_path / "v.json"
     out = tmp_path / "p.json"
     subprocess.run(
-        [sys.executable, "register_evaluators.py", "--dry-run",
+        [sys.executable, os.path.join("foundry", "register_evaluators.py"), "--dry-run",
          "--out", str(out), "--lock", str(lock)],
         cwd=REPO, check=True, capture_output=True, text=True)
     # --dry-run registers nothing, so it must not invent versions either

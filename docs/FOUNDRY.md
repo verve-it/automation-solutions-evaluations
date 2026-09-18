@@ -31,7 +31,7 @@ repeatable, and the only one that leaves state behind.
   most expensive open item in the handoff and it costs nothing now.
 - **Judged evaluators** (§10.7). Task Adherence, Intent Resolution and
   Relevance are LLM-judged and we could not write them ourselves.
-- **Portal run history**, via `submit_to_foundry.py` or the action's summary.
+- **Portal run history**, via `foundry/submit_to_foundry.py` or the action's summary.
   Somewhere non-engineers can look.
 - **Possibly the tool manifest.** `AIAgentConverter` takes an Agent Service
   thread + run id and returns `tool_definitions` read from the Agent Service
@@ -65,7 +65,7 @@ Judged evaluation is slow and the scores wobble. The split:
 - **Merge gate:** deterministic checks only. Fast, free, no variance.
 - **Agent change:** the action against staging. Significance testing is the
   point — a 3% move on 4 queries is noise and it will say so.
-- **Nightly / weekly:** `submit_to_foundry.py --sample 20` for portal history.
+- **Nightly / weekly:** `foundry/submit_to_foundry.py --sample 20` for portal history.
 - **Always on:** continuous evaluation at a low sampling rate.
 
 ## Branch to project
@@ -189,7 +189,7 @@ industry standard" stops mattering because you have your own answer.
 |---|---|
 | Continuous evaluation | App Insights connected to the Foundry project; the project managed identity holding Foundry User; a `create_agent_evaluation` call per run, so the **agents** call it, not us |
 | `ai-agent-evals` action | The `staging` environment's endpoint, a judge deployment, federated credentials, and `replay/` populated with dev ticket ids |
-| `submit_to_foundry.py` | `azure-ai-evaluation`, a judge deployment, and `tool_manifests/` filled or ToolCallAccuracy is meaningless |
+| `foundry/submit_to_foundry.py` | `azure-ai-evaluation`, a judge deployment, and `tool_manifests/` filled or ToolCallAccuracy is meaningless |
 
 ## Sources
 
@@ -210,15 +210,15 @@ evaluators, so they sit beside Microsoft's built-ins, apply to any agent on
 the same tool surface, and can run in continuous evaluation.
 
 ```powershell
-python register_evaluators.py --dry-run            # inspect, calls nothing
-python register_evaluators.py --project-endpoint $env:AZURE_AI_PROJECT_ENDPOINT --model-deployment $env:AZURE_JUDGE_DEPLOYMENT
+python foundry/register_evaluators.py --dry-run            # inspect, calls nothing
+python foundry/register_evaluators.py --project-endpoint $env:AZURE_AI_PROJECT_ENDPOINT --model-deployment $env:AZURE_JUDGE_DEPLOYMENT
 
-python to_foundry_dataset.py traces/2026-09-03-full-triage.json --expected expected.json --tool-defs tool_manifests/ -o artifacts/foundry-dataset.jsonl
-python run_cloud_eval.py artifacts/foundry-dataset.jsonl --name full-triage --dataset-version 2026-09-17 --judged task_adherence --wait --trace traces/2026-09-03-full-triage.json
+python foundry/to_foundry_dataset.py traces/2026-09-03-full-triage.json --expected expected.json --tool-defs tool_manifests/ -o artifacts/foundry-dataset.jsonl
+python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl --name full-triage --dataset-version 2026-09-17 --judged task_adherence --wait --trace traces/2026-09-03-full-triage.json
 ```
 
 `--wait` runs the comparison below inline. Without it the command prints the
-eval and run ids and the `check_cloud_eval.py` line to follow up with.
+eval and run ids and the `foundry/check_cloud_eval.py` line to follow up with.
 
 | Registered | Threshold | Gating | Reproduces |
 |---|---|---|---|
@@ -242,7 +242,7 @@ Foundry's trace-sourced evaluation reads only spans where
 `execute_tool` span, which that path discards. Four of the eight checks read
 results, so on `azure_ai_traces` they cannot run at all.
 
-`to_foundry_dataset.py` sidesteps it. The converter already reads
+`foundry/to_foundry_dataset.py` sidesteps it. The converter already reads
 `execute_tool` spans, so the results are in hand; the dataset carries standard
 `messages` with `tool_call`/`tool_result` items for the built-in judged
 evaluators, plus a `tool_outcomes` column for ours. That column exists because
@@ -275,8 +275,8 @@ both fixed:
 
 Parity is unaffected: 56 verdicts, 0 mismatches, before and after.
 
-`to_foundry_dataset.py` warns before the upload when a row exceeds a
-megabyte, and `run_cloud_eval.py` refuses `--judged` on a dataset built
+`foundry/to_foundry_dataset.py` warns before the upload when a row exceeds a
+megabyte, and `foundry/run_cloud_eval.py` refuses `--judged` on a dataset built
 without `messages`.
 
 ### The item schema is not optional
@@ -305,7 +305,7 @@ it normalises `item_schema` into `schema_.item`, so an empty `item_schema` in
 the response is not a sign it was ignored.
 
 **A nested object cannot hold a non-string value**, whatever the schema says.
-`diagnose_schema.py` submits one-row datasets differing in one way each and
+`tools/diagnose_schema.py` submits one-row datasets differing in one way each and
 reports which survive:
 
 | shape | result |
@@ -317,7 +317,7 @@ reports which survive:
 
 So `usage` is flattened to `usage_*` columns. Arrays are not descended into,
 which is why `tool_outcomes` and `tool_definitions` keep their structure.
-`to_foundry_dataset.py` refuses to write a dataset containing a nested object
+`foundry/to_foundry_dataset.py` refuses to write a dataset containing a nested object
 column.
 
 ### What the port costs
@@ -346,10 +346,10 @@ the imported function.
 ### Checking a cloud run actually evaluated anything
 
 ```powershell
-python check_cloud_eval.py <eval_id> <run_id> --trace traces/2026-09-03-full-triage.json
+python foundry/check_cloud_eval.py <eval_id> <run_id> --trace traces/2026-09-03-full-triage.json
 ```
 
-The ids are printed by `run_cloud_eval.py`, or pass it `--wait` and it chains
+The ids are printed by `foundry/run_cloud_eval.py`, or pass it `--wait` and it chains
 straight into this. It waits for the run, prints the per-row scores, and diffs them against
 `run_evals.py` at each evaluator's threshold.
 
@@ -357,14 +357,14 @@ straight into this. It waits for the run, prints the per-row scores, and diffs t
 resolve, every evaluator sees an empty list and scores 1.0 for "nothing wrong
 here". That reads as a perfect run and is actually no evaluation at all — the
 same silent-pass hazard as `ToolCallAccuracy` reporting success for a tool
-type it cannot read. `check_cloud_eval.py` fails the run when it sees it.
+type it cannot read. `foundry/check_cloud_eval.py` fails the run when it sees it.
 
 `--raw` dumps the first output item if the result shape has moved.
 
 ### Pin the evaluator versions
 
-`register_evaluators.py` writes `evaluator-versions.json`, and
-`run_cloud_eval.py` pins from it. Without that the criterion's
+`foundry/register_evaluators.py` writes `evaluator-versions.json`, and
+`foundry/run_cloud_eval.py` pins from it. Without that the criterion's
 `evaluator_version` is empty and the run floats to whatever is latest — so two
 runs of the same baseline can be scored by different code, and a "regression"
 may just be a re-registration.

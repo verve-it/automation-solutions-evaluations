@@ -35,7 +35,7 @@ agent wants in.
 | The agent variant bound to the replay toolbox | ✅ | |
 | `expected.json`, `baselines/`, `traces/` | | ✅ |
 | Checks, converter, scorer | | ✅ |
-| Cassettes, `replay_server.py` | | ✅ |
+| Cassettes, `replay/replay_server.py` | | ✅ |
 | `replay/` dataset + the staging replay workflow | | ✅ |
 | Production drift + judged sample | | ✅ |
 

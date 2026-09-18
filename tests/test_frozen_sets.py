@@ -15,10 +15,10 @@ import pytest
 from conftest import REPO
 
 SETS = [
-    ("traces/2026-09-03-full-triage.csv",
-     "baselines/full-triage-2026-09-16.json", 7, 5),
-    ("traces/2026-09-15-ops-worst-case.csv",
-     "baselines/ops-worst-case-2026-09-16.json", 2, 0),
+    ("traces/2026-09-03-full-triage.json",
+     "baselines/full-triage-2026-09-18.json", 7, 5),
+    ("traces/2026-09-15-ops-worst-case.json",
+     "baselines/ops-worst-case-2026-09-18.json", 2, 0),
 ]
 
 

@@ -53,7 +53,7 @@
 > caught by the schema, before the call. `ops-worst-case` stays 2/2, correctly
 > — those were resolver bugs, not argument bugs.
 >
-> `extract_tool_manifest.py --from-source` now does the extraction that was
+> `tools/extract_tool_manifest.py --from-source` now does the extraction that was
 > ad-hoc the first time, stubbing secrets discovered by reading `config.py`.
 >
 > > Until then everything below describes `3987f59` and is kept as the record of

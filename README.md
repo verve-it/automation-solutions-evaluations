@@ -61,26 +61,25 @@ trace set must need nothing installed. Only the Azure-facing scripts need
 
 | Script | Does |
 |---|---|
-| `to_foundry_dataset.py` | trace → Foundry evaluation dataset |
-| `register_evaluators.py` | publishes the checks to the evaluator catalog, writes the version lock |
-| `run_cloud_eval.py` | uploads the dataset, creates the eval and run, pins versions |
-| `check_cloud_eval.py` | waits for a run, fetches scores, diffs them against local |
-| `submit_to_foundry.py` | the judged evaluators (Task Adherence, Intent Resolution) over a sample |
-| `diagnose_schema.py` | probes what the datasource validator accepts |
+| `foundry/to_foundry_dataset.py` | trace → Foundry evaluation dataset |
+| `foundry/register_evaluators.py` | publishes the checks to the evaluator catalog, writes the version lock |
+| `foundry/run_cloud_eval.py` | uploads the dataset, creates the eval and run, pins versions |
+| `foundry/check_cloud_eval.py` | waits for a run, fetches scores, diffs them against local |
+| `foundry/submit_to_foundry.py` | the judged evaluators (Task Adherence, Intent Resolution) over a sample |
+| `tools/diagnose_schema.py` | probes what the datasource validator accepts |
 
 ### Tool manifests
 
 | Script | Does |
 |---|---|
-| `fetch_tool_manifest.py` | `tools/list` against a Foundry toolbox → a manifest |
-| `extract_tool_manifest.py` | a manifest from a `tools/list` dump, or a skeleton from a trace |
+| `tools/extract_tool_manifest.py` | a manifest, from four sources: `--from-url` (the live MCP server — the deployed contract, and the one to prefer), `--from-tools-list` (a saved dump), `--from-source` (a checkout of the server), `--from-trace` (a skeleton, `parameters: null`) |
 
 ### Cassette replay (built, not wired)
 
 | Script | Does |
 |---|---|
-| `make_cassette.py` | a recorded trace → a replay cassette |
-| `replay_server.py` | an MCP server answering from a cassette. No ConnectWise request, no writes. |
+| `replay/make_cassette.py` | a recorded trace → a replay cassette |
+| `replay/replay_server.py` | an MCP server answering from a cassette. No ConnectWise request, no writes. |
 
 ---
 
@@ -132,11 +131,11 @@ history.
 
 ```powershell
 # register once, and after any change to foundry_evaluators/
-python register_evaluators.py --project-endpoint $env:AZURE_AI_PROJECT_ENDPOINT --model-deployment $env:AZURE_JUDGE_DEPLOYMENT
+python foundry/register_evaluators.py --project-endpoint $env:AZURE_AI_PROJECT_ENDPOINT --model-deployment $env:AZURE_JUDGE_DEPLOYMENT
 
 # build the dataset and score it
-python to_foundry_dataset.py traces/2026-09-03-full-triage.json --expected expected.json --tool-defs tool_manifests/ --no-messages -o artifacts/foundry-dataset.jsonl
-python run_cloud_eval.py artifacts/foundry-dataset.jsonl --name full-triage --dataset-version 2026-09-17 --wait --trace traces/2026-09-03-full-triage.json
+python foundry/to_foundry_dataset.py traces/2026-09-03-full-triage.json --expected expected.json --tool-defs tool_manifests/ --no-messages -o artifacts/foundry-dataset.jsonl
+python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl --name full-triage --dataset-version 2026-09-17 --wait --trace traces/2026-09-03-full-triage.json
 ```
 
 ### Adding a trace to the frozen set
@@ -272,25 +271,54 @@ reproduce the case in a trace first.
 
 ## Repository layout
 
+Root holds the everyday pipeline and nothing else. Everything a normal run
+touches is four scripts.
+
 ```
-export_traces.py  trace_to_eval.py  run_evals.py      the local pipeline
-scrub_trace.py                                        redaction before commit
-to_foundry_dataset.py  register_evaluators.py
-run_cloud_eval.py  check_cloud_eval.py                the Foundry path
-foundry_evaluators/                                   the checks, as uploaded
-make_cassette.py  replay_server.py                    record/replay stub
-fetch_tool_manifest.py  extract_tool_manifest.py      tool schemas
+export_traces.py          pull spans out of App Insights
+trace_to_eval.py          spans -> one row per AI Run
+run_evals.py              score the rows, diff against a baseline
+scrub_trace.py            redact customer data before committing a trace
+
+foundry/                  our tooling that TALKS TO Foundry
+  to_foundry_dataset.py     rows -> a Foundry evaluation dataset
+  register_evaluators.py    upload the checks, write the version lock
+  run_cloud_eval.py         start a cloud run against registered evaluators
+  check_cloud_eval.py       poll it, diff the scores against local
+  submit_to_foundry.py      the judged evaluators (sampled, not a gate)
+
+foundry_evaluators/       code that RUNS INSIDE Foundry
+  checks.py  _shared.py     the eight checks, as uploaded
+
+replay/                   record/replay stub
+  make_cassette.py          a trace -> an ordered cassette
+  replay_server.py          serve a cassette as an MCP toolbox
+  full-triage.json          dev tickets for the staging replay
+
+tools/                    occasional, not part of a run
+  extract_tool_manifest.py  a manifest from a URL, dump, source tree or trace
+  diagnose_schema.py        probe what the Foundry datasource validator accepts
 
 expected.json             ground truth, keyed "<agent>|<intent>"
 evaluator-versions.json   the registered versions a run pins
 baselines/                frozen results — COMMIT THESE
 traces/                   raw exports, dated, scrubbed, committed
 tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
-replay/                   dev tickets for the staging replay
 tests/                    unit tests + frozen-set replay
 docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
                           MCP-SERVER-FINDINGS
 ```
+
+`foundry/` and `foundry_evaluators/` are deliberately separate, and the
+distinction is worth keeping straight: one is code that runs **here** and
+calls Foundry, the other is code that gets **uploaded and executed by**
+Foundry. `register_evaluators.py` inlines `foundry_evaluators/_shared.py`
+into each evaluator it uploads, which is why that file has no imports of its
+own.
+
+Scripts outside the root put the repo root on `sys.path` themselves, so
+`python3 foundry/run_cloud_eval.py` works from anywhere with no package
+install.
 
 The Foundry agents live in a **separate repo**. Anything that can change what
 an agent does belongs there; anything that only measures belongs here. See

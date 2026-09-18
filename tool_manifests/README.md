@@ -17,7 +17,7 @@ string-matching the server's error text after it.
 Regenerate with:
 
 ```bash
-python3 extract_tool_manifest.py --from-source /path/to/cwpsa-mcp \
+python3 tools/extract_tool_manifest.py --from-source /path/to/cwpsa-mcp \
     --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
@@ -165,7 +165,8 @@ If the server changes, refresh the manifest. Best route first.
 it is the deployed contract, not the source.
 
 ```powershell
-python3 fetch_tool_manifest.py --url https://<mcp-host>/mcp --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
+python3 tools/extract_tool_manifest.py --from-url https://<mcp-host>/mcp \
+    --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
 The Foundry toolbox endpoint
@@ -176,13 +177,13 @@ inside an agent run. Go at the MCP server directly.
 **2. From a saved `tools/list` dump or portal export:**
 
 ```powershell
-python3 extract_tool_manifest.py --from-tools-list tools-list.json --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
+python3 tools/extract_tool_manifest.py --from-tools-list tools-list.json --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
 **3. From source**, which is how the current file was made:
 
 ```bash
-python3 extract_tool_manifest.py --from-source /path/to/cwpsa-mcp \
+python3 tools/extract_tool_manifest.py --from-source /path/to/cwpsa-mcp \
     --toolbox ConnectwiseMCP -o tool_manifests/connectwisemcp.json
 ```
 
