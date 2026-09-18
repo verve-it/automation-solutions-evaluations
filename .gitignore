@@ -41,3 +41,8 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Scratch parameter files for `az ad app federated-credential create`. No
+# secret in them -- name, issuer, subject, audience -- but they are scratch
+# and belong in the temp directory. See docs/CREDENTIALS.md.
+fed-*.json
