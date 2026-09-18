@@ -253,6 +253,12 @@ def main():
                          "export will be empty of gen_ai.* content.")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the KQL and exit; no credentials needed")
+    ap.add_argument("--span-window-pad-hours", type=float, default=24.0,
+                    help="widen the window for the span fetch by this much on "
+                         "each side. The fetch selects whole orchestrations by "
+                         "operation_Id, so one straddling the window boundary "
+                         "would otherwise export partially and score as lost "
+                         "coverage. 0 restores the old exact-window behaviour.")
     args = ap.parse_args()
 
     table = TABLES["resource"] if args.resource_id else TABLES["workspace"]
@@ -261,15 +267,6 @@ def main():
     # fail here rather than in Kusto with an opaque error.
     if args.resource_id and not args.no_content_join:
         sys.exit("--resource-id cannot join AppGenAIContent (a workspace "
-                 "table). Use --workspace with the Log Analytics workspace "
-                 "GUID, or pass --no-content-join and accept that from "
-                 "2026-09-30 the export carries no gen_ai.* content. "
-                 "See docs/TELEMETRY.md.")
-    # AppGenAIContent is a workspace table. Resource-centric App Insights
-    # queries use the classic table names and the join does not resolve, so
-    # fail here rather than in Kusto with a confusing error.
-    if args.resource_id and not args.no_content_join:
-        sys.exit("--resource-id cannot join AppGenAIContent (it is a workspace "
                  "table). Use --workspace with the Log Analytics workspace "
                  "GUID, or pass --no-content-join and accept that from "
                  "2026-09-30 the export carries no gen_ai.* content. "
@@ -314,10 +311,23 @@ def main():
         save_state(args.state, [], (start, end))
         return 0
 
+    # The span fetch selects whole orchestrations by operation_Id, so the
+    # discovery window must not also bound it. An orchestration that starts
+    # inside the window and ends outside it — or whose spans were ingested
+    # after the watermark — would export partially: the root invoke_agent
+    # span drops, the run scores with empty query/response and unknown
+    # intent, check_trajectory skips, and CI goes red on LOST COVERAGE for
+    # what is a windowing artifact, not an agent regression.
+    #
+    # Padded rather than unbounded: an unbounded scan over a busy workspace
+    # is expensive and can time out. The longest orchestration observed is
+    # ~10 minutes wall clock, so the default has three orders of magnitude
+    # of headroom and still covers late ingestion.
+    pad = timedelta(hours=args.span_window_pad_hours)
     tables = run_query(client, args,
                        spans_query(table, ids,
                                    content=not args.no_content_join),
-                       timespan)
+                       (start - pad, end + pad))
     rows = [{k: _jsonable(v) for k, v in r.items()}
             for r in rows_from(tables)]
 

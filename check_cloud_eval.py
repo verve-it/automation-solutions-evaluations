@@ -83,6 +83,56 @@ def scores_from(item):
     return {}, data
 
 
+def item_index(data):
+    """The dataset row this output item scored, or None.
+
+    Foundry carries it as `datasource_item_id`; older shapes used
+    `datasource_item` with an `index`, or a bare `index`.
+    """
+    for key in ("datasource_item_id", "item_id", "index"):
+        value = data.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    nested = data.get("datasource_item")
+    if isinstance(nested, dict):
+        for key in ("index", "id", "item_id"):
+            value = nested.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+    return None
+
+
+def align(local, scored):
+    """Pair local rows with Foundry output items. None when it cannot be done.
+
+    Joins on the dataset index when the items carry one. Output items are not
+    guaranteed to arrive in dataset order -- they are paged and scored
+    concurrently -- so zipping by position produces confident, wrong
+    MISMATCH lines whenever the order differs. Position is the fallback, and
+    only when every item is accounted for.
+    """
+    indexed = [(item_index(data), s) for s, data in scored]
+    if all(i is not None for i, _ in indexed):
+        by_index = {}
+        for i, s in indexed:
+            if i in by_index or not 0 <= i < len(local):
+                return None                       # duplicate or out of range
+            by_index[i] = s
+        if len(by_index) != len(local):
+            return None
+        return [(local[i], by_index[i]) for i in sorted(by_index)]
+
+    if len(local) != len(scored):
+        return None
+    print("\nNo datasource_item_id on the output items — pairing by position. "
+          "Verify a MISMATCH by hand before believing it.")
+    return list(zip(local, [s for s, _ in scored]))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -143,7 +193,12 @@ def main(argv=None):
         return 0
 
     parsed = [scores_from(i) for i in items]
-    all_scores = [s for s, _ in parsed if s]
+    # Keep the item payload beside the scores: unparsed items must not be
+    # silently dropped, because that shifts every later item's position and
+    # the length check below would still pass.
+    scored = [(s, d) for s, d in parsed if s]
+    unparsed = len(parsed) - len(scored)
+    all_scores = [s for s, _ in scored]
     if not all_scores:
         print("\nNo scores parsed. The result shape is not one this knows; "
               "re-run with --raw and the shape can be added.")
@@ -169,9 +224,13 @@ def main(argv=None):
         return 0
 
     local, _ = local_verdicts(args.trace, args.expected)
-    if len(local) != len(all_scores):
+
+    aligned = align(local, scored)
+    if aligned is None:
         print(f"\n{len(local)} local run(s) vs {len(all_scores)} scored "
-              "item(s) — cannot align, skipping the diff")
+              f"item(s)"
+              + (f" ({unparsed} unparsed)" if unparsed else "")
+              + " — cannot align, skipping the diff")
         return 0
 
     pairs = [(f"cw_{c}", c) for c in
@@ -180,7 +239,7 @@ def main(argv=None):
               "valid_tool_args")]
     print("\nDIFF AGAINST LOCAL")
     mismatches = 0
-    for row, scores in zip(local, all_scores):
+    for row, scores in aligned:
         for registered, check in pairs:
             verdict = row["checks"].get(check, {}).get("passed")
             score = scores.get(registered)

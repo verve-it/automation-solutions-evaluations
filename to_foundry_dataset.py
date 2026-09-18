@@ -40,6 +40,7 @@ Plus columns the registered custom evaluators read:
 
 from __future__ import annotations
 import argparse, json, os, sys
+from collections import defaultdict
 
 from trace_to_eval import (K_TOOL_RES, convert, is_tool_span, load_spans,
                            load_tool_manifests, tool_step)
@@ -57,15 +58,27 @@ def _maybe_json(raw):
         return {"text": raw}
 
 
-def steps_for(spans, op_id, agent):
-    """Re-read the tool spans for one agent run, keeping the raw results the
-    run row deliberately drops."""
+def steps_by_run(spans):
+    """(op_id, agent) -> tool steps, in one pass.
+
+    Keeps the raw results the run row deliberately drops. Grouping once
+    rather than rescanning every span per run: the callers iterate runs, and
+    a rescan made the build O(runs x spans) over data the same function has
+    already walked.
+    """
     from trace_to_eval import K_AGENT
-    steps = [tool_step(s) for s in spans
-             if is_tool_span(s) and s["op_id"] == op_id
-             and s["d"].get(K_AGENT) == agent]
-    steps.sort(key=lambda st: st["timestamp"])
-    return steps
+    grouped = defaultdict(list)
+    for s in spans:
+        if is_tool_span(s):
+            grouped[(s["op_id"], s["d"].get(K_AGENT))].append(tool_step(s))
+    for steps in grouped.values():
+        steps.sort(key=lambda st: st["timestamp"])
+    return grouped
+
+
+def steps_for(spans, op_id, agent):
+    """One run's tool steps. Prefer steps_by_run when iterating runs."""
+    return steps_by_run(spans).get((op_id, agent), [])
 
 
 def flatten_text(value):
@@ -138,9 +151,11 @@ def build_messages(run, steps):
 def build_rows(spans, manifests, expected, budgets=None):
     runs, _, _ = convert(spans, manifests)
     budgets = budgets or {}
+    grouped = steps_by_run(spans)
     rows = []
     for run in runs:
-        steps = steps_for(spans, run["orchestration_id"], run["run_agent"])
+        steps = grouped.get(
+            (run["orchestration_id"], run["run_agent"]), [])
         key = run.get("traj_key") or run["run_agent"]
         rows.append({
             "orchestration_id": run["orchestration_id"],

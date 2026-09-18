@@ -216,3 +216,79 @@ def test_residual_check_uses_the_same_boundaries():
     not have."""
     assert s.still_present("Process", "the Process owner") is True
     assert s.still_present("Process", "Processing only") is False
+
+
+# --- the non-JSON fallback --------------------------------------------------
+
+def _nonjson(text, attr="gen_ai.tool.call.result"):
+    """A payload that fails json.loads — a prose tool result, say."""
+    return {"customDimensions": json.dumps({attr: text})}
+
+
+def test_a_non_json_payload_is_scanned_for_names_and_phones():
+    """The fallback used to run EMAIL only.
+
+    40% of the payloads in the committed traces fail json.loads -- tool
+    results and input messages among them, which is exactly where customer
+    data is. A name or phone there was never proposed, so never reviewed,
+    never redacted, and never reported as residual by --verify. The scrub
+    passed and the data shipped.
+    """
+    found = s.propose([_nonjson(
+        "Contacted Jeff Gilbert at 209-244-7120 "
+        "(jeff.gilbert@example.com) about the laptop. Not valid JSON {")])
+    assert "jeff.gilbert@example.com" in found
+    # CAPPHRASE takes the whole capitalised run, sentence-initial word
+    # included -- the reviewer sees the name either way.
+    assert any("Jeff Gilbert" in v for v in found), sorted(found)
+    assert any(k == "PHONE" for k in found.values()), sorted(found.items())
+
+
+def test_the_fallback_still_respects_the_skill_filter():
+    """Our own documentation is not a person, JSON or not."""
+    found = s.propose([_nonjson("## Escalation Policy\nAsk the Triage Team.",
+                                attr="gen_ai.system_instructions")])
+    assert not [v for v, k in found.items() if k == "NAME?"], sorted(found)
+
+
+def test_json_and_non_json_payloads_propose_the_same_literals():
+    """The two paths ran different heuristics, which is how this happened.
+
+    Same text, once as a JSON string leaf and once as raw prose, must yield
+    the same candidates.
+    """
+    text = "Call Connie Revay on 209-478-8864 or connie@example.com"
+    as_json = s.propose([_nonjson(json.dumps([text]))])   # parses
+    as_prose = s.propose([_nonjson(text + " {")])         # does not
+    assert as_json, "the JSON path proposed nothing -- test is wrong"
+    assert set(as_json) == set(as_prose), (sorted(as_json), sorted(as_prose))
+
+
+def test_learn_withholds_protected_vocabulary(tmp_path, monkeypatch, capsys):
+    """Proposing a term that can only be rejected at apply time wastes the
+    review attention that decides whether a real name gets caught.
+
+    Uses a sensitive key rather than the capitalised-phrase heuristic: the
+    stopword list already drops most vocabulary, so the terms that reach the
+    proposal are the ones arriving by some other route. Those are the ones
+    worth withholding.
+    """
+    term = sorted(s.protected_vocabulary())[0]
+    key = sorted(s.SENSITIVE_KEYS - s.NEVER_PROPOSE)[0]
+    payload = {"gen_ai.tool.call.result":
+               json.dumps({key: term.title(), "note": "Contact Grant Johnson"})}
+    trace = tmp_path / "t.json"
+    trace.write_text(json.dumps([{"customDimensions": json.dumps(payload)}]))
+
+    assert term.title() in s.propose(json.loads(trace.read_text())), \
+        "the term is not proposed at all -- the test proves nothing"
+
+    out = tmp_path / "candidates.json"
+    monkeypatch.setattr("sys.argv",
+                        ["scrub_trace.py", str(trace), "--learn", str(out)])
+    assert s.main() == 0
+    proposed = list(json.loads(out.read_text()))
+    assert term not in {k.strip().lower() for k in proposed}, proposed
+    assert "withheld" in capsys.readouterr().out
+    # and the real name beside it is still proposed
+    assert any("Grant Johnson" in k for k in proposed), proposed

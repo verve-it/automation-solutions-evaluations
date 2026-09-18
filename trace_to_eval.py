@@ -393,11 +393,36 @@ def _flatten_text(obj, out=None):
 
 
 def _normalise_intent(raw):
-    r = raw.strip().strip('.,;')
+    """Canonical casing for a supported intent, else None.
+
+    Only SUPPORTED_INTENTS members are returned. An arbitrary string used to
+    come back, which meant any `intent:`-looking line anywhere in the input
+    messages — and those carry pasted skill files — could repoint `traj_key`
+    to a key no expectation uses, silently skipping the trajectory check.
+    That contradicts extract_intent's own promise that a guessed intent never
+    matches an intent-keyed expectation. None falls back to the bare agent
+    name, which is the documented behaviour for an intent we cannot resolve.
+    """
+    r = (raw or "").strip().strip('.,;')
     for known in SUPPORTED_INTENTS:
         if r.lower() == known.lower():
             return known
-    return r or None
+    return None
+
+
+def _first_supported_intent(text):
+    """First `intent:`/`intent=` value in `text` that names a real intent.
+
+    Iterates rather than taking match one: skill files are pasted into the
+    input messages, so the first match can be documentation. Requiring a
+    SUPPORTED_INTENTS member means a doc line only matters if it names an
+    actual intent, and then the next real hand-off still wins.
+    """
+    for m in _INTENT_RE.finditer(text or ""):
+        intent = _normalise_intent(m.group(1))
+        if intent:
+            return intent
+    return None
 
 
 def extract_intent(run_dims, steps, inbound=None):
@@ -420,19 +445,21 @@ def extract_intent(run_dims, steps, inbound=None):
     intent-keyed expectations from matching a run whose intent we guessed.
     """
     blob = " ".join(_flatten_text(_json_or_raw(run_dims.get(K_IN_MSGS))))
-    m = _INTENT_RE.search(blob)
-    if m:
-        return _normalise_intent(m.group(1)), "declared"
+    declared = _first_supported_intent(blob)
+    if declared:
+        return declared, "declared"
 
     if inbound:
-        return _normalise_intent(inbound), "inbound"
+        normalised = _normalise_intent(inbound)
+        if normalised:
+            return normalised, "inbound"
 
     for st in steps:
         if not st.get("is_a2a"):
             continue
-        m = _INTENT_RE.search(st.get("arguments", "") or "")
-        if m:
-            return _normalise_intent(m.group(1)), "delegated"
+        delegated = _first_supported_intent(st.get("arguments", "") or "")
+        if delegated:
+            return delegated, "delegated"
 
     return None, "unknown"
 

@@ -647,3 +647,57 @@ def test_valid_tool_args_scores_one_with_no_schema_which_is_why_it_is_dropped():
         {}, {"tool_outcomes": [{"tool": "cw_resolve", "result_head": "",
                                 "result_len": 0, "success": True}],
              "tool_definitions": []}) == 1.0
+
+
+# --- pairing local rows with Foundry output items ---------------------------
+
+ALIGN_ROWS = [{"run_agent": f"a{i}"} for i in range(3)]
+
+
+def _align(scored):
+    return check_cloud_eval.align(ALIGN_ROWS, scored)
+
+
+def test_output_items_are_joined_on_their_dataset_index():
+    """They were zipped by position with only a length check.
+
+    Output items are paged and scored concurrently, so dataset order is not
+    guaranteed. Zipping produced confident, wrong MISMATCH lines the moment
+    the order differed -- the worst failure mode for a tool whose whole job
+    is to say whether Foundry agrees with local.
+    """
+    scored = [({"cw_x": 1.0}, {"datasource_item_id": 2}),
+              ({"cw_x": 0.0}, {"datasource_item_id": 0}),
+              ({"cw_x": 0.5}, {"datasource_item_id": 1})]
+    got = _align(scored)
+    assert [r["run_agent"] for r, _ in got] == ["a0", "a1", "a2"]
+    assert [s["cw_x"] for _, s in got] == [0.0, 0.5, 1.0]
+
+
+def test_the_nested_item_shape_is_read_too():
+    """The evals surface is preview and this key has moved."""
+    scored = [({"cw_x": 1.0}, {"datasource_item": {"index": i}})
+              for i in (1, 0, 2)]
+    assert [r["run_agent"] for r, _ in _align(scored)] == ["a0", "a1", "a2"]
+
+
+def test_position_is_the_fallback_when_no_index_is_carried():
+    scored = [({"cw_x": float(i)}, {}) for i in range(3)]
+    assert [s["cw_x"] for _, s in _align(scored)] == [0.0, 1.0, 2.0]
+
+
+def test_a_dropped_item_refuses_rather_than_shifting():
+    """An item whose scores do not parse used to be filtered out, shifting
+    every later item by one while the length check still passed."""
+    scored = [({"cw_x": 1.0}, {"datasource_item_id": 0}),
+              ({"cw_x": 1.0}, {"datasource_item_id": 1})]
+    assert _align(scored) is None
+
+
+def test_duplicate_indices_refuse():
+    assert _align([({"cw_x": 1.0}, {"datasource_item_id": 0})] * 3) is None
+
+
+def test_an_out_of_range_index_refuses():
+    assert _align([({"cw_x": 1.0}, {"datasource_item_id": i})
+                   for i in (0, 1, 99)]) is None
