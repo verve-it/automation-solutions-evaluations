@@ -22,10 +22,18 @@ do. See docs/FOUNDRY.md.
 """
 
 from __future__ import annotations
+
+# This script lives in a subdirectory but imports the converter and scorer
+# from the repo root, so put the root on sys.path before those imports. Keeps
+# `python3 foundry/run_cloud_eval.py` working from anywhere, with no package
+# conversion and no editable install. REPO_ROOT is also how sibling
+# directories such as foundry_evaluators/ are located.
+import os, sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 import argparse, json, os, sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "foundry_evaluators"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "foundry_evaluators"))
 import checks                                          # noqa: E402
 
 # Judged evaluators worth running on the same rows. Sampled, not swept.

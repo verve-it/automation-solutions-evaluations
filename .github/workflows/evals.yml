@@ -85,20 +85,20 @@ jobs:
 
       - name: Score the known-good set
         run: |
-          python trace_to_eval.py traces/2026-09-03-full-triage.csv \
+          python trace_to_eval.py traces/2026-09-03-full-triage.json \
               -o out --tool-defs tool_manifests/
           python run_evals.py out/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/full-triage-2026-09-16.json \
+              --baseline baselines/full-triage-2026-09-18.json \
               --json artifacts/full-triage.json
 
       - name: Score the known-bad set
         run: |
-          python trace_to_eval.py traces/2026-09-15-ops-worst-case.csv \
+          python trace_to_eval.py traces/2026-09-15-ops-worst-case.json \
               -o out-ops --tool-defs tool_manifests/
           python run_evals.py out-ops/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/ops-worst-case-2026-09-16.json \
+              --baseline baselines/ops-worst-case-2026-09-18.json \
               --json artifacts/ops-worst-case.json
 
       - uses: actions/upload-artifact@v4
@@ -199,7 +199,7 @@ jobs:
         run: |
           python run_evals.py out/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/full-triage-2026-09-16.json \
+              --baseline baselines/full-triage-2026-09-18.json \
               --json "artifacts/drift-$(date -u +%Y%m%dT%H%M%SZ).json"
 
       # The same runs, scored by the registered evaluators in Foundry, so the
@@ -213,7 +213,7 @@ jobs:
       # just be a re-registration.
       - name: Build the Foundry dataset
         run: |
-          python to_foundry_dataset.py artifacts/spans.json \
+          python foundry/to_foundry_dataset.py artifacts/spans.json \
               --expected expected.json \
               --tool-defs tool_manifests/ \
               --no-messages \
@@ -221,7 +221,7 @@ jobs:
 
       - name: Score it in Foundry
         run: |
-          python run_cloud_eval.py artifacts/foundry-dataset.jsonl \
+          python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --name "drift-${{ matrix.environment }}" \
@@ -235,7 +235,7 @@ jobs:
           github.event.schedule == '0 7 * * 1'
           || github.event.inputs.judged == 'true'
         run: |
-          python submit_to_foundry.py out/eval_runs.jsonl \
+          python foundry/submit_to_foundry.py out/eval_runs.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --sample 20 \

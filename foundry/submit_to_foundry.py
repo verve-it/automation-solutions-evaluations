@@ -28,6 +28,15 @@ reason strings, and keep `valid_tool_args` in run_evals.py as the actual gate.
 """
 
 from __future__ import annotations
+
+# This script lives in a subdirectory but imports the converter and scorer
+# from the repo root, so put the root on sys.path before those imports. Keeps
+# `python3 foundry/submit_to_foundry.py` working from anywhere, with no package
+# conversion and no editable install. REPO_ROOT is also how sibling
+# directories such as foundry_evaluators/ are located.
+import os, sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 import argparse, json, os, random, sys
 
 # Foundry evaluators that accept the converter schema (query / response /

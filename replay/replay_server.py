@@ -7,7 +7,7 @@ names and the same schemas as production; every call is answered from what the
 recorded run returned. No ConnectWise request is made and **no write is ever
 performed** — a write returns the response the real write returned.
 
-    python3 make_cassette.py traces/2026-09-15-ops-worst-case.csv -o cassettes/
+    python3 make_cassette.py traces/2026-09-15-ops-worst-case.json -o cassettes/
     python3 replay_server.py cassettes/2026-09-15-2c861b0dbf97.json \\
         --tool-defs tool_manifests/ --journal artifacts/replay-journal.json
 
@@ -36,6 +36,15 @@ task well", which still needs recorded production traces.
 """
 
 from __future__ import annotations
+
+# This script lives in a subdirectory but imports the converter and scorer
+# from the repo root, so put the root on sys.path before those imports. Keeps
+# `python3 replay/replay_server.py` working from anywhere, with no package
+# conversion and no editable install. REPO_ROOT is also how sibling
+# directories such as foundry_evaluators/ are located.
+import os, sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 import argparse, glob, json, os, sys, threading
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

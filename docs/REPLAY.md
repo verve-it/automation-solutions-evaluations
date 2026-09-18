@@ -8,10 +8,10 @@ Answers the question "are the evals running the tools live?"
 |---|---|---|---|
 | `trace_to_eval.py` | no | no | **none** |
 | `run_evals.py` | no | no | **none** |
-| `make_cassette.py` | no | no | **none** |
+| `replay/make_cassette.py` | no | no | **none** |
 | `export_traces.py` | no | no | Log Analytics read |
-| `submit_to_foundry.py` | no | no | judge model — sees recorded text only |
-| `replay_server.py` | no | **no** | serves a cassette |
+| `foundry/submit_to_foundry.py` | no | no | judge model — sees recorded text only |
+| `replay/replay_server.py` | no | **no** | serves a cassette |
 | **`staging-replay.yml`** (`microsoft/ai-agent-evals`) | **yes** | **yes** | yes |
 
 Everything except the last scores **recorded** traces and touches nothing.
@@ -49,9 +49,9 @@ low-frequency live run for that, as a smoke test rather than a gate.
 ## How it works
 
 ```
-recorded trace ──► make_cassette.py ──► cassettes/<date>-<op_id>.json
+recorded trace ──► replay/make_cassette.py ──► cassettes/<date>-<op_id>.json
                                               │
-agent under test ──► Foundry toolbox ──► replay_server.py (MCP)
+agent under test ──► Foundry toolbox ──► replay/replay_server.py (MCP)
                                               │
                                         artifacts/replay-journal.json
 ```
@@ -62,8 +62,8 @@ is made and no write is performed — a write returns the response the real
 write returned.
 
 ```powershell
-python3 make_cassette.py traces/2026-09-15-ops-worst-case.csv -o cassettes/
-python3 replay_server.py cassettes/2026-09-15-73d29f4c3a13.json --tool-defs tool_manifests/ --journal artifacts/replay-journal.json
+python3 replay/make_cassette.py traces/2026-09-15-ops-worst-case.json -o cassettes/
+python3 replay/replay_server.py cassettes/2026-09-15-73d29f4c3a13.json --tool-defs tool_manifests/ --journal artifacts/replay-journal.json
 ```
 
 ### Ordered, not a dictionary
@@ -111,7 +111,7 @@ the task well"*, which still needs recorded production traces scored by
 
 **1. The `cw_query` truncation blocks this.** A cassette built from a
 truncated result feeds the agent *less* than the original saw, and the
-difference gets scored as the agent's fault. `make_cassette.py --strict`
+difference gets scored as the agent's fault. `replay/make_cassette.py --strict`
 refuses to write such a cassette, and today that refuses **both** full-triage
 orchestrations:
 
@@ -127,7 +127,7 @@ replay gate.
 **2. The tool manifest blocks fidelity.** Without schemas the replayed tools
 are advertised with an empty `inputSchema`, so the agent is told it may send
 anything. It is no longer a faithful stand-in for production, and argument
-mistakes that production would reject go unnoticed. `replay_server.py` warns
+mistakes that production would reject go unnoticed. `replay/replay_server.py` warns
 loudly when this happens. See `tool_manifests/README.md`.
 
 ## What has to be wired outside this repo
@@ -135,7 +135,7 @@ loudly when this happens. See `tool_manifests/README.md`.
 The eval-repo half — cassette format, replay server, divergence policy — is
 here and tested. The Foundry side is not, and is yours:
 
-1. **Host `replay_server.py`** (or an equivalent) somewhere the Foundry project
+1. **Host `replay/replay_server.py`** (or an equivalent) somewhere the Foundry project
    can reach. It is stdlib-only and stateless apart from the cassette.
    `--token` enables a bearer check.
 2. **Register a toolbox** pointing at it — e.g. `ConnectwiseMCP-Replay` — with

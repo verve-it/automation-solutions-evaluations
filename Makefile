@@ -1,10 +1,10 @@
 # Shortcuts for the two frozen sets and the pieces around them.
 # `python` not `python3` on Windows.
 PY ?= python3
-FULL_TRIAGE := traces/2026-09-03-full-triage.csv
-OPS_WORST   := traces/2026-09-15-ops-worst-case.csv
-FT_BASELINE := baselines/full-triage-2026-09-16.json
-OW_BASELINE := baselines/ops-worst-case-2026-09-16.json
+FULL_TRIAGE := traces/2026-09-03-full-triage.json
+OPS_WORST   := traces/2026-09-15-ops-worst-case.json
+FT_BASELINE := baselines/full-triage-2026-09-18.json
+OW_BASELINE := baselines/ops-worst-case-2026-09-18.json
 
 .PHONY: help test evals evals-ops baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay clean
 
@@ -38,28 +38,28 @@ baselines:  ## re-freeze both baselines from the committed traces
 	    --json $(OW_BASELINE)
 
 cassettes:  ## build replay cassettes from the committed traces
-	$(PY) make_cassette.py $(FULL_TRIAGE) -o cassettes
-	$(PY) make_cassette.py $(OPS_WORST) -o cassettes
+	$(PY) replay/make_cassette.py $(FULL_TRIAGE) -o cassettes
+	$(PY) replay/make_cassette.py $(OPS_WORST) -o cassettes
 
 replay:  ## serve a cassette as an MCP toolbox (no ConnectWise, no writes)
 	@test -n "$(CASSETTE)" || { echo "usage: make replay CASSETTE=cassettes/<file>.json"; exit 2; }
-	$(PY) replay_server.py $(CASSETTE) --tool-defs tool_manifests/ \
+	$(PY) replay/replay_server.py $(CASSETTE) --tool-defs tool_manifests/ \
 	    --journal artifacts/replay-journal.json
 
 foundry-dataset:  ## build the Foundry evaluation dataset from the frozen set
-	$(PY) to_foundry_dataset.py $(FULL_TRIAGE) --expected expected.json \
+	$(PY) foundry/to_foundry_dataset.py $(FULL_TRIAGE) --expected expected.json \
 	    --tool-defs tool_manifests/ -o artifacts/foundry-dataset.jsonl
 
 foundry-register:  ## print the evaluator payloads without calling Foundry
-	$(PY) register_evaluators.py --dry-run
+	$(PY) foundry/register_evaluators.py --dry-run
 
 foundry:  ## convert to the Foundry judged-evaluator schema (no judge calls)
-	$(PY) submit_to_foundry.py out/eval_runs.jsonl --dry-run --sample 0
+	$(PY) foundry/submit_to_foundry.py out/eval_runs.jsonl --dry-run --sample 0
 
 manifest-skeleton:  ## skeleton manifest from the traces (no schemas)
 # Writes to artifacts/, NOT tool_manifests/ — the real manifest already lives
 # there and the converter loads every file in the directory.
-	$(PY) extract_tool_manifest.py --from-trace $(FULL_TRIAGE) \
+	$(PY) tools/extract_tool_manifest.py --from-trace $(FULL_TRIAGE) \
 	    --toolbox ConnectwiseMCP --version 5 \
 	    -o artifacts/connectwisemcp-skeleton.json
 

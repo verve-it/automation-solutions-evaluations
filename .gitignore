@@ -9,9 +9,13 @@ skills/
 
 # Redaction lists are a catalogue of exactly the customer data we are
 # removing — never commit one. Keep them beside the raw export, outside the
-# repo, or in a secret store.
+# repo, or in a secret store. `--learn` writes one of these, and the name it
+# is given is whatever the caller passes, so cover the names the docs use.
 redact*.json
 reviewed*.json
+candidates*.json
+*-candidates.json
+scrub-*.json
 *.redactions.json
 
 # Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one

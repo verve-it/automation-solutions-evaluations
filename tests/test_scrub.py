@@ -5,6 +5,7 @@ Two failure modes matter and both are silent: leaving customer data in
 which rewrites a trajectory while every file still looks fine.
 """
 import json
+import os
 
 import pytest
 
@@ -292,3 +293,16 @@ def test_learn_withholds_protected_vocabulary(tmp_path, monkeypatch, capsys):
     assert "withheld" in capsys.readouterr().out
     # and the real name beside it is still proposed
     assert any("Grant Johnson" in k for k in proposed), proposed
+
+
+def test_a_candidate_list_can_never_be_committed(tmp_path):
+    """A --learn output is a catalogue of exactly the customer data being
+    removed. .gitignore covered redact*/reviewed*, but not the name
+    traces/README.md actually tells you to use."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("candidates.json", "scrub-candidates-full-triage.json",
+                 "ops-candidates.json", "reviewed.json", "redact.json"):
+        out = subprocess.run(["git", "check-ignore", "-q", name],
+                             cwd=repo, capture_output=True)
+        assert out.returncode == 0, f"{name} is NOT gitignored"

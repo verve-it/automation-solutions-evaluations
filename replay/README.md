@@ -56,7 +56,7 @@ input shape:
 | `connectwise-operations-agent` | a JSON write plan | not written yet |
 
 Those shapes come straight from the recorded hand-offs in
-`traces/2026-09-03-full-triage.csv`; copy one and change the ticket id.
+`traces/2026-09-03-full-triage.json`; copy one and change the ticket id.
 
 Where the version comes from: the Foundry project's agent list. The recorded
 traces carry it as `gen_ai.agent.version` — orchestrator 45, analysis 82,

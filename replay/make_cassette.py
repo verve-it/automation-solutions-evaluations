@@ -8,7 +8,7 @@ arguments that were sent and the result that came back. Served by
 reads return what they returned, writes return what they returned *without
 writing*, and nothing depends on data that has since changed.
 
-    python3 make_cassette.py traces/2026-09-03-full-triage.csv -o cassettes/
+    python3 make_cassette.py traces/2026-09-03-full-triage.json -o cassettes/
 
 Why ordered and not a dictionary
 --------------------------------
@@ -27,6 +27,15 @@ has not changed. Keep a low-frequency live run for that.
 """
 
 from __future__ import annotations
+
+# This script lives in a subdirectory but imports the converter and scorer
+# from the repo root, so put the root on sys.path before those imports. Keeps
+# `python3 replay/make_cassette.py` working from anywhere, with no package
+# conversion and no editable install. REPO_ROOT is also how sibling
+# directories such as foundry_evaluators/ are located.
+import os, sys
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 import argparse, json, os, sys
 from collections import defaultdict
 

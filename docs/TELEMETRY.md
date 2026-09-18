@@ -76,7 +76,7 @@ python3 trace_to_eval.py traces/2026-09-03-full-triage-rejoined.json -o out
 ```
 
 If it comes back clean, re-freeze the baseline and rebuild the cassettes —
-`make_cassette.py --strict` currently refuses both full-triage orchestrations
+`replay/make_cassette.py --strict` currently refuses both full-triage orchestrations
 over exactly this.
 
 ## Two things it may also fix
@@ -165,7 +165,7 @@ so trajectory coverage silently drops from 7/7 to 3/7.
 
 `scrub_trace.py` now refuses a redaction list containing the orchestrator's
 intent enum, the agent names in `AGENT_NAMES`, or ConnectWise status
-vocabulary, before writing anything. `to_foundry_dataset.py` warns if a
+vocabulary, before writing anything. `foundry/to_foundry_dataset.py` warns if a
 redaction token turns up in a `traj_key`.
 
 Neither replaces the review. They catch the one mistake that is otherwise
