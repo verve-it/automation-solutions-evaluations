@@ -6,6 +6,7 @@ It needs no Azure and no network. Agent-side changes are gated by the
 scheduled run in .github/workflows/evals.yml, which exports fresh traces.
 """
 import json
+import os
 import subprocess
 import sys
 
@@ -21,9 +22,21 @@ SETS = [
 ]
 
 
+# The baselines are frozen WITH the tool manifests (see the `baselines` target
+# in the Makefile). Converting without them makes valid_tool_args unscored and
+# evaluator_ready fail, which reads as a baseline diff on every run.
+TOOL_DEFS = ["--tool-defs", "tool_manifests/"]
+
+
 def _convert(trace, out_dir, *extra):
+    return _convert_bare(trace, out_dir, *TOOL_DEFS, *extra)
+
+
+def _convert_bare(trace, out_dir, *extra):
+    """Convert with exactly the flags given — no manifests unless asked."""
     return subprocess.run(
-        [sys.executable, "trace_to_eval.py", trace, "-o", str(out_dir), *extra],
+        [sys.executable, "trace_to_eval.py", trace, "-o", str(out_dir),
+         *extra],
         cwd=REPO, capture_output=True, text=True, check=True)
 
 
@@ -72,11 +85,16 @@ def test_known_bad_set_still_fails_every_way_we_expect(tmp_path):
                for r in rows)
 
 
-def test_manifest_turns_on_generated_argument_validation(tmp_path):
-    """The ops runs are on ConnectwiseMCP v1. With a schema for that version,
-    every unsupported cw_resolve reference type is caught before the call."""
-    _convert(SETS[1][0], tmp_path,
-             "--tool-defs", "tests/fixtures/connectwisemcp-v1-partial.json")
+def test_a_declared_enum_would_catch_the_reference_type_failures(tmp_path):
+    """Mechanism test, NOT a measurement.
+
+    tests/fixtures/connectwisemcp-v1-partial.json is two hand-written tools
+    whose `reference_type` carries an `enum`. Given that, generated validation
+    catches every unsupported value before the call. This proves the validator
+    works; it says nothing about the real toolbox. See the next test.
+    """
+    _convert_bare(SETS[1][0], tmp_path,
+                  "--tool-defs", "tests/fixtures/connectwisemcp-v1-partial.json")
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
     rows = json.loads(out.read_text())
@@ -85,6 +103,98 @@ def test_manifest_turns_on_generated_argument_validation(tmp_path):
     assert all("reference_type" in c["reason"] for c in args_checks)
     # and the runs become scorable by the Foundry evaluators
     assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
+
+
+def test_the_enum_catches_the_invalid_reference_type(tmp_path):
+    """The positive assertion, replacing test_the_real_manifest_does_not_catch_them.
+
+    cwpsa-mcp cbf4e2b types reference_type as a closed 20-value Literal, so
+    FastMCP emits an enum and the manifest carries it. "severity" is now caught
+    by the SCHEMA, before the call, instead of by string-matching the server's
+    error text after it.
+
+    Both matter, so both are asserted: no_wasted_calls reads the server's
+    reply, valid_tool_args reads the contract. Only the second generalises to
+    a tool nobody has written a check for.
+    """
+    _convert(SETS[0][0], tmp_path)          # "severity" is in the full-triage set
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+
+    bad = [r for r in rows if r["checks"]["valid_tool_args"]["passed"] is False]
+    assert len(bad) == 1, [r["run_agent"] for r in bad]
+    reason = bad[0]["checks"]["valid_tool_args"]["reason"]
+    assert "'reference_type'='severity'" in reason, reason
+    assert "not in [" in reason, reason
+    # the enum is 20 long; the message shows a prefix and must say so rather
+    # than reading as the whole valid set
+    assert "more]" in reason, reason
+
+
+def test_the_enum_does_not_fire_on_the_resolver_bugs(tmp_path):
+    """The known-bad set still passes valid_tool_args, and that is correct.
+
+    type/subtype/item/site are all valid reference types. Those runs failed
+    because resolve_reference dropped `context` (fixed upstream in cbf4e2b),
+    not because the arguments were wrong. No schema of any kind catches a
+    behavioural bug, and a check that "caught" them would be reading tea
+    leaves.
+
+    This is the guard against tightening valid_tool_args until it turns green
+    on the known-bad set for the wrong reason.
+    """
+    _convert(SETS[1][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text())
+    assert all(r["checks"]["valid_tool_args"]["passed"] is True for r in rows)
+    assert all(r["checks"]["valid_tool_args"]["checked"] > 0 for r in rows)
+    assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
+    # they are still caught, by the behavioural checks that should catch them
+    assert all(r["passed"] is False for r in rows)
+
+
+def test_the_manifest_declares_the_reference_type_enum(tmp_path):
+    """Regression lock on the contract itself.
+
+    If a re-extraction ever drops the enum -- a bad --from-source run, a
+    revert upstream -- valid_tool_args goes quietly vacuous again. It passed
+    100% of a trace set chosen for being full of bad calls for exactly this
+    reason, and nothing in the output said so.
+    """
+    with open(os.path.join(REPO, "tool_manifests",
+                           "connectwisemcp.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    resolve = next(t for t in manifest["tools"] if t["name"] == "cw_resolve")
+    enum = resolve["parameters"]["properties"]["reference_type"].get("enum")
+    assert enum, "cw_resolve.reference_type lost its enum"
+    assert "severity" not in enum
+    for expected in ("company", "site", "type", "subtype", "item", "status"):
+        assert expected in enum, expected
+    assert enum == sorted(enum), "enum order should be stable for diffs"
+
+
+def test_the_manifest_covers_every_tool_the_agents_called(tmp_path):
+    with open(os.path.join(REPO, "tool_manifests",
+                           "connectwisemcp.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    declared = {t["name"] for t in manifest["tools"]}
+    assert manifest["versions"] == ["*"]
+    assert all(t.get("parameters") for t in manifest["tools"])
+
+    called = set()
+    for trace, *_ in SETS:
+        _convert(trace, tmp_path / "cov")
+        for line in (tmp_path / "cov" / "eval_runs.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            for name in json.loads(line)["tool_names"]:
+                bare = name.split("___")[-1]
+                if bare.startswith("cw_"):
+                    called.add(bare)
+    assert called, "no ConnectWise calls found in the frozen sets"
+    assert called <= declared, f"not in the manifest: {sorted(called - declared)}"
 
 
 def test_every_agent_now_has_a_trajectory_expectation(tmp_path):

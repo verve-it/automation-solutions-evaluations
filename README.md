@@ -89,7 +89,7 @@ trace set must need nothing installed. Only the Azure-facing scripts need
 | Check | Gating | Catches |
 |---|---|---|
 | `no_wasted_calls` | **yes** | calls that could not have succeeded: `missing_script`, `invalid_reference_type`, `invalid_entity`, `invalid_projection_field`, `empty_failed` |
-| `valid_tool_args` | **yes** | arguments violating the tool's own JSON schema. Generated from `tool_manifests/`; skips without one. |
+| `valid_tool_args` | **yes** | arguments violating the tool's own JSON schema — required params, types, enums, unexpected fields. Generated from `tool_manifests/`; skips without one. Catches a bad `cw_resolve.reference_type` from the contract; `entity` and `filter` are still free-form upstream, so not those. See `tool_manifests/README.md`. |
 | `no_dead_ends` | **yes** | succeeded but returned nothing — the hallucinated-entity signal |
 | `trajectory` | **yes** | in-order match vs ground truth, extras allowed |
 | `no_tool_errors` | info | any error. Too broad to gate. |
@@ -285,10 +285,11 @@ expected.json             ground truth, keyed "<agent>|<intent>"
 evaluator-versions.json   the registered versions a run pins
 baselines/                frozen results — COMMIT THESE
 traces/                   raw exports, dated, scrubbed, committed
-tool_manifests/           MCP tool schemas — EMPTY, see below
+tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
 replay/                   dev tickets for the staging replay
 tests/                    unit tests + frozen-set replay
-docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY
+docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
+                          MCP-SERVER-FINDINGS
 ```
 
 The Foundry agents live in a **separate repo**. Anything that can change what
@@ -301,7 +302,7 @@ an agent does belongs there; anything that only measures belongs here. See
 
 | Gap | Blocks | Where |
 |---|---|---|
-| **`tool_manifests/` is empty** | `valid_tool_args` scores 1.0 vacuously on 5 of 7 rows — green without checking anything | `tool_manifests/README.md` |
+| **`entity` and `filter` are still free-form** | `valid_tool_args` covers arity, types, required params, unexpected fields and `reference_type` — not entity paths or filter shapes. An `entity` enum was proposed and correctly rejected upstream (~36k tokens/request). | `tool_manifests/README.md` |
 | **Dataverse loading** | all outcome evaluation. Every check is process quality; a run can pass all eight having proposed the wrong company. | handoff §8 |
 | Cassette replay has no driver | the deterministic agent-change gate | `docs/REPLAY.md` |
 | `replay/` ticket ids | the staging replay | `replay/README.md` |

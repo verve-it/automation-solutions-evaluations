@@ -27,10 +27,13 @@ evals-ops:  ## score the known-bad set against its baseline
 	    --baseline $(OW_BASELINE) --json artifacts/ops-worst-case.json
 
 baselines:  ## re-freeze both baselines from the committed traces
-	$(PY) trace_to_eval.py $(FULL_TRIAGE) -o out
+# Must use the same --tool-defs as `evals`/`evals-ops`, or every run reports
+# evaluator_ready as a fix and valid_tool_args as newly scored.
+	$(PY) trace_to_eval.py $(FULL_TRIAGE) -o out --tool-defs tool_manifests/ \
+	    --skill-registry skills
 	-$(PY) run_evals.py out/eval_runs.jsonl --expected expected.json \
 	    --json $(FT_BASELINE)
-	$(PY) trace_to_eval.py $(OPS_WORST) -o out-ops
+	$(PY) trace_to_eval.py $(OPS_WORST) -o out-ops --tool-defs tool_manifests/
 	-$(PY) run_evals.py out-ops/eval_runs.jsonl --expected expected.json \
 	    --json $(OW_BASELINE)
 
@@ -53,10 +56,12 @@ foundry-register:  ## print the evaluator payloads without calling Foundry
 foundry:  ## convert to the Foundry judged-evaluator schema (no judge calls)
 	$(PY) submit_to_foundry.py out/eval_runs.jsonl --dry-run --sample 0
 
-manifest-skeleton:  ## seed tool_manifests/ from the traces (no schemas)
+manifest-skeleton:  ## skeleton manifest from the traces (no schemas)
+# Writes to artifacts/, NOT tool_manifests/ — the real manifest already lives
+# there and the converter loads every file in the directory.
 	$(PY) extract_tool_manifest.py --from-trace $(FULL_TRIAGE) \
 	    --toolbox ConnectwiseMCP --version 5 \
-	    -o tool_manifests/connectwisemcp-v5.json
+	    -o artifacts/connectwisemcp-skeleton.json
 
 clean:
 	rm -rf out out-ops artifacts skills cassettes .pytest_cache

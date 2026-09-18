@@ -60,7 +60,10 @@ source coupling, not a submodule, not a shared checkout:
 - `agents` feeds `AGENT_NAMES` in `trace_to_eval.py`. Adding an agent without
   updating it silently collapses its runs into the caller's trajectory.
 - `intents` is the key space for `expected.json`.
-- `toolbox` is `tool_manifests/` — the highest-leverage open item.
+- `toolbox` is `tool_manifests/`, now filled from the `cwpsa-mcp` source.
+  The open item moved into that repo: the tools declare no enums, so
+  generated argument validation has nothing to check. See
+  `tool_manifests/README.md`.
 - `skills` is what makes "which rules were in force" answerable for a
   historical run.
 

@@ -43,13 +43,22 @@ def _expected():
             if not k.startswith("_")}
 
 
-def _both(trace):
+def _both(trace, manifests=True):
+    """Score the same spans locally and as a Foundry dataset row.
+
+    Manifests are loaded by default. Without them valid_tool_args is unscored
+    on both sides, so the parity guarantee silently skips the one check whose
+    input comes from outside the trace -- which is the check most likely to
+    diverge.
+    """
     spans = trace_to_eval.load_spans(os.path.join(REPO, trace))
     expected = _expected()
-    runs, _, _ = trace_to_eval.convert(spans)
+    defs = (trace_to_eval.load_tool_manifests([os.path.join(REPO, "tool_manifests")])
+            if manifests else [])
+    runs, _, _ = trace_to_eval.convert(spans, defs)
     local = run_evals.score(runs, {"max_empty_rate": 0.25,
                                    "expected": expected})
-    rows = to_foundry_dataset.build_rows(spans, [], expected)
+    rows = to_foundry_dataset.build_rows(spans, defs, expected)
     return local, rows
 
 
@@ -75,6 +84,33 @@ def test_every_verdict_matches_run_evals(trace):
                     f"score={fn({}, row):.2f} threshold={threshold}")
     assert compared, "nothing comparable — the harness is wrong, not the port"
     assert not mismatches, "\n".join(mismatches)
+
+
+@pytest.mark.parametrize("trace", SETS)
+def test_valid_tool_args_is_actually_compared(trace):
+    """Guard on the guarantee above, not on the checks.
+
+    _both used to pass no manifests, so valid_tool_args was None on both sides
+    and zip()ed past without comparing anything. The port could have diverged
+    on the one check whose schema comes from outside the trace and no test
+    would have noticed.
+    """
+    local, _ = _both(trace)
+    scored = [r for r in local
+              if r["checks"]["valid_tool_args"]["passed"] is not None]
+    assert scored, "valid_tool_args unscored — manifests did not reach the run"
+
+
+def test_the_ported_evaluator_also_catches_the_bad_reference_type():
+    """Parity on the specific verdict the enum made possible."""
+    local, rows = _both(SETS[0])
+    fn, _, _, _, threshold, _ = checks.EVALUATORS["cw_valid_tool_args"]
+    bad = [(l, row) for l, row in zip(local, rows)
+           if l["checks"]["valid_tool_args"]["passed"] is False]
+    assert len(bad) == 1, [l["run_agent"] for l, _ in bad]
+    l, row = bad[0]
+    assert "severity" in l["checks"]["valid_tool_args"]["reason"]
+    assert fn({}, row) < threshold, "local fails, the Foundry evaluator passes"
 
 
 # --- scoring shape ----------------------------------------------------------
