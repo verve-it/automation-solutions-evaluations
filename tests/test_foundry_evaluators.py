@@ -701,3 +701,78 @@ def test_duplicate_indices_refuse():
 def test_an_out_of_range_index_refuses():
     assert _align([({"cw_x": 1.0}, {"datasource_item_id": i})
                    for i in (0, 1, 99)]) is None
+
+
+# --- the native local harness -----------------------------------------------
+
+sys.path.insert(0, os.path.join(REPO, "foundry_evaluators"))
+import native                                             # noqa: E402
+
+
+def test_the_adapter_builds_an_explicit_signature():
+    """evaluate() introspects the signature to decide which dataset columns
+    an evaluator needs, and reads **kwargs as a required input literally
+    named 'kw'. An explicit keyword-only signature is what avoids that."""
+    import inspect as _i
+    fn = native.as_evaluator("cw_x", lambda s, i: 1.0, ["query", "response"])
+    params = _i.signature(fn).parameters
+    assert list(params) == ["query", "response"]
+    assert all(p.kind is _i.Parameter.KEYWORD_ONLY for p in params.values())
+    assert "kwargs" not in params and "kw" not in params
+
+
+def test_the_adapter_returns_the_registered_metric_name():
+    """The key must match the registered evaluator, or the local run and the
+    cloud run report different metric names for the same check."""
+    fn = native.as_evaluator("cw_no_dead_ends", lambda s, i: 0.5, ["a"])
+    assert fn(a=1) == {"cw_no_dead_ends": 0.5}
+
+
+def test_every_registered_check_has_a_native_adapter():
+    built = native.evaluator_set([{"query": "x"}])
+    assert set(built) == set(checks.EVALUATORS)
+
+
+def test_verdicts_apply_the_registered_thresholds():
+    """A score is a number; a verdict is a number against a threshold.
+    cw_no_dead_ends passes at 0.75, the rest at 1.0."""
+    result = {"rows": [{"outputs.cw_no_dead_ends": 0.8,
+                        "outputs.cw_no_wasted_calls": 0.8}]}
+    v = native.verdicts(result)[0]
+    assert v["cw_no_dead_ends"] is True
+    assert v["cw_no_wasted_calls"] is False
+
+
+@pytest.mark.parametrize("trace", SETS)
+def test_the_native_harness_agrees_with_run_evals(trace, tmp_path):
+    """The point of the adapter: one implementation, two harnesses.
+
+    azure-ai-evaluation's evaluate() runs offline -- azure_ai_project is
+    optional -- so the merge gate can use the native harness over the same
+    checks.py objects Foundry runs, instead of a second implementation kept
+    in step by hand. This asserts the two agree verdict for verdict.
+    """
+    from azure.ai.evaluation import evaluate
+
+    local, rows = _both(trace)
+    data = tmp_path / "rows.jsonl"
+    with open(data, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+    result = evaluate(data=str(data), evaluators=native.evaluator_set(rows))
+    got = native.verdicts(result)
+    assert len(got) == len(local)
+
+    compared, mismatches = 0, []
+    for l, n in zip(local, got):
+        for registered, check in PAIRS:
+            verdict = l["checks"][check]["passed"]
+            if verdict is None or registered not in n:
+                continue
+            compared += 1
+            if n[registered] != verdict:
+                mismatches.append(f"{l['run_agent']} {check}: "
+                                  f"run_evals={verdict} native={n[registered]}")
+    assert compared, "nothing comparable"
+    assert not mismatches, "\n".join(mismatches)

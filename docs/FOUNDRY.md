@@ -165,7 +165,7 @@ Two of the three below turned out to have native equivalents after all:
 |---|---|
 | `run_evals.py` running locally | **Native path exists.** `azure-ai-evaluation.evaluate()` runs with no project and no credentials — verified by running it here with every `AZURE_*` variable deleted. The gate logic (baseline diff, exit code) is still ours. Adopting it costs stdlib-only. |
 | Cassette replay | **Still ours.** ACS denies rather than substitutes; APIM `mock-response` generates from a schema rather than replaying bytes; APIM caching is a dictionary where a cassette is an ordered queue; Agent Framework mockable tools apply to code agents, not hosted prompt agents. Host it natively on the Functions MCP extension. |
-| Building the dataset ourselves | **Partly native.** `azure_ai_traces` does drop `tool_result`, but `AIAgentConverter` reads the Agent Service and keeps it — `break_tool_call_into_messages` says so and reads `function.output`. Whether it covers MCP toolbox calls and per-agent decomposition is untested. |
+| Building the dataset ourselves | **Stays ours.** `AIAgentConverter` does keep tool results, but it is a **classic** threads-and-runs API retiring 2027-03-31, and our traces carry `conv_` ids with no `thread_`/`run_` at all. It also returns one blob per conversation, and every child agent shares the orchestrator's — per-agent decomposition would be lost. Unhandled tool types are *silently skipped*. |
 | GitHub Actions scheduling | Foundry schedules (cron and recurrence) exist. Keeping scheduling beside the code and the baseline diff is a choice — and a smaller one now that continuous evaluation covers the live path. |
 
 ### The one-line answer

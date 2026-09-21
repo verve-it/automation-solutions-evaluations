@@ -46,7 +46,19 @@ Today the converter and scorer are stdlib-only and the merge gate installs
 nothing. That is a real property — it is why the gate runs in seconds and
 cannot break on a dependency resolution.
 
-**Recommendation: adopt it for the scoring pass, keep the gate logic.** Have
+**Done — `foundry_evaluators/native.py`.** It adapts the same `grade_*`
+functions `checks.py` already holds to the shape `evaluate()` wants, so the
+local harness runs the native evaluator objects rather than a second
+implementation.
+
+Verified verdict for verdict against `run_evals.py` on both frozen sets:
+**62 verdicts, 0 mismatches**, with every `AZURE_*` variable deleted.
+`tests/test_foundry_evaluators.py` keeps it that way.
+
+The dependency note below still stands, which is why this is a scoring path
+rather than a replacement:
+
+**Recommendation was: adopt it for the scoring pass, keep the gate logic.** Have
 `run_evals.py` call `evaluate()` with `foundry_evaluators/checks.py` as the
 evaluator set, then do the baseline diff on its output. Requires moving the
 merge gate off stdlib-only, which is a deliberate trade and should be made
@@ -79,27 +91,64 @@ output = safe_loads(tool_call.details.get("function")["output"])
 It reads the result. It also offers `prepare_evaluation_data(thread_ids=...,
 filename=...)` for batch preparation.
 
-### Two things to verify before switching
+### Both open questions are now answered — and the answer is "do not switch"
 
-Both are visible in the source and neither is settled:
+Neither is documented. Both are answerable from the SDK source and from our
+own traces, which is where the answers came from.
 
-1. **MCP toolbox calls may not be covered.** The converter's own comment says
-   *"we only support custom functions due to built-in code interpreters and
-   bing grounding tooling not reporting their function calls in the same
-   way"*, and the code branches on `details.function` versus a list of known
-   built-in types. Whether a ConnectwiseMCP toolbox call lands in the
-   `function` branch is the whole question, and it is one thread-id away from
-   an answer.
-2. **Per-agent decomposition.** It converts one thread and run. Our converter
-   splits an orchestration into one row per agent run. Whether each child
-   agent is its own run id in the Agent Service, or whether they collapse,
-   determines whether this replaces the converter or only part of it.
+**Q2, per-agent decomposition — answered from the committed trace.** One
+orchestration, 62 spans carrying `gen_ai.conversation.id`, and **one distinct
+value**:
 
-**Recommendation: test it against one real orchestration.** The traces carry
-the thread id as `gen_ai.conversation.id` (`conv_...`). Half an hour settles
-whether `trace_to_eval.py` can shrink or must stay.
+```
+gen_ai.conversation.id                       conv_059406d2a02be95d00Eg1WCe…  x62
+microsoft.gen_ai.main_agent.conversation_id  conv_059406d2a02be95d00Eg1WCe…  x28
+```
 
----
+Orchestrator and every child agent share the orchestrator's conversation.
+`microsoft.gen_ai.main_agent.conversation_id` exists precisely to link a
+child's span back to it, and it holds the same value. A converter keyed on
+the conversation returns **one blob for the whole orchestration**, not a row
+per agent run. The per-agent decomposition `trace_to_eval.py` does would be
+lost, and with it the ability to say which agent regressed.
+
+**Q1, MCP tool calls — the source answers it structurally.**
+`break_tool_call_into_messages` branches on `details.function`, then on five
+named built-ins (`code_interpreter`, `bing_grounding`, `file_search`,
+`azure_ai_search`, `fabric_dataagent`), and then:
+
+```python
+else:
+    # unsupported tool type, skip
+    return messages
+```
+
+**Silently skipped.** Not an error — the tool call simply vanishes from the
+converted data, and every tool-reading check then scores a run that appears
+to have made no tool calls. That is the vacuous-pass failure mode this repo
+has already been bitten by twice.
+
+Every MCP item type in the SDK (`mcp_call`, `mcp_list_tools`,
+`mcp_approval_response`) belongs to the **Realtime** surface. Nothing models
+an MCP tool call for the agent run path, so whether a ConnectwiseMCP call
+lands in the `function` branch is unproven — and the failure mode if it does
+not is silence.
+
+**The finding that settles it: we are not on the platform the converter is
+for.** `AIAgentConverter` takes `(thread_id, run_id)` and is documented only
+under **foundry-classic** — the threads-and-runs platform, deprecated and
+**retiring 2027-03-31**. The new Foundry Agents Service uses conversations
+with `conv_` ids. Our traces carry `conv_…` and **no** `thread_` or `run_`
+ids at all.
+
+So adopting `AIAgentConverter` would mean migrating onto a deprecated API,
+losing per-agent decomposition, and risking silent tool-call loss.
+
+**Recommendation reversed: keep `trace_to_eval.py`.** My earlier advice to
+test the converter pointed at the classic platform without checking which
+platform these agents are on. The native path for the new service is the one
+already in use — build a dataset and evaluate it, which `to_foundry_dataset.py`
+and `run_cloud_eval.py` do.
 
 ## 3. Cassette replay — stays ours. No native equivalent exists.
 
@@ -139,7 +188,7 @@ ours, because nothing ships it.
 | Piece | Native equivalent? | Action |
 |---|---|---|
 | Offline merge gate | **yes** — `evaluate()`, verified offline here | adopt for scoring; keep baseline diff and gating. Costs stdlib-only. |
-| Dataset construction | **partly** — `AIAgentConverter` keeps results | test against one orchestration before deciding |
+| Dataset construction | **no** — `AIAgentConverter` is classic-platform (retires 2027-03-31); our traces are `conv_`, and child agents share one conversation | keep `trace_to_eval.py` |
 | Cassette replay | **no** | keep, host natively on Functions MCP extension |
 
 Two of three moved from "no native way" to "there is one, and here is the
