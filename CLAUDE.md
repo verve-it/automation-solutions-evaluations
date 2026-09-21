@@ -37,9 +37,25 @@ It is not how you decide whether an agent change is safe.
 | Production behaviour | recorded traces, `run_evals.py` | none |
 | Write path still works | one live staging run | live, dev instance |
 
-The only thing not solved in-repo is **reachability**: Foundry calls the
-replay server, so it must be reachable from Azure. `localhost` cannot work and
-`run_replay.py` refuses it.
+Reachability is solved by `functions/replay-mcp/`: Foundry calls the replay
+server, so it must be reachable from Azure. `localhost` cannot work and
+`run_replay.py` refuses it. `infra/main.bicep` provisions the host; `deploy.sh`
+provisions and publishes.
+
+### Not the Functions MCP extension, and the reason is a schema
+
+The extension is GA and is right for building a *new* tool server. Its
+`toolProperties` is a flat `{propertyName, propertyType, description,
+isRequired, isArray}` with **nowhere to put an `enum`**. Eight manifest
+properties are enums, including `cw_resolve.reference_type` — the twenty-value
+enum that is the only reason `valid_tool_args` can fail at all. Advertising it
+as a bare string would invite the agent to send values production rejects, so
+the divergence would be ours. A stub that changes the tool contract is not a
+stub.
+
+Hosting our own MCP server on Functions is itself documented and native ("Host
+servers built with MCP SDKs on Azure Functions"); `host.json` carries the
+`mcp-custom-handler` profile for it.
 
 ## Native vs ours — settled, with evidence
 
@@ -54,7 +70,7 @@ first time, and the corrections are recorded there.
 | Scoring, offline | **Native SDK.** `azure-ai-evaluation.evaluate()` runs with no project and no credentials — `foundry_evaluators/native.py`, 62 verdicts 0 mismatches against `run_evals.py`. |
 | Baseline diff, gating exit code | **Ours.** Foundry's baseline comparison is a t-test, which is the wrong instrument for a deterministic check, and a server-side baseline changes without a reviewer. |
 | Dataset construction | **Ours.** `AIAgentConverter` is a *classic* threads-and-runs API retiring 2027-03-31; our traces are `conv_` with no `thread_`/`run_`. It also returns one blob per conversation and every child agent shares the orchestrator's, so per-agent decomposition would be lost. Unhandled tool types are **silently skipped**. |
-| Cassette replay | **Ours.** No native tool stubbing exists — checked ACS, APIM `mock-response`, APIM caching, Agent Framework mocks. Host it on the **Functions MCP extension** (stateful, GA). |
+| Cassette replay | **Ours.** No native tool stubbing exists — checked ACS, APIM `mock-response`, APIM caching, Agent Framework mocks. Hosted on **Azure Functions, Flex Consumption, as a custom handler** — `functions/replay-mcp/`. |
 
 Our traces already carry `gen_ai.tool.name`, `mcp.method.name` and
 `mcp.protocol.version` — the OTel conventions' own attributes. The conventions

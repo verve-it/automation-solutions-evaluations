@@ -167,44 +167,61 @@ Use it first.
 
 ### Where to host it
 
-**Azure Functions, using the MCP extension.** That is the Microsoft-native
-path and it is GA.
+**Azure Functions, Flex Consumption, as a custom handler.** Built:
+`functions/replay-mcp/`, with `infra/main.bicep` and `deploy.sh`.
 
-An earlier version of this document recommended Container Apps and said
-Functions was the wrong host. That was wrong, and the reason is worth
-keeping: Functions has *two* MCP stories and they differ on exactly the
-property this server depends on.
+```
+export REPLAY_TOKEN=$(openssl rand -hex 32)
+functions/replay-mcp/deploy.sh <resource-group> eastus2
+```
 
-| Path | State | Status | Fit |
-|---|---|---|---|
-| **Functions MCP extension** (tool trigger + binding) | **stateful** — `SessionId` on the invocation context, for per-session state | **GA** | **This one.** |
-| Functions self-hosted / BYO | stateless only | preview | No. |
-| Container Apps, 1 replica | stateful by accident of not scaling | GA | Works, but off the paved road. |
+Two earlier versions of this document were wrong about this, in opposite
+directions, and both corrections are worth keeping.
 
-Microsoft's own guidance is explicit: avoid the self-hosted option when you
-need stateful execution or are building from scratch, and prefer the binding
-extension, which is GA and stable where self-hosted is not.
+**It said Container Apps, and that Functions was the wrong host.** Wrong:
+Functions hosts MCP servers natively and the MCP extension is GA.
 
-This server needs state. `Cassette.cursor` is a per-key queue position that
-makes a cassette *ordered rather than a dictionary* — the same call appears
-several times in one run with different responses, and position is how the
-right one comes back. Scale it out with two independent cursors and the
-replay returns a plausible score that means nothing.
+**It then said to port the server to the MCP extension's tool triggers.**
+Also wrong, and this is the more interesting one. Functions has two MCP
+stories and they differ on schema fidelity, not only on state:
 
-The extension's `SessionId` is the right home for that cursor: one MCP
-session is one replay, which is exactly the lifetime the cursor should have.
-Today it is keyed globally, which is an artefact of the server having been
-written as a local stdlib process.
+| Path | Advertised schema | Fit |
+|---|---|---|
+| **MCP extension** (tool trigger) | flat `toolProperties`: `propertyName`, `propertyType`, `description`, `isRequired`, `isArray` | right for a *new* server, wrong for a stub |
+| **Custom handler** (`mcp-custom-handler` profile) | whatever our server advertises — the manifest, verbatim | **this one** |
 
-**The work:** port `replay/replay_server.py` to the Functions programming
-model — tool trigger per tool, cursor keyed by `SessionId` — and register the
-endpoint with Foundry. Microsoft documents that last step directly
-("Connect an MCP server on Azure Functions to Foundry Agent Service"). The
-cassette format, divergence policy and journal are unaffected; this is a
-transport change, not a redesign.
+There is nowhere in `toolProperties` to put an `enum`. Of the 88 properties
+in `tool_manifests/connectwisemcp.json`, 35 are `Optional[X]` and survive as
+`isRequired: false` — but **8 are enums and do not survive**, among them
+`cw_resolve.reference_type`. Those twenty values are the only reason
+`valid_tool_args` is a check that can fail at all; before the MCP server
+typed it as a `Literal`, the check passed 100% of a known-bad trace set.
 
-Until that port happens, Container Apps pinned to one replica runs the
-current file unchanged and is a legitimate stopgap. It is a stopgap.
+A stub that advertises a looser contract than production tells the agent
+under test it may send values production rejects. The divergence that follows
+is ours, and the gate blames the agent for it. So the schemas go out verbatim
+and the transport is ours — which is exactly the case Microsoft documents as
+"Host servers built with MCP SDKs on Azure Functions", with the
+`mcp-custom-handler` profile in `host.json` for it.
+
+The extension remains the right answer for `cwpsa-mcp` itself.
+
+### State, and why it is not in the process
+
+`Cassette.cursor` is a per-key queue position: the same call appears several
+times in one run with different responses, and position is how the right one
+comes back. Two independent cursors return a plausible score that means
+nothing.
+
+Flex Consumption will not scale out a single sequential client in practice,
+but a gate does not rest on "in practice", and the floor for
+`maximumInstanceCount` on that plan is **40** — pinning to one instance is not
+on offer. So the cursor and journal live in blob storage, guarded by an ETag
+(`replay/state_store.py`), keyed by the MCP session id that `initialize`
+issues. One session is one replay, which is the lifetime the cursor should
+have. A lost update returns a 409 saying the replay is unordered rather than
+an answer that looks fine, and the journal survives an instance recycle, which
+is what makes `/summary` worth reading afterwards.
 
 Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary`
 is the journal — tool names, canonicalised arguments carrying ticket and

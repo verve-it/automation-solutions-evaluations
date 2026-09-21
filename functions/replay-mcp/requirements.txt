@@ -1,0 +1,9 @@
+# The replay server is stdlib only. These are here for the state store, which
+# is what keeps a replay ordered when the platform is free to move the next
+# call to another instance -- see replay/state_store.py.
+#
+# Drop both and set neither REPLAY_STATE_ACCOUNT nor REPLAY_STATE_CONTAINER to
+# run with in-process state, which is correct only while one instance serves
+# the whole replay.
+azure-identity>=1.19,<2
+azure-storage-blob>=12.24,<13
