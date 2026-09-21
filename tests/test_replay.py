@@ -400,3 +400,34 @@ def test_the_report_states_that_no_write_was_performed():
     ok, text = rr.verdict({"recorded_interactions": 1, "matched_prefix": 1,
                            "writes_attempted": 4})
     assert "none performed" in text
+
+
+def test_the_manifest_records_what_the_deleted_version_cannot(tmp_path):
+    """Foundry evals are PROJECT-scoped -- evals.create() takes a dataset,
+    not an agent id -- so deleting the temporary version loses no results.
+
+    What it does lose is provenance. App Insights stamps gen_ai.agent.id and
+    version on every span; delete the version and a trace names an agent that
+    cannot be looked up, with nothing saying what it was cloned from.
+    """
+    import argparse
+    out = tmp_path / "run.json"
+    args = argparse.Namespace(agent="triage-orchestrator",
+                              cassette="cassettes/2026-09-03-abc.json",
+                              server_url="https://replay.example.net/mcp",
+                              manifest=str(out))
+    s = {"cassette": "4dda7f4fa5f0", "matched_prefix": 50,
+         "recorded_interactions": 50, "writes_attempted": 4,
+         "first_divergence": None}
+    payload = rr.write_manifest(str(out), args, "82", "87", s)
+
+    assert payload["base_version"] == "82"
+    assert payload["temp_version"] == "87"
+    assert payload["temp_version_deleted"] is True
+    assert payload["cassette"] == "2026-09-03-abc.json"
+    assert payload["writes_attempted"] == 4
+    assert "no write performed" in payload["tools"]
+    # the eval names the thing under test, not the fixture
+    assert payload["suggested_eval_name"].endswith("v82")
+    assert "87" not in payload["suggested_eval_name"]
+    assert json.loads(out.read_text())["base_version"] == "82"

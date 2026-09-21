@@ -50,6 +50,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
 import argparse, json, subprocess, time, urllib.error, urllib.request
+import datetime as _dt
 
 REPLAY_TOOL_LABEL = "connectwise_replay"
 TEMP_MARKER = "eval-replay-temp"
@@ -174,6 +175,48 @@ def verdict(s, allow_divergence_after=None):
     return ok, "\n".join(lines)
 
 
+def write_manifest(path, args, base_version, temp_version, s):
+    """Record what was actually tested, because the agent version will not.
+
+    Foundry evaluation objects are scoped to the PROJECT, not to an agent --
+    `evals.create(name=...)` takes a dataset, not an agent id. So nothing an
+    eval stores depends on the temporary version surviving, and deleting it
+    loses no results.
+
+    What does carry the temporary version's identity is the TRACE: App
+    Insights records gen_ai.agent.id and its version for every span. Delete
+    the version and that id resolves to nothing, so six weeks later a trace
+    names an agent that cannot be looked up and nothing says what it was a
+    clone of.
+
+    This file is that record. Name any eval built from this run after
+    `base_version` -- the thing under test -- rather than after the ephemeral
+    clone, which is a fixture.
+    """
+    payload = {
+        "agent": args.agent,
+        "base_version": str(base_version),
+        "temp_version": str(temp_version),
+        "temp_version_deleted": True,
+        "cassette": os.path.basename(args.cassette),
+        "cassette_id": s.get("cassette"),
+        "server_url": args.server_url,
+        "tools": "stubbed — no ConnectWise request, no write performed",
+        "replayed_utc": _dt.datetime.now(_dt.timezone.utc)
+                           .replace(microsecond=0).isoformat(),
+        "matched_prefix": s.get("matched_prefix"),
+        "recorded_interactions": s.get("recorded_interactions"),
+        "writes_attempted": s.get("writes_attempted"),
+        "first_divergence": s.get("first_divergence"),
+        "suggested_eval_name": f"replay-{args.agent}-v{base_version}",
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=1, ensure_ascii=False)
+        fh.write("\n")
+    return payload
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -189,6 +232,9 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=8901)
     ap.add_argument("--tool-defs", default="tool_manifests/")
     ap.add_argument("--journal", default="artifacts/replay-journal.json")
+    ap.add_argument("--manifest", default="artifacts/replay-run.json",
+                    help="provenance for this replay. Written even on "
+                         "failure -- see the note on the temporary version.")
     ap.add_argument("--query", help="override the agent input")
     ap.add_argument("--min-matched-prefix", type=int,
                     help="fail if the replay diverges before this call")
@@ -254,13 +300,18 @@ def main(argv=None):
                         if args.agent_version else agents.get(args.agent))
         definition = cloned_definition(base_version, server_url, models)
 
+        base_version = (getattr(base_version, "version", None)
+                        or args.agent_version or "latest")
         temp = agents.create_version(
             agent_name=args.agent,
             definition=definition,
             description="temporary: stubbed-tool replay",
-            metadata={"purpose": TEMP_MARKER})
+            metadata={"purpose": TEMP_MARKER,
+                      "base_version": str(base_version),
+                      "cassette": os.path.basename(args.cassette)})
         temp_version = getattr(temp, "version", None) or getattr(temp, "id", None)
-        print(f"created temporary version {temp_version}")
+        print(f"created temporary version {temp_version} "
+              f"(clone of {base_version})")
 
         try:
             session = agents.create_session(
@@ -275,9 +326,11 @@ def main(argv=None):
             print(f"deleted temporary version {temp_version}")
 
         s = summary(server_url if not args.serve else base)
+        write_manifest(args.manifest, args, base_version, temp_version, s)
         ok, text = verdict(s, args.min_matched_prefix)
         print("\nREPLAY")
         print(text)
+        print(f"\nprovenance -> {args.manifest}")
         return 0 if ok else 1
 
     finally:
