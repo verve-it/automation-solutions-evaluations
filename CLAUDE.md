@@ -1,0 +1,97 @@
+# CLAUDE.md
+
+Read this before answering anything about how this repo evaluates agents.
+
+## THE TOOLS ARE STUBBED. This is the architecture, not an aspiration.
+
+The agent-change gate runs agents against **recorded tool responses**, not
+against ConnectWise:
+
+- **No ConnectWise request is made.** Not for reads, not for writes.
+- **A write returns the response the real write returned, and writes nothing.**
+  The agent sees `{"id": 805545, ...}` and believes it succeeded. Nothing
+  happened.
+- **The same ticket replays identically** however the live system has moved on.
+  That is the point: determinism is what makes it a gate.
+
+Mechanism: `replay/make_cassette.py` turns a recorded trace into an ordered
+cassette; `replay/replay_server.py` serves it as an MCP server;
+`replay/run_replay.py` binds the agent under test to it, invokes, scores and
+tears down.
+
+Verified end to end: 50/50 recorded calls matched, 4 writes replayed as
+recorded successes, zero ConnectWise requests.
+
+### Do not describe the live staging replay as the agent-change gate
+
+`.github/workflows/staging-replay.yml` invokes **real** tools against the dev
+ConnectWise instance. It is the **weekly smoke test for the write path** —
+slow, costs judge inference, leaves state behind, different answer every run.
+It is not how you decide whether an agent change is safe.
+
+| Gate | Mechanism | Tools |
+|---|---|---|
+| Eval-code change | frozen sets vs frozen baselines | none |
+| **Agent change** | **cassette replay** | **STUBBED** |
+| Agent change, judged | `ai-agent-evals` in staging | live, dev instance |
+| Production behaviour | recorded traces, `run_evals.py` | none |
+| Write path still works | one live staging run | live, dev instance |
+
+The only thing not solved in-repo is **reachability**: Foundry calls the
+replay server, so it must be reachable from Azure. `localhost` cannot work and
+`run_replay.py` refuses it.
+
+## Native vs ours — settled, with evidence
+
+Do not re-open these without reading `docs/NATIVE-RESEARCH.md` and
+`docs/MIGRATION-READINESS.md`. Each was researched, several were wrong the
+first time, and the corrections are recorded there.
+
+| Concern | Where it runs |
+|---|---|
+| Evaluator definitions, datasets, eval runs, **results** | **Foundry.** Results are project-scoped eval runs, not in this repo. |
+| Continuous evaluation | **Foundry.** `foundry/continuous_eval.py`. Custom evaluators qualify. |
+| Scoring, offline | **Native SDK.** `azure-ai-evaluation.evaluate()` runs with no project and no credentials — `foundry_evaluators/native.py`, 62 verdicts 0 mismatches against `run_evals.py`. |
+| Baseline diff, gating exit code | **Ours.** Foundry's baseline comparison is a t-test, which is the wrong instrument for a deterministic check, and a server-side baseline changes without a reviewer. |
+| Dataset construction | **Ours.** `AIAgentConverter` is a *classic* threads-and-runs API retiring 2027-03-31; our traces are `conv_` with no `thread_`/`run_`. It also returns one blob per conversation and every child agent shares the orchestrator's, so per-agent decomposition would be lost. Unhandled tool types are **silently skipped**. |
+| Cassette replay | **Ours.** No native tool stubbing exists — checked ACS, APIM `mock-response`, APIM caching, Agent Framework mocks. Host it on the **Functions MCP extension** (stateful, GA). |
+
+Our traces already carry `gen_ai.tool.name`, `mcp.method.name` and
+`mcp.protocol.version` — the OTel conventions' own attributes. The conventions
+are at **Development** stability in a repo that exists to iterate fast, with
+no version to pin. That, not a native converter arriving, is the thing likely
+to break first.
+
+## Other things worth not re-deriving
+
+- **Root holds four scripts.** `export_traces` → `trace_to_eval` → `run_evals`,
+  plus `scrub_trace`. Everything else is in `foundry/`, `replay/`, `tools/`,
+  `dataverse/`. Moved scripts put the repo root on `sys.path` themselves.
+- **`foundry/` vs `foundry_evaluators/`**: the first is our tooling that calls
+  Foundry; the second is code uploaded and executed *by* Foundry.
+- **Traces must be scrubbed before committing.** `tests/test_committed_traces.py`
+  fails if a tracked trace lacks pseudonym tokens or carries a real address.
+  One repo salt, for ever — a different salt gives the same person a different
+  token and silently breaks cross-trace reading.
+- **`valid_tool_args` is only as real as the schema.** It passed 100% of a
+  known-bad trace set until `cwpsa-mcp` typed `reference_type` as a `Literal`.
+  A check that cannot fail is not a check.
+- **Divergence in a replay is not automatically failure.** An agent change that
+  removes a wasted call *should* diverge.
+- **Gates compare DELTA, not absolute pass rates.** Known failures stay failing
+  without blocking unrelated work.
+- **A replay's eval belongs to the BASE version, not the ephemeral clone.**
+  `run_replay.py` creates a temp agent version and deletes it; the trace keeps
+  its id, so `artifacts/replay-run.json` records what it was cloned from.
+- **`evaluate()` reads `**kwargs` as a required column named `kw`.** Evaluators
+  need explicit keyword parameters.
+
+## Working agreements
+
+- **Patches, not pushes.** Deliver a `git format-patch` file. Do not push.
+- **One patch per message**, newest commit only, unless a range is asked for.
+- **Verify before claiming.** Run it, then say what happened.
+- **Never `git reset --hard origin/<branch>`** without checking for local
+  commits first. Doing that has discarded delivered work twice in this repo.
+- **`origin` is not their working tree.** A patch absent from `origin/develop`
+  may still be applied locally. Ask; do not infer.
