@@ -128,8 +128,16 @@ ZIP="$(mktemp -d)/package.zip"
 # somewhere, and it is not going to be a Windows laptop. Despite the command's
 # name this routes to Flex Consumption package deployment, which is the only
 # deployment technology Flex supports -- plain zip deploy is not.
-az functionapp deployment source config-zip \
-  -g "$RG" -n "$APP" --src "$ZIP" --build-remote true -o none
+if ! az functionapp deployment source config-zip \
+     -g "$RG" -n "$APP" --src "$ZIP" --build-remote true -o none; then
+  rm -f "$ZIP"
+  echo >&2
+  echo "The package uploaded; the app did not come up. What the handler" >&2
+  echo "printed on the way down is the diagnosis:" >&2
+  echo >&2
+  echo "  python3 $HERE/diagnose.py -g $RG" >&2
+  exit 1
+fi
 rm -f "$ZIP"
 
 echo

@@ -237,6 +237,13 @@ resource site 'Microsoft.Web/sites@2023-12-01' = {
     siteConfig: {
       minTlsVersion: '1.2'
       appSettings: union([
+        // Load-bearing and invisible. The mcp-custom-handler configuration
+        // profile in host.json is PREVIEW, and without this flag the host
+        // does not recognise it: it looks for functions, finds none, never
+        // starts the handler, and answers 502 to everything. Nothing in the
+        // failure names the flag. Microsoft's own sample carries it in
+        // local.settings.json, which is the only place it is written down.
+        { name: 'AzureWebJobsFeatureFlags', value: 'EnableMcpCustomHandlerPreview' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: insights.properties.ConnectionString }
         { name: 'REPLAY_TOKEN', value: replayToken }
         { name: 'REPLAY_CASSETTE', value: defaultCassette }

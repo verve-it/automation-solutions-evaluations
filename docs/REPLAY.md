@@ -212,6 +212,28 @@ and the transport is ours — which is exactly the case Microsoft documents as
 
 The extension remains the right answer for `cwpsa-mcp` itself.
 
+### The preview flag, and what it did not explain
+
+`AzureWebJobsFeatureFlags = EnableMcpCustomHandlerPreview` is what Microsoft's
+sample carries in `local.settings.json`, and the name says `mcp-custom-handler`
+is preview. `infra/main.bicep` sets it.
+
+It explained nothing about our 502. Host `4.1054.250.26428` honoured the
+profile with the flag absent:
+
+    1 functions found (Custom)
+    Created function http-handler1 for route {*route}
+    Using port 8000 specified via configuration for custom handler.
+
+The handler was started and it died on `ModuleNotFoundError: No module named
+'mcp_core'`. That is recorded here because the wrong answer was written down
+confidently first, from the sample alone, before anyone read a log.
+
+So the accurate statement is narrower: the MCP extension is GA, this profile
+is preview-flagged, and we set the flag because the sample does. Worth it -- a
+preview flag is a smaller problem than a stub that cannot advertise an enum --
+but it is a trade.
+
 ### State, and why it is not in the process
 
 `Cassette.cursor` is a per-key queue position: the same call appears several

@@ -57,6 +57,17 @@ Hosting our own MCP server on Functions is itself documented and native ("Host
 servers built with MCP SDKs on Azure Functions"); `host.json` carries the
 `mcp-custom-handler` profile for it.
 
+Microsoft's sample sets `AzureWebJobsFeatureFlags=EnableMcpCustomHandlerPreview`
+in `local.settings.json`, and the flag's name says the profile is preview.
+`infra/main.bicep` sets it too. **It was not, however, the cause of anything**:
+host `4.1054.250.26428` honoured the profile without it, logging `1 functions
+found (Custom)` and `Using port 8000 specified via configuration for custom
+handler`. I asserted otherwise once, from the sample alone, before reading a
+log. Don't repeat that.
+
+So: the MCP **extension** is GA and this profile is preview-flagged. Still the
+right trade -- the extension cannot express an enum -- but a trade.
+
 ## Native vs ours — settled, with evidence
 
 Do not re-open these without reading `docs/NATIVE-RESEARCH.md` and
@@ -107,6 +118,15 @@ to break first.
 - **Patches, not pushes.** Deliver a `git format-patch` file. Do not push.
 - **One patch per message**, newest commit only, unless a range is asked for.
 - **Verify before claiming.** Run it, then say what happened.
+- **No fix for a failure whose log you have not read.** A 502, an "unhealthy"
+  health check and a crashed handler are the same symptom; the log is the only
+  thing that separates them. Shipping a plausible cause from a sample file
+  cost a deploy cycle here and put a wrong explanation into five documents.
+  When the log is out of reach, say so and ask for it -- that is one message,
+  where a guess is a round trip.
+- **Make the failure carry its own evidence.** Cheaper than another round
+  trip: print the interpreter, the path, and the directory listing, so the
+  next occurrence names itself.
 - **Never `git reset --hard origin/<branch>`** without checking for local
   commits first. Doing that has discarded delivered work twice in this repo.
 - **`origin` is not their working tree.** A patch absent from `origin/develop`
