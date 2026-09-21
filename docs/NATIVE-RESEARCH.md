@@ -169,10 +169,14 @@ is what `replay/` is. Microsoft does not ship one for hosted agents.
 
 Not a feature, but the architecture is native and documented:
 
-- **Host:** Azure Functions with the **MCP extension** (tool trigger and
-  binding). Stateful, GA, and `SessionId` on the invocation context is the
-  correct home for `Cassette.cursor` — one MCP session is one replay. See
-  `docs/REPLAY.md`.
+- **Host:** Azure Functions, Flex Consumption, as a **custom handler** —
+  the documented path for hosting a server built with an MCP SDK, with the
+  `mcp-custom-handler` profile in `host.json`. Built: `functions/replay-mcp/`.
+  **Not** the MCP extension: its `toolProperties` has no `enum`, and 8 of our
+  advertised properties are enums — including `cw_resolve.reference_type`,
+  the twenty-value one that makes `valid_tool_args` a check that can fail. A
+  stub advertising a looser contract than production causes divergence and
+  then blames the agent for it. See `docs/REPLAY.md`.
 - **Register:** Foundry toolbox pointing at the Function endpoint, documented
   as "Connect an MCP server on Azure Functions to Foundry Agent Service".
 - **Bind:** agent version whose tools point at the replay toolbox, which
@@ -189,7 +193,7 @@ ours, because nothing ships it.
 |---|---|---|
 | Offline merge gate | **yes** — `evaluate()`, verified offline here | adopt for scoring; keep baseline diff and gating. Costs stdlib-only. |
 | Dataset construction | **no** — `AIAgentConverter` is classic-platform (retires 2027-03-31); our traces are `conv_`, and child agents share one conversation | keep `trace_to_eval.py` |
-| Cassette replay | **no** | keep, host natively on Functions MCP extension |
+| Cassette replay | **no** | keep; hosted natively on Functions (Flex Consumption, custom handler) — `functions/replay-mcp/` |
 
 Two of three moved from "no native way" to "there is one, and here is the
 trade". That is worth knowing before more is built on the assumption I gave.

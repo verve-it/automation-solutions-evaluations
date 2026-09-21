@@ -97,26 +97,57 @@ def serve(cassette, port, tool_defs, journal):
     raise SystemExit(f"replay server did not come up on {base}")
 
 
-def summary(base, token=None):
-    req = urllib.request.Request(base.rstrip("/") + "/summary")
+def summary_url(server_url):
+    """Where the journal for this replay lives.
+
+    Locally the server is one cassette on one port and /summary is enough.
+    Hosted, the cassette is a path segment -- https://host/mcp/<id> -- and the
+    journal for it is https://host/summary/<id>. Deriving it here keeps the
+    caller from having to pass two URLs that can disagree.
+    """
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(server_url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if "mcp" in parts:
+        parts[len(parts) - 1 - parts[::-1].index("mcp")] = "summary"
+    else:
+        parts.append("summary")
+    return urlunparse(parsed._replace(path="/" + "/".join(parts), query="",
+                                      fragment=""))
+
+
+def summary(base, token=None, session=None):
+    req = urllib.request.Request(summary_url(base))
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    if session:
+        req.add_header("Mcp-Session-Id", session)
     return json.loads(urllib.request.urlopen(req).read())
 
 
 # ------------------------------------------------------------------- binding
 
-def replay_tools(server_url, models):
-    """The only difference between the agent under test and production."""
+def replay_tools(server_url, models, token=None):
+    """The only difference between the agent under test and production.
+
+    The token travels as a header rather than in the URL. `server_url` is
+    stored on the agent version and repeated in every span, so a token in the
+    query string would end up in App Insights and in anything exported from
+    it.
+    """
+    kwargs = {}
+    if token:
+        kwargs["headers"] = {"Authorization": f"Bearer {token}"}
     return [models.MCPTool(
         server_label=REPLAY_TOOL_LABEL,
         server_url=server_url,
         server_description="Recorded ConnectWise responses. No live service.",
         require_approval="never",
+        **kwargs,
     )]
 
 
-def cloned_definition(base_version, server_url, models):
+def cloned_definition(base_version, server_url, models, token=None):
     """Copy the agent definition, swapping only its tools.
 
     Everything else -- model, instructions, temperature, reasoning, skills --
@@ -127,7 +158,7 @@ def cloned_definition(base_version, server_url, models):
     d = base_version.definition
     payload = d.as_dict() if hasattr(d, "as_dict") else dict(d)
     payload["tools"] = [t.as_dict() if hasattr(t, "as_dict") else t
-                        for t in replay_tools(server_url, models)]
+                        for t in replay_tools(server_url, models, token)]
     return payload
 
 
@@ -231,6 +262,9 @@ def main(argv=None):
                     help="run replay_server.py locally as a subprocess")
     ap.add_argument("--port", type=int, default=8901)
     ap.add_argument("--tool-defs", default="tool_manifests/")
+    ap.add_argument("--token", default=os.environ.get("REPLAY_TOKEN"),
+                    help="bearer token the hosted replay server requires. "
+                         "Sent as a header, never in the URL.")
     ap.add_argument("--journal", default="artifacts/replay-journal.json")
     ap.add_argument("--manifest", default="artifacts/replay-run.json",
                     help="provenance for this replay. Written even on "
@@ -278,7 +312,9 @@ def main(argv=None):
                 "server_url": server_url,
                 "tools_replaced_with": [
                     {"type": "mcp", "server_label": REPLAY_TOOL_LABEL,
-                     "server_url": server_url, "require_approval": "never"}],
+                     "server_url": server_url, "require_approval": "never",
+                     "headers": ["Authorization"] if args.token else []}],
+                "summary_url": summary_url(server_url),
                 "query": query,
                 "temp_version_metadata": {"purpose": TEMP_MARKER},
             }, indent=1))
@@ -298,7 +334,8 @@ def main(argv=None):
 
         base_version = (agents.get_version(args.agent, args.agent_version)
                         if args.agent_version else agents.get(args.agent))
-        definition = cloned_definition(base_version, server_url, models)
+        definition = cloned_definition(base_version, server_url, models,
+                                       args.token)
 
         base_version = (getattr(base_version, "version", None)
                         or args.agent_version or "latest")
@@ -325,7 +362,7 @@ def main(argv=None):
             agents.delete_version(args.agent, temp_version)
             print(f"deleted temporary version {temp_version}")
 
-        s = summary(server_url if not args.serve else base)
+        s = summary(server_url if not args.serve else base, args.token)
         write_manifest(args.manifest, args, base_version, temp_version, s)
         ok, text = verdict(s, args.min_matched_prefix)
         print("\nREPLAY")

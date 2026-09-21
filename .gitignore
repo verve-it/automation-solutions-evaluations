@@ -18,6 +18,10 @@ candidates*.json
 scrub-*.json
 *.redactions.json
 
+# Assembled Azure Function deployment package. Every file in it is a copy of
+# something that lives elsewhere; `functions/replay-mcp/build.sh` rebuilds it.
+functions/replay-mcp/.build/
+
 # Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one
 # only when it backs a gate and the trace it came from is not committed.
 cassettes/
