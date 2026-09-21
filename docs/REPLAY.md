@@ -175,6 +175,12 @@ export REPLAY_TOKEN=$(openssl rand -hex 32)
 functions/replay-mcp/deploy.sh <resource-group> eastus2
 ```
 
+PowerShell, where neither `export` nor `openssl` exists:
+
+```powershell
+.\functions\replay-mcp\deploy.ps1 -ResourceGroup <resource-group> -NewToken
+```
+
 Two earlier versions of this document were wrong about this, in opposite
 directions, and both corrections are worth keeping.
 

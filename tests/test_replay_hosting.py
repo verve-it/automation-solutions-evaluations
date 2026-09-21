@@ -313,3 +313,127 @@ def test_the_manifest_carries_schema_the_mcp_extension_cannot_advertise():
 
     assert enums, "no enums left in the manifest"
     assert enums.get("cw_resolve.reference_type", 0) >= 20
+
+
+# ------------------------------------------------------------ the verifier
+
+def _verify_module():
+    path = os.path.join(FUNCTION_DIR, "verify.py")
+    spec = importlib.util.spec_from_file_location("replay_verify", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+verify = _verify_module()
+
+
+@pytest.fixture
+def recordings(tmp_path):
+    """A local copy of what the hosted server is serving."""
+    directory = tmp_path / "local"
+    directory.mkdir()
+    (directory / "fixture.json").write_text(json.dumps(_cassette_fixture()))
+    return str(directory)
+
+
+def test_verifier_passes_against_a_faithful_server(hosted, recordings, capsys):
+    code = verify.main([hosted, "--token", "s3cret",
+                        "--cassette-dir", recordings])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "replay identically" in out
+    assert "no write was performed" in out
+
+
+def test_verifier_fails_when_a_result_differs(hosted, recordings, capsys):
+    """A check that cannot fail is not a check."""
+    path = os.path.join(recordings, "fixture.json")
+    with open(path, encoding="utf-8") as fh:
+        bent = json.load(fh)
+    bent["interactions"][1]["result"] = "not what the recording said"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(bent, fh)
+
+    assert verify.main([hosted, "--token", "s3cret",
+                        "--cassette-dir", recordings]) == 1
+    assert "came back different" in capsys.readouterr().out
+
+
+def test_verifier_fails_on_a_bad_token(hosted, recordings, capsys):
+    assert verify.main([hosted, "--token", "wrong",
+                        "--cassette-dir", recordings]) == 1
+    assert "401" in capsys.readouterr().out
+
+
+def test_verifier_rejects_something_that_is_not_the_replay_server(capsys):
+    """The write guarantee is the server's identity, so check for it."""
+    class Impostor(verify.Client):
+        def health(self):
+            return {"status": "ok", "cassettes": ["fixture"]}
+
+    module_client = verify.Client
+    verify.Client = Impostor
+    try:
+        assert verify.main(["http://example.invalid", "--token", "t"]) == 1
+    finally:
+        verify.Client = module_client
+    assert "write guarantee" in capsys.readouterr().out
+
+
+# ------------------------------------------------- the two storage-auth modes
+
+INFRA = os.path.join(FUNCTION_DIR, "infra")
+
+
+def _bicep(name):
+    with open(os.path.join(INFRA, name), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_only_the_role_assignment_is_conditional():
+    """Everything else must stay valid in both modes.
+
+    ARM evaluates both sides of a ternary, so a reference to a resource that
+    only sometimes exists is a deployment error rather than a dead branch.
+    The identity is created either way for exactly that reason.
+    """
+    main = _bicep("main.bicep")
+    conditional = [line for line in main.splitlines()
+                   if line.startswith("resource ") and " = if (" in line]
+    assert len(conditional) == 1
+    assert "roleAssignments" in conditional[0]
+
+
+def test_keys_are_off_unless_the_deployment_needs_them():
+    """A key nothing uses is a credential left to leak."""
+    assert "allowSharedKeyAccess: !useIdentity" in _bicep("main.bicep")
+
+
+def test_rbac_template_computes_the_same_assignment_name():
+    """Otherwise running both makes two assignments instead of one."""
+    main, rbac = _bicep("main.bicep"), _bicep("rbac.bicep")
+    same = "guid(storage.id, identity.id, blobDataOwner)"
+    assert same in main and same in rbac
+    assert "b7e6dc6d-f1e8-4753-8033-0f276bb0955b" in main
+    assert "b7e6dc6d-f1e8-4753-8033-0f276bb0955b" in rbac
+
+
+def test_connection_string_mode_reaches_the_state_store():
+    """The fallback is only useful if state still lands in blob storage."""
+    main = _bicep("main.bicep")
+    assert "REPLAY_STATE_CONNECTION" in main
+    assert "REPLAY_STATE_CONNECTION" in _read(os.path.join(FUNCTION_DIR,
+                                                           "server.py"))
+
+
+def test_state_store_picks_a_backend_from_what_it_is_given():
+    from state_store import open_store
+    assert type(open_store()).__name__ == "MemoryStore"
+    # A container with no way to reach it is not a half-configured BlobStore.
+    assert type(open_store(container="c")).__name__ == "MemoryStore"
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()

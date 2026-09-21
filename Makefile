@@ -6,7 +6,7 @@ OPS_WORST   := traces/2026-09-15-ops-worst-case.json
 FT_BASELINE := baselines/full-triage-2026-09-18.json
 OW_BASELINE := baselines/ops-worst-case-2026-09-18.json
 
-.PHONY: help test evals evals-ops baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay replay-package replay-deploy clean
+.PHONY: help test evals evals-ops baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay replay-package replay-deploy replay-verify clean
 
 help:
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | \
@@ -54,6 +54,11 @@ replay-deploy:  ## provision and publish the hosted replay server
 # ticket and company identifiers and this is the only thing in front of them.
 	@test -n "$(RG)" || { echo "usage: REPLAY_TOKEN=... make replay-deploy RG=<resource-group>"; exit 2; }
 	functions/replay-mcp/deploy.sh $(RG) $(or $(LOCATION),eastus2)
+
+replay-verify:  ## replay every cassette against the hosted server and compare
+# Deploying it is not the same as it being right.
+	@test -n "$(URL)" || { echo "usage: REPLAY_TOKEN=... make replay-verify URL=https://<app>.azurewebsites.net"; exit 2; }
+	$(PY) functions/replay-mcp/verify.py $(URL)
 
 foundry-dataset:  ## build the Foundry evaluation dataset from the frozen set
 	$(PY) foundry/to_foundry_dataset.py $(FULL_TRIAGE) --expected expected.json \
