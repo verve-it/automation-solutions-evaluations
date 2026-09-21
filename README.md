@@ -290,10 +290,15 @@ foundry/                  our tooling that TALKS TO Foundry
 foundry_evaluators/       code that RUNS INSIDE Foundry
   checks.py  _shared.py     the eight checks, as uploaded
 
-replay/                   record/replay stub
+replay/                   record/replay stub -- THE agent-change gate
   make_cassette.py          a trace -> an ordered cassette
   replay_server.py          serve a cassette as an MCP toolbox
-  full-triage.json          dev tickets for the staging replay
+  run_replay.py             bind an agent to it, invoke, score, tear down
+  full-triage.json          dev tickets for the live smoke test
+
+dataverse/                outcome evaluation -- human review as ground truth
+  fetch_outcomes.py         --probe to discover the schema, then pull reviews
+  schema.json               entity/attribute names (UNPROBED -- see its README)
 
 tools/                    occasional, not part of a run
   extract_tool_manifest.py  a manifest from a URL, dump, source tree or trace
@@ -331,8 +336,8 @@ an agent does belongs there; anything that only measures belongs here. See
 | Gap | Blocks | Where |
 |---|---|---|
 | **`entity` and `filter` are still free-form** | `valid_tool_args` covers arity, types, required params, unexpected fields and `reference_type` — not entity paths or filter shapes. An `entity` enum was proposed and correctly rejected upstream (~36k tokens/request). | `tool_manifests/README.md` |
-| **Dataverse loading** | all outcome evaluation. Every check is process quality; a run can pass all eight having proposed the wrong company. | handoff §8 |
-| Cassette replay has no driver | the deterministic agent-change gate | `docs/REPLAY.md` |
+| **The outcome join is unestablished** | all outcome evaluation. `dataverse/fetch_outcomes.py --probe` answers whether the orchestration record carries the App Insights `operation_Id`. Ticket id will not substitute — two orchestrations in the frozen set share ticket 805392. | `dataverse/README.md` |
+| Hosting the replay server | the deterministic agent-change gate. `run_replay.py` does the Foundry wiring; the server still has to be reachable from Azure. | `docs/REPLAY.md` |
 | `replay/` ticket ids | the staging replay | `replay/README.md` |
 | Cost / latency budgets | gating on spend | set `--max-tokens` |
 | Skill versions | "which rules were in force" across versions | `load_skill` returns no version |
