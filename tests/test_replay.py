@@ -4,6 +4,7 @@ The point of a cassette is that a re-run sees exactly the world the recorded
 run saw. Every test here defends one of the ways that quietly stops being true.
 """
 import json
+import os
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -307,3 +308,95 @@ def test_the_health_check_stays_open(server):
         assert body == {"status": "ok", "mode": "replay"}
     finally:
         rs.Handler.token = None
+
+
+# --- the driver -------------------------------------------------------------
+
+import importlib.util as _ilu                                  # noqa: E402
+_spec = _ilu.spec_from_file_location(
+    "run_replay", os.path.join(REPO, "replay", "run_replay.py"))
+rr = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(rr)
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:8901/mcp",
+    "http://127.0.0.1:8901",
+    "https://0.0.0.0:9000/mcp",
+    "http://mybox.local/mcp",
+])
+def test_a_url_azure_cannot_reach_is_rejected(url):
+    """Foundry calls the replay server, not the other way round. A localhost
+    URL becomes a tool call that times out inside the agent run, surfacing as
+    an agent failure rather than as a configuration mistake."""
+    assert rr.is_locally_scoped(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://replay.example.net/mcp",
+    "https://abc123.ngrok-free.app/mcp",
+    "https://replay.internal.corp:8443/mcp",
+])
+def test_a_reachable_url_is_accepted(url):
+    assert not rr.is_locally_scoped(url)
+
+
+def test_only_the_tools_are_swapped_when_cloning_an_agent():
+    """A replayed agent already differs from production by its tool binding.
+    Letting model, instructions or temperature drift too makes the comparison
+    meaningless."""
+    class FakeDef:
+        def as_dict(self):
+            return {"kind": "prompt", "model": "gpt-4o",
+                    "instructions": "triage the ticket",
+                    "temperature": 0.2,
+                    "tools": [{"type": "mcp", "server_label": "connectwise"}]}
+
+    class FakeVersion:
+        definition = FakeDef()
+
+    import azure.ai.projects.models as models
+    out = rr.cloned_definition(FakeVersion(), "https://r.example/mcp", models)
+    assert out["model"] == "gpt-4o"
+    assert out["instructions"] == "triage the ticket"
+    assert out["temperature"] == 0.2
+    assert len(out["tools"]) == 1
+    assert out["tools"][0]["server_url"] == "https://r.example/mcp"
+    assert out["tools"][0]["server_label"] == rr.REPLAY_TOOL_LABEL
+
+
+def test_a_cassette_without_a_query_says_so_rather_than_inventing_one():
+    import json as _json
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        _json.dump({"interactions": [{"tool": "x"}]}, fh)
+        path = fh.name
+    with pytest.raises(SystemExit) as exc:
+        rr.cassette_query(path)
+    assert "no recorded query" in str(exc.value)
+
+
+def test_divergence_alone_is_not_failure():
+    """An agent change that removes a wasted call SHOULD diverge. That is the
+    improvement, not a regression."""
+    s = {"recorded_interactions": 50, "matched_prefix": 40,
+         "writes_attempted": 2,
+         "first_divergence": {"seq": 40, "tool": "a___cw_query"}}
+    ok, text = rr.verdict(s)
+    assert ok
+    assert "matched prefix        : 40" in text
+
+
+def test_diverging_before_the_floor_fails():
+    s = {"recorded_interactions": 50, "matched_prefix": 3,
+         "writes_attempted": 0,
+         "first_divergence": {"seq": 3, "tool": "a___cw_resolve"}}
+    ok, text = rr.verdict(s, allow_divergence_after=10)
+    assert not ok
+    assert "FAIL" in text
+
+
+def test_the_report_states_that_no_write_was_performed():
+    ok, text = rr.verdict({"recorded_interactions": 1, "matched_prefix": 1,
+                           "writes_attempted": 4})
+    assert "none performed" in text

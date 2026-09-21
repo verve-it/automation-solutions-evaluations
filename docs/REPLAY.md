@@ -132,23 +132,109 @@ loudly when this happens. See `tool_manifests/README.md`.
 
 ## What has to be wired outside this repo
 
-The eval-repo half — cassette format, replay server, divergence policy — is
-here and tested. The Foundry side is not, and is yours:
+`replay/run_replay.py` now does steps 2-4 for you. What it cannot do is make
+the server reachable.
 
-1. **Host `replay/replay_server.py`** (or an equivalent) somewhere the Foundry project
-   can reach. It is stdlib-only and stateless apart from the cassette.
-   `--token` enables a bearer check.
-2. **Register a toolbox** pointing at it — e.g. `ConnectwiseMCP-Replay` — with
-   the same tool names. The schemas come from `--tool-defs`.
-3. **Bind an agent variant to it.** The agent under test then differs from
-   production by its toolbox binding only. Keep everything else identical, or
-   you are evaluating a different agent.
-4. **Drive it**, one cassette per run, and collect `/summary`.
+**The one real constraint: Foundry calls the replay server, not the other way
+round.** So the server has to be reachable *from Azure*. `localhost` will not
+do, and the driver refuses it rather than letting you discover it as a
+timeout inside an agent run — which surfaces as an agent failure rather than
+as a configuration mistake. Host `replay/replay_server.py` anywhere with a
+public name, or put a tunnel in front of it. It is stdlib-only and stateless
+apart from the cassette, and `--token` enables a bearer check.
 
-Step 3 is the honest caveat: a replayed agent is not byte-identical to the
-production agent, because its toolbox binding differs. Keeping the tool names
-and schemas identical is what keeps that difference from mattering — another
-reason the manifest is the highest-leverage open item.
+With that URL in hand:
+
+```bash
+python3 replay/run_replay.py \
+    --cassette cassettes/2026-09-03-4dda7f4fa5f0.json \
+    --agent triage-orchestrator \
+    --server-url https://replay.example.net/mcp
+```
+
+It reads the agent version under test, clones its definition with **only the
+tools swapped** for an MCP tool pointing at the replay server, creates that as
+a temporary version tagged `eval-replay-temp`, invokes it, collects
+`/summary`, and deletes the temporary version — including on failure.
+
+Everything else in the definition is copied verbatim. A replayed agent
+already differs from production by its tool binding; letting the model,
+instructions or temperature drift as well makes the comparison meaningless.
+A test asserts the swap touches nothing else.
+
+`--dry-run` prints the exact binding it would create and touches nothing.
+Use it first.
+
+### Where to host it
+
+Microsoft supports remote MCP servers on Azure Functions two ways, and the
+difference matters here more than it looks.
+
+**The self-hosted / BYO path** (public preview) deploys a server built with
+the MCP SDKs to Flex Consumption with roughly one line of change. It is the
+obvious fit, and it is the wrong one: **stateful execution is not supported
+for the self-hosted option in preview**, and this server is stateful.
+
+`Cassette.cursor` is a per-key queue position held in memory
+(`replay/replay_server.py`). It is what makes a cassette *ordered rather than
+a dictionary* — the same call can appear several times in one run with
+different responses, and position is how the right one is returned. Under
+scale-out, two instances hold two independent cursors, the same call gets
+answered from two different positions, and the replay reports a plausible
+score that means nothing. It fails silently, which is the worst shape a
+failure can take in a gate.
+
+So, in order of preference:
+
+| Option | Fit | Why |
+|---|---|---|
+| **Azure Container Apps, min=max=1 replica** | best | Runs the existing stdlib server unchanged. Stateful, scales to zero, Microsoft-native. |
+| App Service, single instance, `ARR affinity` off | fine | Same reasoning, more always-on cost. |
+| Azure Functions, **MCP extension** | possible | This is Microsoft's stateful MCP path. Means rewriting the server in the Functions programming model. |
+| Azure Functions, **self-hosted/BYO** | **no** | Stateless only in preview. Correct until it scales out, then quietly wrong. |
+
+If Functions is a hard requirement, the honest fix is to stop holding the
+cursor in memory: key it by MCP session id and put it in Table Storage or
+Redis. That is a real change to `Cassette`, not a deployment setting, and it
+is not worth doing unless Container Apps is unavailable.
+
+Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary` is
+the journal — tool names, canonicalised arguments carrying ticket and company
+identifiers, every attempted write.
+
+### On Microsoft's caution about mocks
+
+Foundry's evaluation guidance warns that *"a mock that simplifies a tool
+response or a test harness that skips authentication can hide exactly the
+bugs you're trying to catch"*, and says evals should use the same APIs, tools
+and surfaces as production. That caution is aimed squarely at something like
+this, so it is worth being explicit about why this design answers it rather
+than ignoring it.
+
+- **Nothing is simplified.** A cassette replays the bytes the real tool
+  returned, truncation, error envelopes and all. It is a recording, not a
+  hand-written fixture.
+- **The surface is identical.** Same MCP protocol, same tool names, same
+  schemas — the schemas come from `--tool-defs`, the same manifest the live
+  validator uses. Keeping those identical is what stops the binding
+  difference from mattering.
+- **The bugs a stub genuinely hides are still tested.** Auth, ConnectWise
+  schema drift and the write path are exactly what the nightly trace scoring
+  and the weekly live staging run cover. The stub is not a replacement for
+  those, and this repo keeps both.
+
+What the stub buys that nothing else does is the thing the caution cannot
+address: the same input produces the same trajectory, so a difference between
+two agent versions is attributable to the change rather than to the ticket
+having moved on overnight.
+
+### The honest caveat
+
+Driving the session to completion is the one step that could not be verified
+without a live project. The binding, the temp-version lifecycle and the
+teardown are all in place and tested offline; if the SDK's session surface
+differs from what the script expects, that is the line to adjust, and the
+script says so where it happens rather than failing silently.
 
 ## Where this leaves the gate design
 
