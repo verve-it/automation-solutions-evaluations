@@ -70,18 +70,28 @@ class MemoryStore:
 class BlobStore:
     """One block blob per session, guarded by its ETag.
 
-    Authenticates with `DefaultAzureCredential`, so in Azure it is the
-    function app's managed identity and no connection string exists to leak.
-    The container is created on first use because a replay is expected to be
-    able to start without a provisioning step of its own.
+    Two ways in. `DefaultAzureCredential` against an account URL is the one to
+    want: in Azure that is the function app's managed identity and there is no
+    key anywhere to leak. A connection string is the fallback for a
+    subscription where nobody can assign the role -- see `storageAuth` in
+    infra/main.bicep. The store does not care which; everything above it is
+    identical.
+
+    The container is created on first use because a replay should not need a
+    provisioning step of its own.
     """
 
-    def __init__(self, account_url, container, credential=None):
-        from azure.identity import DefaultAzureCredential
+    def __init__(self, account_url=None, container=None, credential=None,
+                 connection_string=None):
         from azure.storage.blob import BlobServiceClient
 
-        self._service = BlobServiceClient(
-            account_url, credential=credential or DefaultAzureCredential())
+        if connection_string:
+            self._service = BlobServiceClient.from_connection_string(
+                connection_string)
+        else:
+            from azure.identity import DefaultAzureCredential
+            self._service = BlobServiceClient(
+                account_url, credential=credential or DefaultAzureCredential())
         self._container = self._service.get_container_client(container)
         try:
             self._container.create_container()
@@ -136,13 +146,14 @@ except Exception:                       # pragma: no cover - local runs
     _MATCH_ETAG = None
 
 
-def open_store(account_url=None, container=None):
+def open_store(account_url=None, container=None, connection_string=None):
     """A BlobStore when told where to put things, a MemoryStore otherwise.
 
     Deliberately not an error when unconfigured: `func start` on a laptop
-    should work with no Azure at all, and the hosted deployment sets both
-    settings in Bicep.
+    should work with no Azure at all, and the hosted deployment sets what it
+    needs in Bicep.
     """
-    if account_url and container:
-        return BlobStore(account_url, container)
+    if container and (account_url or connection_string):
+        return BlobStore(account_url, container,
+                         connection_string=connection_string)
     return MemoryStore()

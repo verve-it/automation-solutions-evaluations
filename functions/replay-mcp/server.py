@@ -37,6 +37,8 @@ Configuration, all through app settings
     REPLAY_TOKEN            require `Authorization: Bearer <token>`
     REPLAY_ON_EXHAUSTED     repeat | diverge   (default: repeat)
     REPLAY_STATE_ACCOUNT    https://<account>.blob.core.windows.net
+    REPLAY_STATE_CONNECTION storage connection string, where nobody could
+                            assign the identity a role
     REPLAY_STATE_CONTAINER  container for per-session replay state
 
 Routes
@@ -89,6 +91,7 @@ class Config:
         self.token = get("REPLAY_TOKEN")
         self.on_exhausted = get("REPLAY_ON_EXHAUSTED", "repeat")
         self.state_account = get("REPLAY_STATE_ACCOUNT")
+        self.state_connection = get("REPLAY_STATE_CONNECTION")
         self.state_container = get("REPLAY_STATE_CONTAINER")
         self.port = int(get("FUNCTIONS_CUSTOMHANDLER_PORT", "8000"))
 
@@ -306,7 +309,8 @@ def main():
     library = Library(config)
     Handler.config = config
     Handler.library = library
-    Handler.store = open_store(config.state_account, config.state_container)
+    Handler.store = open_store(config.state_account, config.state_container,
+                               config.state_connection)
 
     available = cassette_ids(config.cassette_dir)
     print(f"cassettes : {len(available)} in {config.cassette_dir}")
