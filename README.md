@@ -288,8 +288,10 @@ foundry/                  our tooling that TALKS TO Foundry
   check_cloud_eval.py       poll it, diff the scores against local
   submit_to_foundry.py      the judged evaluators (sampled, not a gate)
 
-foundry_evaluators/       code that RUNS INSIDE Foundry
-  checks.py  _shared.py     the eight checks, as uploaded
+foundry_evaluators/       the eight checks, one implementation
+  checks.py  _shared.py     as uploaded to Foundry
+  native.py                 the same objects, run by azure-ai-evaluation
+                            locally and offline
 
 replay/                   record/replay stub -- THE agent-change gate
   make_cassette.py          a trace -> an ordered cassette
