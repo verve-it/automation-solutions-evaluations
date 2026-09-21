@@ -58,6 +58,124 @@ repeatable, and the only one that leaves state behind.
   `check_trajectory` deliberately reports precision / recall / F1 the way Task
   Navigation Efficiency does, so numbers stay comparable if we ever move it.
 
+## Native audit: what we use, what we skip, and why
+
+Checked against Foundry as of 2026-09. Split three ways, because "are we
+native" has three different answers depending on the piece.
+
+### Native, and we use it
+
+| Concern | Native mechanism | Where |
+|---|---|---|
+| Evaluator definitions | evaluator catalog, versioned | `foundry/register_evaluators.py` |
+| Evaluator version pinning | catalog version ids | `evaluator-versions.json` |
+| Running evals in the cloud | `evals.create` + run | `foundry/run_cloud_eval.py` |
+| Eval datasets | project datasets, versioned | `foundry/to_foundry_dataset.py` |
+| Result storage | project-scoped eval runs | Foundry, not this repo |
+| Tracing | OTel GenAI conventions in App Insights | `export_traces.py` |
+| Judged evaluators | built-in catalog | `foundry/submit_to_foundry.py` |
+| Agent-change comparison | `microsoft/ai-agent-evals` | `staging-replay.yml` |
+| Tools | MCP | throughout |
+| CI identity | workload identity federation | `evals.yml` |
+
+Results are **not** stored in this repo. Eval runs live in the project; this
+repo holds definitions and ground truth.
+
+### Native, and we are NOT using it — the real gap
+
+**Continuous evaluation.** GA since March 2026. *(Now implemented — `foundry/continuous_eval.py`. Kept here because the reasoning still applies.)* Foundry samples live agent
+traces at a configured rate (`AgentEvaluationSamplingConfiguration`,
+`samplingPercent`, `maxRequestRate`), runs evaluators automatically, and
+surfaces results in the Observability dashboard with alert rules. It
+supports **custom** evaluators, not only built-ins — Microsoft's wording is
+that custom and built-in evaluators "compose naturally, running against the
+same traffic, producing results in the same schema, feeding into the same
+dashboards and alert rules."
+
+Ours are registered custom evaluators. They qualify.
+
+What we do instead: a GitHub Actions cron exports the last 24h of traces,
+converts them, scores them locally, and uploads a CI artifact. That is
+hand-rolled monitoring where a native, GA, dashboard-integrated mechanism
+exists.
+
+**It is not a drop-in replacement**, for the reason documented above: the
+native trace paths read `invoke_agent` spans, which on these traces carry
+`tool_call` but no `tool_result`, and four of the eight checks read results.
+Continuous evaluation also evaluates an *interaction*, where our converter
+decomposes an orchestration into one row per agent run.
+
+So the honest position is not "we were right to skip it" — it is that
+continuous evaluation should be **added**, at a low sampling rate, for the
+dashboard and alerting it brings, while the nightly keeps doing the
+per-agent decomposition it cannot. Two surfaces answering different
+questions, which is the pattern this repo already uses for judged evaluators.
+
+**The schedules API.** Foundry's schedules support cron and recurrence
+triggers. We use GitHub Actions cron. This was a deliberate choice — GitHub
+schedules, Foundry scores — and it keeps scheduling next to the code and the
+baseline diff. It is a defensible deviation rather than an oversight, but it
+is a deviation: if the nightly moved to continuous evaluation, the schedule
+would move with it and the GitHub cron would only cover the frozen sets.
+
+### Not native, deliberately — re-checked, and two claims corrected
+
+A second research pass found that two things I listed as having no native
+equivalent do have one. The decisions survive; the reasons had to change.
+
+**Baseline comparison IS native, and I said it was not.** Foundry lets you
+set a baseline run and compare others against it, with statistical t-testing
+per cell — p-values and sample sizes — and Microsoft documents running this
+from GitHub Actions and Azure DevOps to block releases on clear regressions.
+
+Why `baselines/*.json` stays in git anyway:
+
+- **A t-test is the wrong instrument for a deterministic check.** That
+  comparison exists to separate a real regression from run-to-run noise. Our
+  eight checks have no noise: the same spans score the same way every time. A
+  verdict flip is a flip. Statistical machinery over a deterministic signal
+  adds a way to be wrong, not a way to be right.
+- **A baseline must be reviewable in the pull request that changes it.** When
+  a verdict moves, the diff belongs in the same review as the code that moved
+  it. A baseline stored server-side changes without a reviewer.
+
+Where Foundry's baseline comparison *does* fit is the judged sample and the
+live staging replay, both stochastic. `--baseline-agent-id` through
+`ai-agent-evals` already does exactly that.
+
+**Dataset versioning and ground truth ARE native, and I implied otherwise.**
+Foundry datasets are versioned, reusable across runs, and the schema carries
+a `ground_truth` field. `expected.json` could live there.
+
+It does not, for a reason that is not preference: **the merge gate runs with
+no Azure.** `run_evals.py` and the frozen-set replay must work on a laptop
+with no credentials and in a CI job with no secrets — that is what makes them
+a gate rather than a dependency. Ground truth that lives only in a project
+cannot be read by a job with no project access.
+
+`to_foundry_dataset.py` already carries `expected_actions` into the uploaded
+dataset, so cloud runs get it natively. The file in git is the source of
+truth and the dataset is a projection of it, which is the right direction for
+the dependency to point.
+
+**Superseded by a third pass — see [`NATIVE-RESEARCH.md`](NATIVE-RESEARCH.md).**
+Two of the three below turned out to have native equivalents after all:
+
+| What | Status after re-checking |
+|---|---|
+| `run_evals.py` running locally | **Native path exists.** `azure-ai-evaluation.evaluate()` runs with no project and no credentials — verified by running it here with every `AZURE_*` variable deleted. The gate logic (baseline diff, exit code) is still ours. Adopting it costs stdlib-only. |
+| Cassette replay | **Still ours.** ACS denies rather than substitutes; APIM `mock-response` generates from a schema rather than replaying bytes; APIM caching is a dictionary where a cassette is an ordered queue; Agent Framework mockable tools apply to code agents, not hosted prompt agents. Host it natively on the Functions MCP extension. |
+| Building the dataset ourselves | **Partly native.** `azure_ai_traces` does drop `tool_result`, but `AIAgentConverter` reads the Agent Service and keeps it — `break_tool_call_into_messages` says so and reads `function.output`. Whether it covers MCP toolbox calls and per-agent decomposition is untested. |
+| GitHub Actions scheduling | Foundry schedules (cron and recurrence) exist. Keeping scheduling beside the code and the baseline diff is a choice — and a smaller one now that continuous evaluation covers the live path. |
+
+### The one-line answer
+
+Definitions, datasets, runs and results are native and live in Foundry.
+Continuous evaluation is now wired (`foundry/continuous_eval.py`). What stays
+ours is the offline merge gate, the git-reviewable baseline for deterministic
+checks, and the cassette replay — each because of a property Foundry does not
+offer, rather than a feature it lacks.
+
 ## Judges are sampled, never per-commit
 
 Judged evaluation is slow and the scores wobble. The split:
