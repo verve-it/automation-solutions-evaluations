@@ -167,40 +167,98 @@ Use it first.
 
 ### Where to host it
 
-Microsoft supports remote MCP servers on Azure Functions two ways, and the
-difference matters here more than it looks.
+**Azure Functions, using the MCP extension.** That is the Microsoft-native
+path and it is GA.
 
-**The self-hosted / BYO path** (public preview) deploys a server built with
-the MCP SDKs to Flex Consumption with roughly one line of change. It is the
-obvious fit, and it is the wrong one: **stateful execution is not supported
-for the self-hosted option in preview**, and this server is stateful.
+An earlier version of this document recommended Container Apps and said
+Functions was the wrong host. That was wrong, and the reason is worth
+keeping: Functions has *two* MCP stories and they differ on exactly the
+property this server depends on.
 
-`Cassette.cursor` is a per-key queue position held in memory
-(`replay/replay_server.py`). It is what makes a cassette *ordered rather than
-a dictionary* — the same call can appear several times in one run with
-different responses, and position is how the right one is returned. Under
-scale-out, two instances hold two independent cursors, the same call gets
-answered from two different positions, and the replay reports a plausible
-score that means nothing. It fails silently, which is the worst shape a
-failure can take in a gate.
+| Path | State | Status | Fit |
+|---|---|---|---|
+| **Functions MCP extension** (tool trigger + binding) | **stateful** — `SessionId` on the invocation context, for per-session state | **GA** | **This one.** |
+| Functions self-hosted / BYO | stateless only | preview | No. |
+| Container Apps, 1 replica | stateful by accident of not scaling | GA | Works, but off the paved road. |
 
-So, in order of preference:
+Microsoft's own guidance is explicit: avoid the self-hosted option when you
+need stateful execution or are building from scratch, and prefer the binding
+extension, which is GA and stable where self-hosted is not.
 
-| Option | Fit | Why |
-|---|---|---|
-| **Azure Container Apps, min=max=1 replica** | best | Runs the existing stdlib server unchanged. Stateful, scales to zero, Microsoft-native. |
-| App Service, single instance, `ARR affinity` off | fine | Same reasoning, more always-on cost. |
-| Azure Functions, **MCP extension** | possible | This is Microsoft's stateful MCP path. Means rewriting the server in the Functions programming model. |
-| Azure Functions, **self-hosted/BYO** | **no** | Stateless only in preview. Correct until it scales out, then quietly wrong. |
+This server needs state. `Cassette.cursor` is a per-key queue position that
+makes a cassette *ordered rather than a dictionary* — the same call appears
+several times in one run with different responses, and position is how the
+right one comes back. Scale it out with two independent cursors and the
+replay returns a plausible score that means nothing.
 
-If Functions is a hard requirement, the honest fix is to stop holding the
-cursor in memory: key it by MCP session id and put it in Table Storage or
-Redis. That is a real change to `Cassette`, not a deployment setting, and it
-is not worth doing unless Container Apps is unavailable.
+The extension's `SessionId` is the right home for that cursor: one MCP
+session is one replay, which is exactly the lifetime the cursor should have.
+Today it is keyed globally, which is an artefact of the server having been
+written as a local stdlib process.
 
-Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary` is
-the journal — tool names, canonicalised arguments carrying ticket and company
-identifiers, every attempted write.
+**The work:** port `replay/replay_server.py` to the Functions programming
+model — tool trigger per tool, cursor keyed by `SessionId` — and register the
+endpoint with Foundry. Microsoft documents that last step directly
+("Connect an MCP server on Azure Functions to Foundry Agent Service"). The
+cassette format, divergence policy and journal are unaffected; this is a
+transport change, not a redesign.
+
+Until that port happens, Container Apps pinned to one replica runs the
+current file unchanged and is a legitimate stopgap. It is a stopgap.
+
+Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary`
+is the journal — tool names, canonicalised arguments carrying ticket and
+company identifiers, every attempted write.
+
+### Where the results live
+
+Short answer: **in the project, not on either agent.**
+
+Foundry evaluation objects are project-scoped. `evals.create(name=...)` takes
+a **dataset** as its data source; it takes no agent id. So an eval is not
+owned by the agent under test, and it is certainly not owned by the
+temporary clone. Deleting that clone loses no results — there were never any
+attached to it.
+
+What *is* stamped with the temporary version is the **trace**. App Insights
+records `gen_ai.agent.id` and its version on every span. Delete the version
+and that id resolves to nothing: six weeks later a trace names an agent that
+cannot be looked up, and nothing says what it was a clone of.
+
+That is why `run_replay.py` writes `artifacts/replay-run.json`:
+
+```json
+{
+  "agent": "triage-orchestrator",
+  "base_version": "82",
+  "temp_version": "87",
+  "temp_version_deleted": true,
+  "cassette": "2026-09-03-4dda7f4fa5f0.json",
+  "tools": "stubbed — no ConnectWise request, no write performed",
+  "matched_prefix": 50,
+  "suggested_eval_name": "replay-triage-orchestrator-v82"
+}
+```
+
+The ephemeral clone is a **fixture**, not the subject. Name any eval or
+dataset built from a replay after `base_version` — the version you are
+actually testing. Naming it after the clone produces a project full of eval
+runs pointing at agent versions that no longer exist.
+
+The same metadata goes onto the temporary version while it lives
+(`base_version`, `cassette`), which is what lets you identify a stray one if
+a run is killed before teardown.
+
+### Foundry does not host this for you
+
+Worth stating, because the naming invites the opposite conclusion. The
+**Foundry MCP Server** that shipped in preview is Foundry's *own* management
+tools, for driving Foundry from an agent or IDE. It is not a place to host
+your MCP server. **Toolboxes** are the registration and versioning layer that
+points at an endpoint — also not a host.
+
+Custom tool servers are yours to host. Functions is where Microsoft says to
+put them.
 
 ### On Microsoft's caution about mocks
 
