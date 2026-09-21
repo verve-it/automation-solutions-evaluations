@@ -256,6 +256,19 @@ def test_unknown_cassette_is_a_404(hosted):
 
 # ------------------------------------------------------------------- parity
 
+def test_shared_modules_sit_beside_the_entry_point():
+    """Not in a subdirectory, which is what broke the first deployment.
+
+    lib/ did not survive the remote build. The app came up with sys.path
+    pointing at /home and nothing to import, and the only clue was a 502.
+    Python puts a script's own directory on sys.path, so a file beside
+    server.py cannot be dropped without dropping server.py too.
+    """
+    source = _read(os.path.join(FUNCTION_DIR, "build.py"))
+    assert 'shutil.copy2(path, OUT)' in source
+    assert '"lib"' not in source
+
+
 def test_hosted_and_local_servers_share_one_dispatch():
     """Not two implementations that happen to agree today."""
     assert server.handle_rpc is rs.handle_rpc is mcp_core.handle_rpc
@@ -403,6 +416,22 @@ def test_only_the_role_assignment_is_conditional():
                    if line.startswith("resource ") and " = if (" in line]
     assert len(conditional) == 1
     assert "roleAssignments" in conditional[0]
+
+
+def test_the_preview_feature_flag_is_set():
+    """Set because Microsoft's sample sets it, not because we proved we need it.
+
+    Host 4.1054.250.26428 honoured the mcp-custom-handler profile with the
+    flag absent -- it logged `1 functions found (Custom)`. The flag's name
+    says the profile is preview, so a host that does check for it is a
+    plausible future, and setting it costs nothing. Asserted so that removing
+    it is a decision rather than an edit.
+    """
+    main = _bicep("main.bicep")
+    assert "AzureWebJobsFeatureFlags" in main
+    assert "EnableMcpCustomHandlerPreview" in main
+    assert "mcp-custom-handler" in _read(os.path.join(FUNCTION_DIR,
+                                                      "host.json"))
 
 
 def test_keys_are_off_unless_the_deployment_needs_them():

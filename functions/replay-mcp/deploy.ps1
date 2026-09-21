@@ -216,11 +216,19 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # somewhere, and it is not going to be a Windows laptop. Despite the command's
 # name this routes to Flex Consumption package deployment, the only deployment
 # technology Flex supports -- plain zip deploy is not.
-Invoke-Checked 'az functionapp deployment' {
-    az functionapp deployment source config-zip `
-        -g $ResourceGroup -n $app --src $zip --build-remote true -o none
-}
+az functionapp deployment source config-zip `
+    -g $ResourceGroup -n $app --src $zip --build-remote true -o none
+$published = $LASTEXITCODE -eq 0
 Remove-Item $zip -Force
+if (-not $published) {
+    Write-Host ''
+    Write-Host 'The package uploaded; the app did not come up.' -ForegroundColor Yellow
+    Write-Host 'What the handler printed on the way down is the diagnosis:'
+    Write-Host ''
+    Write-Host "  python $(Join-Path $here 'diagnose.py') -g $ResourceGroup"
+    Write-Host ''
+    throw 'az functionapp deployment: the app is unhealthy after publishing'
+}
 
 Write-Host ''
 Write-Host '==> deployed' -ForegroundColor Green

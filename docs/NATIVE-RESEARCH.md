@@ -176,7 +176,10 @@ Not a feature, but the architecture is native and documented:
   advertised properties are enums — including `cw_resolve.reference_type`,
   the twenty-value one that makes `valid_tool_args` a check that can fail. A
   stub advertising a looser contract than production causes divergence and
-  then blames the agent for it. See `docs/REPLAY.md`.
+  then blames the agent for it. The profile is preview-flagged --
+  `AzureWebJobsFeatureFlags=EnableMcpCustomHandlerPreview`, which Bicep sets
+  because Microsoft's sample does, though the host honoured the profile
+  without it. See `docs/REPLAY.md`.
 - **Register:** Foundry toolbox pointing at the Function endpoint, documented
   as "Connect an MCP server on Azure Functions to Foundry Agent Service".
 - **Bind:** agent version whose tools point at the replay toolbox, which

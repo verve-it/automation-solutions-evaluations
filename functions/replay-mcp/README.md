@@ -88,8 +88,11 @@ So the schemas go out verbatim from the manifest, which needs an MCP server we
 control. Hosting one on Functions is itself a documented Microsoft path —
 "Host servers built with MCP SDKs on Azure Functions", Flex Consumption, custom
 handler — and `host.json` carries the `mcp-custom-handler` configuration
-profile for exactly this case. This is native hosting of a faithful stub rather
-than extension hosting of a lossy one.
+profile for exactly this case — preview-flagged, and `infra/main.bicep` sets
+`AzureWebJobsFeatureFlags=EnableMcpCustomHandlerPreview` because Microsoft's
+sample does. So this is native hosting of a faithful stub rather than extension
+hosting of a lossy one. Still the better trade: a preview flag is a smaller
+problem than a stub that cannot advertise an enum.
 
 `tests/test_replay_hosting.py` asserts the enums are still there. If that test
 ever fails because they are gone, the extension becomes a live option again;
@@ -108,6 +111,7 @@ reopen the decision rather than deleting the test.
 | `deploy.sh` / `deploy.ps1` | `az deployment group create` then package deployment |
 | `infra/rbac.bicep` | the role assignment alone, for whoever can make one |
 | `verify.py` | post-deploy proof: replays every cassette and compares |
+| `diagnose.py` | when it is not serving: state, settings, and the handler's own output |
 | `infra/main.bicep` | storage, Log Analytics, App Insights, FC1 plan, function app, identity, RBAC |
 | `infra/main.bicepparam` | the knobs |
 
@@ -118,6 +122,29 @@ users are on PowerShell, and a second build implementation would drift from
 the first exactly like a second playback implementation would. Two copies of the playback logic would be two answers to the question
 this repo gates on. `tests/test_replay_hosting.py` asserts the local server and
 this one are the *same functions*, not two that agree today.
+
+### When it answers 502
+
+The Functions host is up and the handler is not answering on its port. That is
+all a 502 says — it looks identical whether the process crashed, never
+started, started too slowly, or bound somewhere else. What the handler printed
+says which:
+
+```
+python3 functions/replay-mcp/diagnose.py -g <resource-group>
+```
+
+App state, plan, which settings are set (**names only** — `REPLAY_TOKEN` and
+the storage connection string are in there), the last deployment, and the
+handler's own stdout from Application Insights.
+
+The server is built not to be the cause. Start-up prints the interpreter, its
+path and the working directory before anything can fail; a missing module says
+which one and where it looked; and the replay state backend is resolved on
+**first use**, not at start-up, because walking a credential chain to failure
+took 37 seconds in testing — long enough on its own for the host to give up.
+If blob storage cannot be reached the server still serves, with in-process
+state and a loud warning, and `/` reports which backend it got.
 
 ---
 

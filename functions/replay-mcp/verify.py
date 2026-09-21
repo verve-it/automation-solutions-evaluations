@@ -190,6 +190,19 @@ def main(argv=None):
     try:
         health = client.health()
     except urllib.error.HTTPError as exc:
+        if exc.code in (502, 503):
+            return _fail(
+                f"health check returned {exc.code}: {exc.reason}\n"
+                "  The Functions host is up but the handler is not answering "
+                "on its port.\n"
+                "  Either it is still starting (remote build finishes after "
+                "the publish returns),\n"
+                "  or it crashed. What it printed on the way down is the "
+                "diagnosis:\n\n"
+                "    az monitor app-insights query -g <rg> --app <name>-replay-ai \\\n"
+                "      --analytics-query \"traces | where timestamp > ago(30m) "
+                "| project timestamp, message | order by timestamp desc | "
+                "take 50\"")
         return _fail(f"health check returned {exc.code}: {exc.reason}")
     except Exception as exc:
         return _fail(f"cannot reach {args.base_url}: {exc}")
@@ -197,6 +210,8 @@ def main(argv=None):
     remote = health.get("cassettes") or []
     print(f"server    : {args.base_url}")
     print(f"cassettes : {len(remote)} deployed")
+    if health.get("state"):
+        print(f"state     : {health['state']}")
     if health.get("writes") != "never performed":
         return _fail("health endpoint does not report the write guarantee; "
                      "this is not the replay server")
@@ -240,6 +255,10 @@ def main(argv=None):
             print(f"  enums kept : {shown}")
         print(f"  divergence : {report['summary'].get('diverged', '?')}")
 
+        backend = health.get("state")
+        if backend == "MemoryStore":
+            print("  NOTE       replay state is in-process, not blob storage. "
+                  "Ordering holds only while one instance serves the run.")
         if report["mismatched"]:
             problems.append(f"{report['mismatched']} recorded call(s) came "
                             "back different")

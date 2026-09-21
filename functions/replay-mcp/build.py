@@ -90,13 +90,19 @@ def main(argv):
 
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
-    for sub in ("lib", "cassettes", "tool_manifests"):
+    for sub in ("cassettes", "tool_manifests"):
         os.makedirs(os.path.join(OUT, sub))
 
     for name in OWN:
         shutil.copy2(os.path.join(HERE, name), OUT)
+    # Flat, beside server.py, not in lib/. A lib/ subdirectory did not survive
+    # the remote build -- the app came up with sys.path pointing at /home and
+    # no module to import -- and a file beside the entry point cannot be
+    # dropped without dropping the entry point too. Python puts a script's own
+    # directory on sys.path, so this also removes the path logic that was
+    # wrong in the first place.
     for path in SHARED:
-        shutil.copy2(path, os.path.join(OUT, "lib"))
+        shutil.copy2(path, OUT)
 
     manifests = os.path.join(ROOT, "tool_manifests")
     for name in sorted(os.listdir(manifests)):

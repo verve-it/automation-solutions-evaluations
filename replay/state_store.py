@@ -32,6 +32,7 @@ double-advancing the cursor.
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 
@@ -81,24 +82,37 @@ class BlobStore:
     provisioning step of its own.
     """
 
+    # Bounded on purpose. This runs at start-up, and a custom handler that
+    # takes too long to answer is a function app the host gives up on -- the
+    # symptom is a 502 that says nothing about storage. Better to fail the
+    # probe in seconds and degrade than to hang and look dead.
+    PROBE = {"retry_total": 1, "connection_timeout": 5, "read_timeout": 10}
+
     def __init__(self, account_url=None, container=None, credential=None,
                  connection_string=None):
         from azure.storage.blob import BlobServiceClient
 
         if connection_string:
             self._service = BlobServiceClient.from_connection_string(
-                connection_string)
+                connection_string, **self.PROBE)
         else:
-            from azure.identity import DefaultAzureCredential
             self._service = BlobServiceClient(
-                account_url, credential=credential or DefaultAzureCredential())
+                account_url, credential=credential or _credential(),
+                **self.PROBE)
         self._container = self._service.get_container_client(container)
         try:
             self._container.create_container()
         except Exception:
-            # Already there, or the identity may write blobs but not create
-            # containers. Either way the next call reports the real problem.
+            # Already there, or this identity may write blobs without being
+            # allowed to create containers. Neither is a problem; the probe
+            # below decides.
             pass
+
+        # Probe once, here, rather than discovering the truth on the first
+        # tools/call of a replay. Construction that succeeds against storage
+        # nobody can reach turns a configuration mistake into a mid-run 500
+        # that reads like the agent failed.
+        self._container.get_container_properties()
 
     def _blob(self, key):
         return self._container.get_blob_client(f"{key}.json")
@@ -139,6 +153,64 @@ class BlobStore:
         self._service.close()
 
 
+def _credential():
+    """The narrowest credential that can work here.
+
+    `DefaultAzureCredential` walks a chain that includes the CLI, PowerShell,
+    VS Code and a broker, none of which exist in a function app. Walking it to
+    failure took 37 seconds in testing -- long enough on its own to make the
+    host give up on the handler. Inside Azure the answer is the managed
+    identity and Bicep names it in AZURE_CLIENT_ID, so ask for that directly
+    and keep the chain for everywhere else.
+    """
+    client_id = os.environ.get("AZURE_CLIENT_ID")
+    if client_id:
+        from azure.identity import ManagedIdentityCredential
+        return ManagedIdentityCredential(client_id=client_id)
+    from azure.identity import DefaultAzureCredential
+    return DefaultAzureCredential()
+
+
+class LazyStore:
+    """Resolve the backend on first use, never at start-up.
+
+    A custom handler that has not bound its port yet is a 502, and the host
+    does not wait long. Nothing about reaching a storage account belongs on
+    that path: a slow credential, a firewall, a typo in a container name --
+    each turns into an app that looks dead rather than one that says what is
+    wrong.
+
+    So the socket opens immediately and the first tools/call pays for the
+    backend, once. Health reports which one it got.
+    """
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._store = None
+        self._lock = threading.Lock()
+
+    def _resolve(self):
+        if self._store is None:
+            with self._lock:
+                if self._store is None:
+                    self._store = self._factory()
+        return self._store
+
+    def load(self, key):
+        return self._resolve().load(key)
+
+    def save(self, key, state, version):
+        return self._resolve().save(key, state, version)
+
+    def close(self):
+        if self._store is not None:
+            self._store.close()
+
+    @property
+    def backend(self):
+        return type(self._store).__name__ if self._store else "unresolved"
+
+
 try:                                    # only importable where the SDK is
     from azure.core import MatchConditions as _MC
     _MATCH_ETAG = _MC.IfNotModified
@@ -152,8 +224,27 @@ def open_store(account_url=None, container=None, connection_string=None):
     Deliberately not an error when unconfigured: `func start` on a laptop
     should work with no Azure at all, and the hosted deployment sets what it
     needs in Bicep.
+
+    It is also not an error when configured and unreachable. A missing SDK or
+    a storage account that will not answer is a degraded replay -- ordering
+    holds only while one instance serves the run -- but a server that refuses
+    to start is a 502, which says nothing and gates nothing. Warn loudly,
+    carry on, and let the health endpoint report which backend is live so the
+    verifier can say so too.
     """
-    if container and (account_url or connection_string):
-        return BlobStore(account_url, container,
-                         connection_string=connection_string)
-    return MemoryStore()
+    if not (container and (account_url or connection_string)):
+        return MemoryStore()
+
+    def resolve():
+        try:
+            return BlobStore(account_url, container,
+                             connection_string=connection_string)
+        except Exception as exc:
+            print(f"WARNING  replay state could not use blob storage: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            print("WARNING  falling back to in-process state. A replay stays "
+                  "ordered only while one instance serves the whole run, and "
+                  "the journal does not survive a restart.", flush=True)
+            return MemoryStore()
+
+    return LazyStore(resolve)
