@@ -282,6 +282,7 @@ scrub_trace.py            redact customer data before committing a trace
 
 foundry/                  our tooling that TALKS TO Foundry
   to_foundry_dataset.py     rows -> a Foundry evaluation dataset
+  continuous_eval.py        have Foundry score live runs, natively
   register_evaluators.py    upload the checks, write the version lock
   run_cloud_eval.py         start a cloud run against registered evaluators
   check_cloud_eval.py       poll it, diff the scores against local
@@ -312,7 +313,7 @@ tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
 tests/                    unit tests + frozen-set replay
 docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
                           MCP-SERVER-FINDINGS, HISTORY-PURGE, CREDENTIALS,
-                          ASSERT
+                          ASSERT, NATIVE-RESEARCH
 ```
 
 `foundry/` and `foundry_evaluators/` are deliberately separate, and the
@@ -338,6 +339,7 @@ an agent does belongs there; anything that only measures belongs here. See
 |---|---|---|
 | **`entity` and `filter` are still free-form** | `valid_tool_args` covers arity, types, required params, unexpected fields and `reference_type` — not entity paths or filter shapes. An `entity` enum was proposed and correctly rejected upstream (~36k tokens/request). | `tool_manifests/README.md` |
 | **The outcome join is unestablished** | all outcome evaluation. `dataverse/fetch_outcomes.py --probe` answers whether the orchestration record carries the App Insights `operation_Id`. Ticket id will not substitute — two orchestrations in the frozen set share ticket 805392. | `dataverse/README.md` |
+| **Continuous evaluation rule not created** | `foundry/continuous_eval.py` builds it; it needs an eval id and one run against the project. Until then the live path is only the nightly cron. | `docs/FOUNDRY.md` |
 | Hosting the replay server | the deterministic agent-change gate. `run_replay.py` does the Foundry wiring; the server still has to be reachable from Azure. | `docs/REPLAY.md` |
 | `replay/` ticket ids | the staging replay | `replay/README.md` |
 | Cost / latency budgets | gating on spend | set `--max-tokens` |
