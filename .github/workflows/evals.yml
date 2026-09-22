@@ -251,9 +251,16 @@ jobs:
               --name "triage-evals-${{ matrix.environment }}-$(date -u +%Y%m%d)" \
               --out artifacts/foundry-input.jsonl
 
+      # Verdicts, not the raw export. `spans.json` and the Foundry dataset
+      # are a live export of a production project, and a workflow artifact in
+      # a PUBLIC repository is downloadable by anyone. Scrubbing is
+      # deliberately not automatable (scrub_trace.py is propose -> human
+      # review -> apply), so the export stays on the runner; the run this job
+      # creates in Foundry is where a drift finding is investigated.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: drift-${{ matrix.environment }}
-          path: artifacts/
+          path: |
+            artifacts/drift-*.json
           retention-days: 90     # matches Foundry trace retention

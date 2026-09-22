@@ -51,7 +51,7 @@ sys.path.insert(0, REPO_ROOT)
 import argparse, json, os, sys
 from collections import defaultdict
 
-from trace_to_eval import (K_TOOL_RES, convert, is_tool_span, load_spans,
+from trace_to_eval import (learn_agents, K_TOOL_RES, convert, is_tool_span, load_spans,
                            load_tool_manifests, tool_step)
 
 # Keep in step with foundry_evaluators/_shared.RESULT_HEAD.
@@ -76,10 +76,14 @@ def steps_by_run(spans):
     already walked.
     """
     from trace_to_eval import K_AGENT
+    # Once, not per span: the docstring above is about exactly this class of
+    # rescan, and putting it in the loop would have made it O(spans^2).
+    agents = learn_agents(spans)
     grouped = defaultdict(list)
     for s in spans:
         if is_tool_span(s):
-            grouped[(s["op_id"], s["d"].get(K_AGENT))].append(tool_step(s))
+            grouped[(s["op_id"], s["d"].get(K_AGENT))].append(
+                tool_step(s, agents))
     for steps in grouped.values():
         steps.sort(key=lambda st: st["timestamp"])
     return grouped

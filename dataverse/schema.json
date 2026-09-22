@@ -1,0 +1,29 @@
+{
+  "_README": "PLACEHOLDER. Every name below is a guess. Run `python3 dataverse/fetch_outcomes.py --probe` and replace them with what it reports. Dataverse prefixes custom entities with the publisher's customisation prefix, which this repo cannot know.",
+  "_probed": null,
+
+  "entity_sets": {
+    "orchestration": "ai_aiorchestrations",
+    "run": "ai_airuns",
+    "decision": "ai_aidecisions",
+    "review": "ai_aireviews"
+  },
+
+  "fields": {
+    "review_id": "ai_aireviewid",
+    "decision_id": "_ai_decision_value",
+    "orchestration_key": "ai_operationid",
+    "field": "ai_fieldname",
+    "ai_value": "ai_suggestedvalue",
+    "human_value": "ai_finalvalue",
+    "disposition": "ai_disposition",
+    "reason_code": "ai_reasoncode",
+    "reviewed_utc": "modifiedon"
+  },
+
+  "_notes": {
+    "orchestration_key": "MUST hold the App Insights operation_Id (32 hex chars) so a review can be joined to a trace. Ticket id will not substitute: two orchestrations in the committed frozen set share ticket 805392. If nothing carries it, the fix is in the agents repo, not here.",
+    "disposition": "approved | modified | rejected, per handoff §8. The middle bucket is the diagnostic one.",
+    "reason_code": "the existing reviewer taxonomy. Operationalise it rather than inventing metrics."
+  }
+}
