@@ -12,16 +12,16 @@ Answers the question "are the evals running the tools live?"
 | `export_traces.py` | no | no | Log Analytics read |
 | `foundry/submit_to_foundry.py` | no | no | judge model — sees recorded text only |
 | `replay/replay_server.py` | no | **no** | serves a cassette |
-| **`staging-replay.yml`** (`microsoft/ai-agent-evals`) | **yes** | **yes** | yes |
+| `replay/run_replay.py` | yes | **no** | the replay server only |
 
-Everything except the last scores **recorded** traces and touches nothing.
-`staging-replay.yml` is the exception: it invokes the agents for real, and the
-agents call real MCP tools against whatever ConnectWise the project is wired
-to. That is why it is pinned to `automation-solutions-test` and the dev
-instance, and why there is no production counterpart.
+Every row performs no write. `run_replay.py` is the only one that invokes an
+agent at all, and it binds that agent to the stub first.
 
-**The stub layer described here is what replaces that live run as the
-per-change gate.**
+There used to be one exception: `staging-replay.yml` ran
+`microsoft/ai-agent-evals`, which invoked the agents for real against the dev
+ConnectWise instance. **It is removed.** Nothing in this repo may reach a
+system of record — an eval that writes to one is not an eval. The stub layer
+described here is the per-change gate, and the only one.
 
 ## Correcting the handoff
 
@@ -34,7 +34,7 @@ replaying them against recorded tool output — that is a different mechanism
 with none of the same hazards, and it is strictly better than the live staging
 run for gating an agent change:
 
-| | live staging replay | cassette replay |
+| | live staging replay (removed) | cassette replay |
 |---|---|---|
 | Data drift between runs | yes — the ticket has been triaged | none |
 | Writes performed | yes, to dev ConnectWise | **none** |
@@ -42,6 +42,8 @@ run for gating an agent change:
 | Needs a dev instance | yes | no |
 | Can use production traces | no | **yes** |
 | Cost | agent inference + ConnectWise | agent inference only |
+
+The left column is why it was removed rather than kept as a smoke test.
 
 The one thing it cannot do is tell you a write still *works*. Keep a
 low-frequency live run for that, as a smoke test rather than a gate.
@@ -280,8 +282,10 @@ orchestrator and send every child's calls, **including writes**, to the live
 service, with nothing in the journal to show for it.
 
 `run_replay.py` refuses a multi-agent cassette and names the single-agent ones
-that do replay fully stubbed. `--allow-live-children` overrides it and says
-plainly what that costs.
+that do replay fully stubbed. There is **no override**: the refusal is the only
+thing between such a cassette and a live write, and a flag that disables it is
+one hurried run away from being set. `--allow-live-children` existed and was
+removed.
 
 ### Checking what an agent reads
 
@@ -449,13 +453,13 @@ script says so where it happens rather than failing silently.
 |---|---|---|
 | Eval-code change | frozen sets vs frozen baselines | every push |
 | **Agent change** | **cassette replay, matched prefix + divergence** | **every change** |
-| Agent change, judged | `ai-agent-evals` in staging | before release |
 | Production behaviour | recorded traces, `run_evals.py` | nightly |
-| Write path still works | one live staging run | weekly smoke test |
+| Judged sample | recorded traces, Foundry evaluators | weekly |
 
-The live staging replay drops from "the agent-change gate" to "a smoke test",
-which is where it belongs: it is the slowest, the most expensive, the least
-repeatable, and the only one that can leave state behind.
+The live staging replay is gone rather than demoted to a smoke test. It was
+the slowest, the most expensive, the least repeatable, and the only thing here
+that could leave state behind in a system of record — and it never once ran to
+completion, because `DEFAULT_AGENT_IDS` was never set.
 
 
 ---

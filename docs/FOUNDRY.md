@@ -9,17 +9,19 @@ for little effort?*
 |---|---|---|---|---|
 | **Deterministic checks** (`run_evals.py`) | Process quality — wasted calls, dead ends, cascades, argument validity, trajectory | Recorded production traces | CI merge gate, nightly drift | none |
 | **Cassette replay** (`docs/REPLAY.md`) | Whether a changed agent still takes the recorded path, and where it diverges | Agents invoked against **recorded tool output** | Agent change | none |
-| **`microsoft/ai-agent-evals`** | Foundry evaluator catalog, with confidence intervals and significance vs a baseline agent version | Agents **invoked live** with a query set | Before release, **test project only** | per run |
 | **Foundry continuous evaluation** | Judged metrics on live traffic at a sampling rate | Production traces, sampled | Production, always on | per sampled run |
 
 They are not alternatives. The first scores what production actually did; the
 second scores what a changed agent *would* do, deterministically and for free;
-the third does the same live, at the cost of drifting data and real writes; the
-fourth watches for drift without anyone asking.
+the third watches for drift without anyone asking. Cassette replay is the
+per-change gate.
 
-Cassette replay is the per-change gate. The live staging replay drops to a
-weekly smoke test — it is the slowest, the most expensive, the least
-repeatable, and the only one that leaves state behind.
+`microsoft/ai-agent-evals` was a fourth row here: it invokes the agents live
+with a query set, and it is **removed** along with `staging-replay.yml`.
+Nothing in this repo reaches a system of record. Its one advantage —
+confidence intervals and significance against a baseline version — is worth
+having, but not at the price of real writes; see `docs/ASSERT.md` for the
+same statistics without invoking anything.
 
 ## What we handed to Foundry
 
@@ -74,7 +76,7 @@ native" has three different answers depending on the piece.
 | Result storage | project-scoped eval runs | Foundry, not this repo |
 | Tracing | OTel GenAI conventions in App Insights | `export_traces.py` |
 | Judged evaluators | built-in catalog | `foundry/submit_to_foundry.py` |
-| Agent-change comparison | `microsoft/ai-agent-evals` | `staging-replay.yml` |
+| Agent-change comparison | ours — cassette replay vs baseline | `agent-gate.yml` |
 | Tools | MCP | throughout |
 | CI identity | workload identity federation | `evals.yml` |
 
@@ -139,9 +141,8 @@ Why `baselines/*.json` stays in git anyway:
   a verdict moves, the diff belongs in the same review as the code that moved
   it. A baseline stored server-side changes without a reviewer.
 
-Where Foundry's baseline comparison *does* fit is the judged sample and the
-live staging replay, both stochastic. `--baseline-agent-id` through
-`ai-agent-evals` already does exactly that.
+Where Foundry's baseline comparison *does* fit is the judged sample, which is
+stochastic. It fitted the live staging replay too, which is removed.
 
 **Dataset versioning and ground truth ARE native, and I implied otherwise.**
 Foundry datasets are versioned, reusable across runs, and the schema carries
@@ -191,8 +192,10 @@ Judged evaluation is slow and the scores wobble. The split:
 | Branch | GitHub environment | Foundry project | What runs |
 |---|---|---|---|
 | any | — | none | `frozen-sets` — committed traces vs committed baselines. No Azure. |
-| `staging` | `staging` | `automation-solutions-test` | `staging-replay` (**invokes agents**), drift, judged sample |
-| `main` | `prod` | `automation-solutions` | drift, judged sample. **Never invokes agents.** |
+| `staging` | `staging` | `automation-solutions-test` | drift, judged sample |
+| `main` | `prod` | `automation-solutions` | drift, judged sample |
+
+**Neither invokes an agent against real tools.** No branch does.
 
 The branch and the GitHub environment share the name `staging`; `main` maps to
 the `prod` environment. The Foundry projects keep their own names, so the
@@ -201,12 +204,14 @@ the `prod` environment. The Foundry projects keep their own names, so the
 Everything except the replay reads recorded traces and writes evaluation
 results, which is why `main` can safely target production.
 
-**There is no production replay, and there must not be.** Running the replay
-against `automation-solutions` would re-triage real tickets, and
+**There is no live replay in any project, and there must not be.** Running one
+against `automation-solutions` would re-triage real tickets and
 `connectwise-operations-agent` would write the results into the system of
-record. `staging-replay.yml` hard-codes `automation-solutions-test` as a
-constant rather than reading it from a variable, so a mis-set environment
-variable cannot redirect it. Production is evaluated from traces only.
+record; against the test project it writes to the dev instance, which is the
+same rule with a smaller blast radius. `staging-replay.yml` hard-coded
+`automation-solutions-test` so a mis-set variable could not redirect it — that
+guard is gone because the workflow is gone. Every project is evaluated from
+traces or from cassette replay against stubbed tools.
 
 A scheduled workflow always runs on the **default branch**, so deriving the
 target from the branch would silently send every nightly run at one project.
@@ -222,11 +227,11 @@ baselines, no Azure, no secrets, no agents.
 | Trigger | Runs | Touches Foundry |
 |---|---|---|
 | push / PR, any branch | `frozen-sets` | no |
-| push to `staging` touching `replay/**` | `staging-replay` | **yes — invokes agents in `automation-solutions-test`** |
+| called from the agents repo before deploy | `agent-gate` | yes — replays against **stubbed** tools |
 | nightly 06:00 UTC | `drift` on **both** environments | reads App Insights |
 | Monday 07:00 UTC | `drift` + judged sample | reads App Insights, calls the judge |
 | manual dispatch | whatever you pick | depends |
-| `repository_dispatch: agent-change` | `staging-replay` | **yes — invokes agents** |
+| `workflow_dispatch` on `agent-gate` | `agent-gate` | yes — replays against **stubbed** tools |
 
 So the branch mapping decides *which project the scheduled and dispatched jobs
 read from*, not what a push does. A push to `main` runs the offline gate and
