@@ -161,13 +161,47 @@ jobs:
 
       # The replay produced traces in the project. Score them the same way
       # the nightly does, so the verdict means the same thing.
+      #
+      # The window comes from the manifests each replay wrote, NOT from a flat
+      # --hours: the project serves real traffic, and an hour-wide export
+      # scores whatever else ran in it as though this agent change had caused
+      # it. A gate that can go red for someone else's run is not a gate. The
+      # pad covers App Insights ingestion lag at the end and clock skew at the
+      # start; it is the smallest window that still reliably contains the run.
+      - name: Window the export to this replay
+        id: window
+        run: |
+          python - <<'EOF'
+          import datetime as dt, glob, json, os, sys
+          PAD = dt.timedelta(minutes=5)
+          starts, ends = [], []
+          for path in sorted(glob.glob("artifacts/replay-*.json")):
+              m = json.load(open(path, encoding="utf-8"))
+              if m.get("started_utc"):
+                  starts.append(dt.datetime.fromisoformat(m["started_utc"]))
+              if m.get("finished_utc"):
+                  ends.append(dt.datetime.fromisoformat(m["finished_utc"]))
+          if not starts or not ends:
+              sys.exit("::error::no replay manifest carried a window. Refusing "
+                       "to export an hour of the project instead: that scores "
+                       "traffic this gate did not cause.")
+          since, until = min(starts) - PAD, max(ends) + PAD
+          print(f"window {since.isoformat()} .. {until.isoformat()} "
+                f"({len(starts)} replay(s))")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"since={since.isoformat()}\n")
+              fh.write(f"until={until.isoformat()}\n")
+          EOF
+
       - name: Export and score what the replay produced
         env:
           AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
         run: |
           python export_traces.py \
               --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
-              --hours 1 --min-tool-calls 1 \
+              --since "${{ steps.window.outputs.since }}" \
+              --until "${{ steps.window.outputs.until }}" \
+              --min-tool-calls 1 \
               -o artifacts/replay-spans.json
           python trace_to_eval.py artifacts/replay-spans.json -o out \
               --tool-defs tool_manifests/
@@ -208,9 +242,23 @@ jobs:
             echo "[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Verdicts, journals and provenance — not the raw export.
+      #
+      # A workflow artifact in a PUBLIC repository is downloadable by anyone,
+      # and `replay-spans.json` and the Foundry dataset are a live export of a
+      # project that also serves real traffic. Scrubbing is deliberately not
+      # automatable here (scrub_trace.py is propose -> human review -> apply),
+      # so the export does not leave the runner. The journals are safe: they
+      # replay the committed, already-scrubbed cassettes. The detail view for
+      # a failed gate is the Foundry run linked from the summary.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: agent-gate-${{ inputs.environment }}
-          path: artifacts/
+          path: |
+            artifacts/gate.json
+            artifacts/journal-*.json
+            artifacts/replay-*.json
+            artifacts/replay-*.log
+            artifacts/foundry-run.log
           retention-days: 90

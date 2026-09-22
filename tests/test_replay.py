@@ -440,6 +440,31 @@ def test_the_manifest_records_what_the_deleted_version_cannot(tmp_path):
     assert json.loads(out.read_text())["base_version"] == "82"
 
 
+def test_the_manifest_carries_the_window_the_gate_exports_by(tmp_path):
+    """Without it the gate falls back to exporting an hour of the project.
+
+    The project also serves real traffic. An hour-wide export scores someone
+    else's run as part of this agent change's verdict, and the gate goes red
+    -- or green -- for something the change did not do.
+    """
+    import argparse
+    out = tmp_path / "run.json"
+    args = argparse.Namespace(agent="a", cassette="c.json",
+                              server_url="https://r.example.net/mcp",
+                              manifest=str(out))
+    run = {"started_utc": "2026-09-22T10:00:00+00:00",
+           "finished_utc": "2026-09-22T10:04:00+00:00",
+           "agent_session_id": "sess_1", "response_id": "resp_1"}
+    payload = rr.write_manifest(str(out), args, "82", "87", {}, run)
+
+    assert payload["started_utc"] == "2026-09-22T10:00:00+00:00"
+    assert payload["finished_utc"] == "2026-09-22T10:04:00+00:00"
+    assert payload["agent_session_id"] == "sess_1"
+    assert payload["response_id"] == "resp_1"
+    # and the run never overwrites the provenance
+    assert payload["base_version"] == "82"
+
+
 # --- staying migratable -----------------------------------------------------
 
 def test_a_cassette_declares_a_schema_identifier():
