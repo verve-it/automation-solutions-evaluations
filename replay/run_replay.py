@@ -10,11 +10,11 @@ a recorded run:
   * a write returns the response the real write returned, and writes nothing
   * the same ticket replays identically however the live system has moved on
 
-The live staging replay (`.github/workflows/staging-replay.yml`) invokes real
-tools against the dev instance. That is the weekly smoke test for the write
-path. It is slow, costs judge inference, leaves state behind, and gives a
-different answer each run. Do not use it to decide whether an agent change is
-safe — use this.
+There is no mode in which this repo invokes an agent against real tools. The
+workflow that did (`staging-replay.yml`, `microsoft/ai-agent-evals`) is gone,
+and so is `--allow-live-children`: an eval that writes to a system of record
+is not an eval. Everything here either replays a cassette or scores a
+recorded trace.
 
     # one command, if the server is somewhere Foundry can reach
     python3 replay/run_replay.py --cassette cassettes/2026-09-03-4dda7f4fa5f0.json \\
@@ -548,7 +548,7 @@ def report_code_binding(agents, name, version):
               "the code, so a replay needs a code change, not a variable")
 
 
-def refuse_unstubbed_children(cassette_path, agents_in_cassette, allow=False):
+def refuse_unstubbed_children(cassette_path, agents_in_cassette):
     """A multi-agent orchestration cannot be fully stubbed. Say so, loudly.
 
     The orchestrator reaches its children over A2A, and it names them --
@@ -565,13 +565,13 @@ def refuse_unstubbed_children(cassette_path, agents_in_cassette, allow=False):
     The two single-agent cassettes replay safely today. Fixing this for
     orchestrations needs the children addressable by version, which the agent
     code decides, not this script.
+
+    There is deliberately no override. This refusal is the only thing standing
+    between a multi-agent cassette and a live write, and a flag that disables
+    it is one hurried run away from being set.
     """
     children = list(agents_in_cassette[1:])
-    if not children or allow:
-        if children and allow:
-            print(f"WARNING  --allow-live-children: {len(children)} child "
-                  "agent(s) will use their production versions and reach the "
-                  "REAL ConnectWise, including writes.")
+    if not children:
         return
     raise SystemExit(
         f"{os.path.basename(cassette_path)} records "
@@ -585,7 +585,9 @@ def refuse_unstubbed_children(cassette_path, agents_in_cassette, allow=False):
         "Single-agent cassettes replay fully stubbed"
         + (":\n" + "\n".join(single_agent_cassettes(cassette_path))
            if single_agent_cassettes(cassette_path) else ".")
-        + "\n\n--allow-live-children overrides this. It means what it says.")
+        + "\n\nThere is no override. Nothing in this repo may reach "
+          "ConnectWise; gate an orchestration by making its children "
+          "addressable by version, which is the agent code's decision.")
 
 
 def single_agent_cassettes(beside):
@@ -829,10 +831,6 @@ def main(argv=None):
                     help="with --describe, download a hosted agent's code and "
                          "report which environment variables it reads and "
                          "which hosts it names. Nothing is saved.")
-    ap.add_argument("--allow-live-children", action="store_true",
-                    help="replay an orchestration anyway. Child agents run "
-                         "their production versions and reach the REAL "
-                         "ConnectWise, including writes.")
     ap.add_argument("--replay-env-var", action="append", metavar="NAME",
                     help="for a hosted agent, the environment variable its "
                          "code reads for the MCP endpoint. Repeatable. "
@@ -852,8 +850,7 @@ def main(argv=None):
         detail = (f" (entry point; {', '.join(others)} are reached over A2A)"
                   if others else "")
         print(f"agent      : {args.agent} — from the cassette{detail}")
-    refuse_unstubbed_children(args.cassette, recorded,
-                              allow=args.allow_live_children)
+    refuse_unstubbed_children(args.cassette, recorded)
 
     # Chosen here so the journal can be read back. See replay_tools().
     replay_session = uuid.uuid4().hex

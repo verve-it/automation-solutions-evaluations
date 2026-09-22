@@ -7,9 +7,11 @@
 # `prod`. The Foundry project keeps its own name, automation-solutions-test.
 #
 # Both jobs below score RECORDED traces and upload evaluation results. Neither
-# ever invokes an agent, which is why main can safely target production. The
-# one workflow that does invoke agents, staging-replay.yml, is pinned to
-# staging and to the test project with no production counterpart.
+# ever invokes an agent, which is why main can safely target production.
+#
+# NOTHING in this repo invokes an agent against real tools. staging-replay.yml
+# did, against the dev instance, and is removed. The agent-change gate is
+# agent-gate.yml, which replays against STUBBED tools.
 #
 # Three triggers, per §5 of docs/HANDOFF.md.
 #

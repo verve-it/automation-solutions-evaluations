@@ -1,91 +1,37 @@
-# Replay set
+# Cassette replay
 
-A fixed list of dev-instance tickets re-triaged on each agent change, scored by
-the [`microsoft/ai-agent-evals`](https://github.com/microsoft/ai-agent-evals)
-action against **`automation-solutions-test`**, from the `staging` branch.
+The agent-change gate. `make_cassette.py` turns a recorded trace into an
+ordered cassette, `replay_server.py` serves it as an MCP server, and
+`run_replay.py` binds the agent under test to it, invokes, scores and tears
+down. `docs/REPLAY.md` is the full account; `functions/replay-mcp/` hosts the
+server where Foundry can reach it.
 
-## Why this is separate from everything else here
+**No ConnectWise request is made, for reads or writes.** A write returns the
+response the real write returned and writes nothing.
 
-Every other evaluation in this repo scores **recorded** traces. This one
-**invokes the agents**. That is only safe because `automation-solutions-test`
-is wired to the dev ConnectWise instance.
+## What used to be here
 
-**There is no `main` counterpart and there must not be.** Against
-`automation-solutions` this would re-triage real tickets, and
-`connectwise-operations-agent` would write the results into the system of
-record. `staging-replay.yml` hard-codes the required project name rather than
-reading it from a variable, so a mis-set environment variable cannot redirect
-it. That constraint is what makes the rest of this repo trace-scoring rather
-than a replay harness.
+`full-triage.json` — a list of dev-instance ticket ids — and a README
+describing how to populate it. It was the data file for
+`.github/workflows/staging-replay.yml`, which ran `microsoft/ai-agent-evals`
+to **invoke** the agents against the dev ConnectWise instance and score the
+result.
 
-## Why the action rather than our own harness
+Both are removed. Nothing in this repo invokes an agent against real tools, in
+any environment: an eval that writes to a system of record is not an eval. The
+workflow never once ran to completion — `DEFAULT_AGENT_IDS` was never set on
+the `staging` environment, so both of its runs failed at the step that
+resolves which agent to evaluate.
 
-It invokes the agents from this data file, runs any evaluator in the Foundry
-catalog, and reports **confidence intervals and statistical significance**
-against a baseline agent version. That is handoff §10 item 9 — distinguishing
-a flaky agent from a broken one — for no code. Set `baseline-agent-id` to the
-currently deployed version and the report says whether a change is real or
-noise.
+Two things it had that the cassette replay does not, recorded so they are not
+rediscovered as gaps:
 
-## Which agent do you name?
+- **Confidence intervals and a significance test** against a baseline agent
+  version, which tells a flaky agent from a broken one. `docs/ASSERT.md`
+  covers getting that without invoking anything.
+- **Coverage of the write path end to end.** A stubbed write proves the agent
+  asked for the right write, not that ConnectWise would accept it. That is a
+  question for the agents repo's own tests against its dev instance, not for
+  an eval suite.
 
-`agent-ids` is `agent-name:version`, and it must match the **input contract of
-the queries in the data file**.
-
-`full-triage.json` holds **orchestrator-shaped** queries:
-
-```
-entityType=ticket
-entityId=805392
-context=Automated flow: triage ticket and automatically approve writeplan
-```
-
-So `agent-ids` is `triage-orchestrator:<version>`. The orchestrator invokes
-`triage-analysis-agent`, `triage-evaluation-agent` and
-`connectwise-operations-agent` itself — you do not list them, and listing them
-would send each of them an input contract it does not accept.
-
-To evaluate a child agent on its own, give it its own data file with its own
-input shape:
-
-| Agent | Query shape | Data file |
-|---|---|---|
-| `triage-orchestrator` | `entityType=ticket\nentityId=…\ncontext=…` | `full-triage.json` |
-| `triage-analysis-agent` | `intent=Full Triage; ticketId=…; mode=Automation; context=…` | not written yet |
-| `triage-evaluation-agent` | `intent=Write Request; ticketId=…; …` | not written yet |
-| `connectwise-operations-agent` | a JSON write plan | not written yet |
-
-Those shapes come straight from the recorded hand-offs in
-`traces/2026-09-03-full-triage.json`; copy one and change the ticket id.
-
-Where the version comes from: the Foundry project's agent list. The recorded
-traces carry it as `gen_ai.agent.version` — orchestrator 45, analysis 82,
-evaluation 20, ops 16 at the time of the September traces.
-
-`baseline-agent-id` is the version you are comparing against, normally the one
-currently deployed. With it, the action reports whether a difference is
-statistically significant rather than noise. Without it you get scores but no
-significance test.
-
-Set `DEFAULT_AGENT_IDS` (and optionally `DEFAULT_BASELINE_AGENT_ID`) on the
-`staging` GitHub environment so a push to the `staging` branch has something to
-run against. A dispatch or a `repository_dispatch` from the agents repo
-overrides it.
-
-## Tickets are single-use
-
-A ticket is only useful once: after the first run it has been triaged, so its
-state no longer matches what the case was meant to exercise. Either re-seed
-the dev tickets before each run, or keep a pool large enough to rotate.
-
-## Populating
-
-Replace each `TICKET_ID_*` with a real dev ticket chosen to exercise that
-intent. Aim for coverage of the orchestrator's intent enum first, then add a
-regression case for each finding in §7 of `docs/HANDOFF.md` as it is fixed —
-that is how this set earns its keep over time.
-
-Fields prefixed `_` are notes for us; the action ignores them.
-
-The workflow fails the run if any `TICKET_ID_` placeholder is still in the
-file, so a half-populated set cannot look like a passing gate.
+If a live check is ever wanted again, it does not belong in this repository.

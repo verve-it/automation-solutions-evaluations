@@ -150,3 +150,28 @@ def test_the_raw_export_is_not_published(steps):
     assert "foundry-dataset" not in path
     # and it still publishes the verdicts
     assert "gate.json" in path
+
+
+# ------------------------------------------------- nothing reaches ConnectWise
+
+def test_no_workflow_invokes_an_agent_against_real_tools():
+    """The rule, enforced rather than documented.
+
+    `staging-replay.yml` ran `microsoft/ai-agent-evals`, which INVOKES the
+    agents; the ops agent then wrote its results into the dev ConnectWise
+    instance. It was described here for weeks as an acceptable weekly smoke
+    test. It is not: an eval that writes to a system of record is not an eval,
+    and the exception is what a later reader copies.
+
+    A doc saying so is worth less than a test, because the next live action
+    will arrive as a plausible line in a workflow file.
+    """
+    import glob
+    banned = ("ai-agent-evals", "allow-live-children")
+    for path in glob.glob(os.path.join(REPO, ".github", "workflows", "*.yml")):
+        text = open(path, encoding="utf-8").read()
+        for token in banned:
+            # A comment explaining the removal is fine; a step is not.
+            steps = [line for line in text.splitlines()
+                     if token in line and not line.lstrip().startswith("#")]
+            assert not steps, f"{os.path.basename(path)}: {steps}"

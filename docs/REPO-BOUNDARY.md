@@ -36,7 +36,7 @@ agent wants in.
 | `expected.json`, `baselines/`, `traces/` | | ✅ |
 | Checks, converter, scorer | | ✅ |
 | Cassettes, `replay/replay_server.py` | | ✅ |
-| `replay/` dataset + the staging replay workflow | | ✅ |
+| Cassette replay workflow (`agent-gate.yml`) | | ✅ |
 | Production drift + judged sample | | ✅ |
 
 The rule of thumb: **anything that can change what an agent does** belongs in
@@ -67,9 +67,11 @@ source coupling, not a submodule, not a shared checkout:
 - `skills` is what makes "which rules were in force" answerable for a
   historical run.
 
-Triggering is already wired the other way: the agents repo fires a
-`repository_dispatch` of type `agent-change` at this repo after a release. See
-`.github/workflows/staging-replay.yml`.
+Triggering is already wired the other way: the agents repo calls
+`.github/workflows/agent-gate.yml` as a reusable workflow before it deploys,
+with `needs:` making it a gate. (It used to fire a `repository_dispatch` of
+type `agent-change` at `staging-replay.yml`, which invoked the agents for
+real; that workflow is removed.)
 
 ## The honest cost
 
