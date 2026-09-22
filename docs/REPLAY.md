@@ -456,3 +456,74 @@ script says so where it happens rather than failing silently.
 The live staging replay drops from "the agent-change gate" to "a smoke test",
 which is where it belongs: it is the slowest, the most expensive, the least
 repeatable, and the only one that can leave state behind.
+
+
+---
+
+## Gating a deployment on this
+
+`.github/workflows/agent-gate.yml` is a **reusable** workflow, because the
+agents merge in a different repository than this one. Called from there,
+before the deploy:
+
+```yaml
+jobs:
+  evals:
+    uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
+    with:
+      environment: staging        # or prod
+    secrets: inherit
+
+  deploy:
+    needs: evals                  # <- this is the gate
+```
+
+**`needs:` is the gate.** Without it the evals run, report, and the deploy
+goes ahead regardless — a dashboard, not a gate.
+
+What it does, in order: verifies the replay server still serves what was
+recorded, replays each **single-agent** cassette against stubbed tools,
+exports the traces that produced, scores them against the baseline, writes the
+scores into the job summary, and creates the run in Foundry.
+
+### What a builder sees when it is red
+
+The job summary, not an artifact zip:
+
+| Check | Gates? | Pass rate | Failing | N/A |
+|---|---|---|---|---|
+| `no_wasted_calls` | yes | 71% ⚠ | 2 | 0 |
+| `valid_tool_args` | yes | 83% ⚠ | 1 | 1 |
+| `no_tool_errors` | no | 57% | 3 | 0 |
+
+…followed by the runs that failed and which check each failed on, and a link
+into **Foundry → Evaluation** for the same runs scored by the registered
+evaluators. `run_cloud_eval.py` runs even when scoring failed, because a
+failed gate is exactly when someone wants to open the run and look at it.
+
+Checks marked *no* report but never fail the build — only `GATING`
+(`no_wasted_calls`, `no_dead_ends`, `trajectory`, `valid_tool_args`) decides.
+`n/a` means the check did not apply: no schema for that tool, or no threshold
+configured.
+
+### Regression, or a floor, or both
+
+| | Gates on | Set with |
+|---|---|---|
+| Regression | worse than the frozen baseline | `--baseline` (always on) |
+| Floor | absolute pass rate | `min-score`, `min-check-score` |
+
+They compose, and neither overrides the other. **Start with regression only**
+— the frozen known-good set currently has 2 of 7 runs failing a gating check,
+which the baseline records and accepts. An absolute floor of 90% would fail
+every build until those are fixed, and a gate that is always red is a gate
+people route around. Raise a floor once the known failures are closed, and
+set it from where you actually are.
+
+### What it does not cover
+
+Orchestrations. The gate skips any cassette with more than one agent rather
+than relying on `run_replay.py` to refuse it — a gate that depends on a
+refusal to avoid live writes is one flag away from doing them. Today that
+means `connectwise-operations-agent` is gated and the triage orchestration is
+not.
