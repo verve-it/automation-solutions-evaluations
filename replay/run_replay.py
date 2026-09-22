@@ -49,7 +49,7 @@ import os, sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-import argparse, json, subprocess, time, urllib.error, urllib.request
+import argparse, json, subprocess, time, urllib.error, urllib.request, uuid
 import datetime as _dt
 
 REPLAY_TOOL_LABEL = "connectwise_replay"
@@ -127,17 +127,50 @@ def summary(base, token=None, session=None):
 
 # ------------------------------------------------------------------- binding
 
-def replay_tools(server_url, models, token=None):
+def read_journal(base, token, session):
+    """The journal for this replay, whichever bucket it landed in.
+
+    If the MCP client forwarded our session header, the journal is under that
+    id. If it did not, every call fell into the server's shared default and
+    the id we chose has nothing in it. Rather than guess which, read ours and
+    fall back -- and say which answered, because the difference is whether
+    two replays can run at once.
+    """
+    ours = summary(base, token, session)
+    if ours.get("replayed_calls"):
+        ours["session_honoured"] = True
+        return ours
+    shared = summary(base, token)
+    shared["session_honoured"] = False
+    if shared.get("replayed_calls"):
+        print("\nNOTE: the MCP client did not forward Mcp-Session-Id, so this "
+              "replay used the server's shared session. It is correct on its "
+              "own; two replays at once would consume each other's queue.")
+        return shared
+    return ours
+
+
+def replay_tools(server_url, models, token=None, session=None):
     """The only difference between the agent under test and production.
 
     The token travels as a header rather than in the URL. `server_url` is
     stored on the agent version and repeated in every span, so a token in the
     query string would end up in App Insights and in anything exported from
     it.
+
+    The session id is ours, not the server's. The hosted server issues one on
+    `initialize` and keys the cursor and journal by it, which is what stops
+    two replays consuming each other's queue -- but then only the MCP client
+    knows the id, and this script is not the MCP client. Sending a known one
+    means the journal can be read back afterwards. Without it, `/summary`
+    answers for a session nobody used and reports a replay that did nothing.
     """
-    kwargs = {}
+    headers = {}
     if token:
-        kwargs["headers"] = {"Authorization": f"Bearer {token}"}
+        headers["Authorization"] = f"Bearer {token}"
+    if session:
+        headers["Mcp-Session-Id"] = session
+    kwargs = {"headers": headers} if headers else {}
     return [models.MCPTool(
         server_label=REPLAY_TOOL_LABEL,
         server_url=server_url,
@@ -147,7 +180,8 @@ def replay_tools(server_url, models, token=None):
     )]
 
 
-def cloned_definition(base_version, server_url, models, token=None):
+def cloned_definition(base_version, server_url, models, token=None,
+                      session=None):
     """Copy the agent definition, swapping only its tools.
 
     Everything else -- model, instructions, temperature, reasoning, skills --
@@ -158,8 +192,33 @@ def cloned_definition(base_version, server_url, models, token=None):
     d = base_version.definition
     payload = d.as_dict() if hasattr(d, "as_dict") else dict(d)
     payload["tools"] = [t.as_dict() if hasattr(t, "as_dict") else t
-                        for t in replay_tools(server_url, models, token)]
+                        for t in replay_tools(server_url, models, token,
+                                              session)]
     return payload
+
+
+def cassette_agent(cassette_path):
+    """The agent the recording was of.
+
+    `agents` is every agent that appeared, in first-seen order, so the first
+    one is the entry point -- the orchestrator on a full triage, or the
+    operations agent on a cassette recorded from that agent alone. Nobody
+    should have to know which: the recording does.
+
+    Child agents are not a choice here. A multi-agent orchestration replays by
+    running its entry agent; the children are reached over A2A, which
+    make_cassette.py deliberately leaves out of the toolbox so the callee gets
+    replayed as its own agent run rather than answered from the cassette.
+    """
+    with open(cassette_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    agents = data.get("agents") or []
+    if not agents:
+        raise SystemExit(
+            f"{cassette_path} records no agent name, so there is nothing to "
+            "replay. Pass --agent. (A cassette gets its agents from "
+            "gen_ai.agent.name on the recorded spans.)")
+    return agents[0], agents
 
 
 def cassette_query(cassette_path):
@@ -235,6 +294,8 @@ def write_manifest(path, args, base_version, temp_version, s):
         "tools": "stubbed — no ConnectWise request, no write performed",
         "replayed_utc": _dt.datetime.now(_dt.timezone.utc)
                            .replace(microsecond=0).isoformat(),
+        "replay_session": s.get("session"),
+        "session_honoured": s.get("session_honoured"),
         "matched_prefix": s.get("matched_prefix"),
         "recorded_interactions": s.get("recorded_interactions"),
         "writes_attempted": s.get("writes_attempted"),
@@ -253,7 +314,8 @@ def main(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cassette", required=True)
-    ap.add_argument("--agent", required=True, help="agent name under test")
+    ap.add_argument("--agent", help="agent name under test. Defaults to the "
+                                    "agent the cassette was recorded from.")
     ap.add_argument("--agent-version", help="base version to clone; "
                                             "default is the latest")
     ap.add_argument("--server-url", help="where FOUNDRY reaches the replay "
@@ -280,6 +342,16 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="print the binding that would be created and exit")
     args = ap.parse_args(argv)
+
+    if not args.agent:
+        args.agent, recorded = cassette_agent(args.cassette)
+        others = [a for a in recorded[1:]]
+        detail = (f" (entry point; {', '.join(others)} are reached over A2A "
+                  "and replay as their own runs)") if others else ""
+        print(f"agent      : {args.agent} — from the cassette{detail}")
+
+    # Chosen here so the journal can be read back. See replay_tools().
+    replay_session = uuid.uuid4().hex
 
     proc = None
     if args.serve:
@@ -313,8 +385,10 @@ def main(argv=None):
                 "tools_replaced_with": [
                     {"type": "mcp", "server_label": REPLAY_TOOL_LABEL,
                      "server_url": server_url, "require_approval": "never",
-                     "headers": ["Authorization"] if args.token else []}],
+                     "headers": (["Authorization"] if args.token else [])
+                                + ["Mcp-Session-Id"]}],
                 "summary_url": summary_url(server_url),
+                "replay_session": replay_session,
                 "query": query,
                 "temp_version_metadata": {"purpose": TEMP_MARKER},
             }, indent=1))
@@ -322,8 +396,21 @@ def main(argv=None):
             return 0
 
         if not args.project_endpoint:
-            sys.exit("--project-endpoint or AZURE_AI_PROJECT_ENDPOINT "
-                     "is required")
+            sys.exit(
+                "--project-endpoint or AZURE_AI_PROJECT_ENDPOINT is "
+                "required.\n\n"
+                "It is not deployed with the replay server and should not "
+                "be: traffic is one way. Foundry calls the replay server; "
+                "the server never calls Foundry. This is read by whoever "
+                "runs the gate.\n\n"
+                "CI already has it as the GitHub Actions variable "
+                "AZURE_AI_PROJECT_ENDPOINT, on the staging and production "
+                "environments -- see .github/workflows/evals.yml. Locally:\n"
+                "  $env:AZURE_AI_PROJECT_ENDPOINT = "
+                "'https://<resource>.services.ai.azure.com/api/projects/"
+                "<project>'\n"
+                "The exact value is in docs/CREDENTIALS.md, and the Foundry "
+                "portal shows it on the project overview.")
 
         from azure.ai.projects import AIProjectClient, models
         from azure.identity import DefaultAzureCredential
@@ -332,10 +419,22 @@ def main(argv=None):
                                  credential=DefaultAzureCredential())
         agents = client.agents
 
-        base_version = (agents.get_version(args.agent, args.agent_version)
-                        if args.agent_version else agents.get(args.agent))
+        try:
+            base_version = (agents.get_version(args.agent, args.agent_version)
+                            if args.agent_version else agents.get(args.agent))
+        except Exception as exc:
+            # "Not found" is not a useful answer when the caller did not
+            # choose the name in the first place.
+            known = []
+            try:
+                known = sorted(a.name for a in agents.list())
+            except Exception:
+                pass
+            sys.exit(f"cannot read agent {args.agent!r}: {exc}\n"
+                     + (f"\nAgents in this project:\n  "
+                        + "\n  ".join(known) if known else ""))
         definition = cloned_definition(base_version, server_url, models,
-                                       args.token)
+                                       args.token, replay_session)
 
         base_version = (getattr(base_version, "version", None)
                         or args.agent_version or "latest")
@@ -362,7 +461,8 @@ def main(argv=None):
             agents.delete_version(args.agent, temp_version)
             print(f"deleted temporary version {temp_version}")
 
-        s = summary(server_url if not args.serve else base, args.token)
+        s = read_journal(server_url if not args.serve else base, args.token,
+                         replay_session)
         write_manifest(args.manifest, args, base_version, temp_version, s)
         ok, text = verdict(s, args.min_matched_prefix)
         print("\nREPLAY")

@@ -113,6 +113,30 @@ to break first.
 - **`evaluate()` reads `**kwargs` as a required column named `kw`.** Evaluators
   need explicit keyword parameters.
 
+## The hosted replay package is FLAT
+
+`functions/replay-mcp/.build/` contains no directories. The deployment keeps
+files at the root of `wwwroot` and drops subdirectories — `lib/` first, then
+`tool_manifests/` once `lib/` was flattened, each as a 502 with a stack trace
+behind it. Cassettes and manifests live in one `replay_payload.json` beside
+`server.py`, and `build.py` refuses to finish if a directory appears.
+
+A checkout still uses `cassettes/` and `tool_manifests/`. `Source` in
+`server.py` reads whichever is there.
+
+## No SDK in the hosted replay server, and no build step
+
+`azure-storage-blob` is not importable in a custom handler: Oryx installs it
+into `.python_packages/lib/site-packages`, which the Functions *Python worker*
+adds to `sys.path`, and a custom handler is `python server.py` with none of
+that setup. The app logged `ModuleNotFoundError: No module named 'azure'` with
+the package plainly deployed, and that is why a 50-call replay journalled 3 —
+the store degraded to in-process and each instance kept its own cursor.
+
+Replay state now goes over the blob REST API with a container SAS minted by
+`infra/main.bicep`. `requirements.txt` is empty, the deployment asks for no
+remote build, and the whole server is stdlib.
+
 ## Working agreements
 
 - **Patches, not pushes.** Deliver a `git format-patch` file. Do not push.

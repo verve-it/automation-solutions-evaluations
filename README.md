@@ -315,7 +315,7 @@ tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
 tests/                    unit tests + frozen-set replay
 docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
                           MCP-SERVER-FINDINGS, HISTORY-PURGE, CREDENTIALS,
-                          ASSERT, NATIVE-RESEARCH
+                          ASSERT, NATIVE-RESEARCH, MIGRATION-READINESS
 ```
 
 `foundry/` and `foundry_evaluators/` are deliberately separate, and the

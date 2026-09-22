@@ -97,17 +97,56 @@ def _cassette_fixture():
 
 def test_url_beats_setting_beats_the_only_one(tmp_path):
     (tmp_path / "only.json").write_text("{}")
-    config = server.Config({"REPLAY_CASSETTE_DIR": str(tmp_path),
-                            "REPLAY_CASSETTE": "from-setting"})
-    assert server.resolve_cassette_id(config, "from-url") == "from-url"
-    assert server.resolve_cassette_id(config, None) == "from-setting"
+    env = {"REPLAY_CASSETTE_DIR": str(tmp_path),
+           "REPLAY_PAYLOAD": str(tmp_path / "absent.json")}
+    config = server.Config(dict(env, REPLAY_CASSETTE="from-setting"))
+    source = server.Source(config)
+    assert server.resolve_cassette_id(config, source, "from-url") == "from-url"
+    assert server.resolve_cassette_id(config, source, None) == "from-setting"
 
-    bare = server.Config({"REPLAY_CASSETTE_DIR": str(tmp_path)})
-    assert server.resolve_cassette_id(bare, None) == "only"
+    bare = server.Config(dict(env))
+    assert server.resolve_cassette_id(bare, server.Source(bare), None) == "only"
 
     (tmp_path / "other.json").write_text("{}")
-    ambiguous = server.Config({"REPLAY_CASSETTE_DIR": str(tmp_path)})
-    assert server.resolve_cassette_id(ambiguous, None) is None
+    ambiguous = server.Config(dict(env))
+    assert server.resolve_cassette_id(
+        ambiguous, server.Source(ambiguous), None) is None
+
+
+def test_payload_is_preferred_over_directories(tmp_path):
+    """Deployment is flat; a checkout is not. One reader, both shapes."""
+    directory = tmp_path / "cassettes"
+    directory.mkdir()
+    (directory / "from-disk.json").write_text(json.dumps(_cassette_fixture()))
+
+    config = server.Config({"REPLAY_CASSETTE_DIR": str(directory),
+                            "REPLAY_PAYLOAD": str(tmp_path / "absent.json")})
+    assert server.Source(config).cassette_ids() == ["from-disk"]
+
+    payload = tmp_path / "replay_payload.json"
+    payload.write_text(json.dumps({
+        "schema": "verve/replay-payload@1",
+        "cassettes": {"from-payload": _cassette_fixture()},
+        "tool_manifests": [{"tools": []}]}))
+    flat = server.Config({"REPLAY_CASSETTE_DIR": str(directory),
+                          "REPLAY_PAYLOAD": str(payload)})
+    source = server.Source(flat)
+    assert source.cassette_ids() == ["from-payload"]
+    assert source.cassette("from-payload")["orchestration_id"] == "op-fixture"
+    assert source.manifests() == [{"tools": []}]
+
+
+def test_the_package_has_no_directories(tmp_path):
+    """The failure that cost three deploys, asserted.
+
+    The deployment keeps files at the root of wwwroot and drops
+    subdirectories. lib/ went that way first; once it was flattened,
+    tool_manifests/ went the same way. A flat package cannot lose a directory
+    because it does not have one.
+    """
+    source = _read(os.path.join(FUNCTION_DIR, "build.py"))
+    assert "the package contains directories" in source
+    assert "PAYLOAD_NAME" in source
 
 
 # ------------------------------------------------------------------ the server
@@ -254,6 +293,51 @@ def test_unknown_cassette_is_a_404(hosted):
     assert exc.value.code == 404
 
 
+# ------------------------------------------------- reading back the journal
+
+def test_the_gate_reads_the_journal_it_created(hosted):
+    """The hosted server keys the journal by session; run_replay must match.
+
+    `initialize` issues a session id and the cursor and journal hang off it.
+    Reading /summary without one answers for a session nobody used, so the
+    gate would report a replay that made no calls at all -- indistinguishable
+    from an agent that did nothing.
+    """
+    import run_replay
+
+    base = hosted + "/mcp/fixture"
+    session = "known-session-id"
+    call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "cw_get_ticket",
+                       "arguments": {"ticket_number": 1}}}
+    _post(base, "", {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+          session=session)
+    _post(base, "", call, session=session)
+
+    journal = run_replay.read_journal(base, "s3cret", session)
+    assert journal["replayed_calls"] == 1
+    assert journal["session_honoured"] is True
+
+    # What the bug looked like: the right server, the wrong bucket.
+    assert run_replay.summary(base, "s3cret",
+                              "some-other-session")["replayed_calls"] == 0
+
+
+def test_the_gate_falls_back_to_the_shared_session(hosted):
+    """A client that ignores the header is correct, just not concurrent."""
+    import run_replay
+
+    base = hosted + "/mcp/fixture"
+    _post(base, "", {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    _post(base, "", {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "cw_get_ticket",
+                                "arguments": {"ticket_number": 1}}})
+
+    journal = run_replay.read_journal(base, "s3cret", "never-used")
+    assert journal["replayed_calls"] == 1
+    assert journal["session_honoured"] is False
+
+
 # ------------------------------------------------------------------- parity
 
 def test_shared_modules_sit_beside_the_entry_point():
@@ -326,6 +410,139 @@ def test_the_manifest_carries_schema_the_mcp_extension_cannot_advertise():
 
     assert enums, "no enums left in the manifest"
     assert enums.get("cw_resolve.reference_type", 0) >= 20
+
+
+# ----------------------------------------------------- state without an SDK
+
+@pytest.fixture
+def blob_stub():
+    """A blob endpoint that enforces Azure's conditional-write semantics."""
+    import uuid
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    blobs = {}
+
+    class Blob(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _key(self):
+            return self.path.split("?")[0]
+
+        def do_GET(self):
+            if "sig=" not in self.path:          # the SAS is the credential
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            entry = blobs.get(self._key())
+            if entry is None:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body, etag = entry
+            self.send_response(200)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_PUT(self):
+            assert self.headers.get("x-ms-blob-type") == "BlockBlob"
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            existing = blobs.get(self._key())
+            if self.headers.get("If-None-Match") == "*" and existing:
+                return self._status(409)
+            match = self.headers.get("If-Match")
+            if match and (not existing or existing[1] != match):
+                return self._status(412)
+            etag = f'"{uuid.uuid4().hex}"'
+            blobs[self._key()] = (body, etag)
+            self.send_response(201)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _status(self, code):
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Blob)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    yield (f"http://127.0.0.1:{httpd.server_address[1]}/replay-state"
+           "?sv=2023-01-03&sig=stub&sp=rw")
+    httpd.shutdown()
+
+
+def test_sas_store_needs_no_sdk(blob_stub):
+    """azure-storage-blob is not importable in a custom handler.
+
+    Oryx installs it into .python_packages/lib/site-packages, which the
+    Functions *Python worker* puts on sys.path; a custom handler is
+    `python server.py` and gets none of that. The deployed app logged
+    `ModuleNotFoundError: No module named 'azure'` with the package plainly
+    there. So state goes over the REST API with a SAS, in stdlib.
+    """
+    import state_store
+    from state_store import SasBlobStore
+    body = _read(state_store.__file__).split("class SasBlobStore")[1] \
+        .split("class BlobStore")[0]
+    assert "import azure" not in body and "from azure" not in body
+
+    store = SasBlobStore(blob_stub)
+    assert store.load("k") == (None, None)
+    version = store.save("k", {"cursor": {"a": 1}, "journal": [1]}, None)
+    state, loaded = store.load("k")
+    assert state["cursor"] == {"a": 1}
+    assert loaded == version
+
+
+def test_sas_store_refuses_a_lost_update(blob_stub):
+    """Two instances on one replay means the ordering is already broken."""
+    from state_store import Conflict, SasBlobStore
+    store = SasBlobStore(blob_stub)
+    version = store.save("k", {"journal": []}, None)
+    store.save("k", {"journal": [1]}, version)
+    with pytest.raises(Conflict):
+        store.save("k", {"journal": [99]}, version)      # stale ETag -> 412
+    with pytest.raises(Conflict):
+        store.save("k", {}, None)                        # create again -> 409
+
+
+def test_sas_store_keeps_every_call_of_a_replay(blob_stub):
+    """The failure this replaces: a journal with 3 of 50 calls in it."""
+    from state_store import SasBlobStore
+    store = SasBlobStore(blob_stub)
+    _state, version = store.load("big")
+    journal = []
+    for seq in range(50):
+        journal.append(seq)
+        version = store.save("big", {"cursor": {}, "journal": list(journal)},
+                             version)
+    final, _ = store.load("big")
+    assert len(final["journal"]) == 50
+
+
+def test_a_sas_that_does_not_answer_degrades_rather_than_kills(capsys):
+    from state_store import open_store
+    store = open_store(sas_url="http://127.0.0.1:1/x?sig=nope")
+    store.load("k")                       # resolves on first use
+    assert store.backend == "MemoryStore"
+    assert "could not use blob storage" in capsys.readouterr().out
+
+
+def test_the_deployment_asks_for_no_remote_build():
+    """A build that installs where nothing looks is worse than no build."""
+    for script in ("deploy.sh", "deploy.ps1"):
+        body = _read(os.path.join(FUNCTION_DIR, script))
+        assert "--build-remote true" not in body
+    requirements = _read(os.path.join(FUNCTION_DIR, "requirements.txt"))
+    assert not [line for line in requirements.splitlines()
+                if line.strip() and not line.startswith("#")]
 
 
 # ------------------------------------------------------------ the verifier

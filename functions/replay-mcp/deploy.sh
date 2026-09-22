@@ -124,18 +124,19 @@ ZIP="$(mktemp -d)/package.zip"
 # it reports "Can't find app with name" for an app that plainly exists. az
 # takes the resource group explicitly and does not search.
 #
-# --build-remote is required for Python: requirements.txt has to be installed
-# somewhere, and it is not going to be a Windows laptop. Despite the command's
-# name this routes to Flex Consumption package deployment, which is the only
-# deployment technology Flex supports -- plain zip deploy is not.
+# No --build-remote, because there is nothing to build: requirements.txt is
+# empty and the server is stdlib only. A remote build installed packages into
+# .python_packages, which a custom handler never looks in -- an install that
+# appeared to succeed and left the app without its dependency. Despite the
+# command's name this routes to Flex Consumption package deployment, the only
+# deployment technology Flex supports.
 if ! az functionapp deployment source config-zip \
-     -g "$RG" -n "$APP" --src "$ZIP" --build-remote true -o none; then
+     -g "$RG" -n "$APP" --src "$ZIP" -o none; then
   rm -f "$ZIP"
   echo >&2
-  echo "The package uploaded; the app did not come up. What the handler" >&2
-  echo "printed on the way down is the diagnosis:" >&2
+  echo "The package uploaded; the app did not come up." >&2
   echo >&2
-  echo "  python3 $HERE/diagnose.py -g $RG" >&2
+  python3 "$HERE/diagnose.py" -g "$RG" >&2 || true
   exit 1
 fi
 rm -f "$ZIP"
@@ -144,13 +145,25 @@ echo
 echo "==> deployed"
 echo "  MCP      https://$HOSTNAME/mcp/<cassette-id>"
 echo "  summary  https://$HOSTNAME/summary/<cassette-id>"
+
+if [ -n "${SKIP_VERIFY:-}" ]; then
+  echo
+  echo "Skipped verification. Deployed is not the same as right:"
+  echo "  python3 $HERE/verify.py https://$HOSTNAME -g $RG"
+  exit 0
+fi
+
+# Deploying it is not the same as it being right, and finding that out in a
+# second command is a second round trip. verify.py waits for the app to come
+# up, replays every cassette against it, and runs the diagnosis itself if the
+# server never answers.
 echo
-echo "Check it answers, without touching ConnectWise:"
-echo "  curl -s https://$HOSTNAME/ | python3 -m json.tool"
+echo "==> verifying"
+python3 "$HERE/verify.py" "https://$HOSTNAME" -g "$RG"
+
 echo
 echo "Run the gate:"
 echo "  python3 replay/run_replay.py \\"
 echo "      --cassette cassettes/<cassette-id>.json \\"
-echo "      --agent <agent-name> \\"
 echo "      --server-url https://$HOSTNAME/mcp/<cassette-id> \\"
 echo "      --token \"\$REPLAY_TOKEN\""

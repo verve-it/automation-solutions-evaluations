@@ -44,7 +44,11 @@ param(
     # connectionString needs nothing beyond Contributor and puts a storage key
     # in app settings instead.
     [ValidateSet('identity', 'connectionString')]
-    [string] $StorageAuth = 'identity'
+    [string] $StorageAuth = 'identity',
+
+    # Deploy without checking the result. Only for when the cassettes are
+    # known good and you are iterating on infrastructure.
+    [switch] $SkipVerify
 )
 
 $ErrorActionPreference = 'Stop'
@@ -212,35 +216,53 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # what happened here. az takes the resource group explicitly and does not
 # search.
 #
-# --build-remote is required for Python: requirements.txt has to be installed
-# somewhere, and it is not going to be a Windows laptop. Despite the command's
-# name this routes to Flex Consumption package deployment, the only deployment
-# technology Flex supports -- plain zip deploy is not.
+# No --build-remote, because there is nothing to build: requirements.txt is
+# empty and the server is stdlib only. A remote build installed packages into
+# .python_packages, which a custom handler never looks in -- an install that
+# appeared to succeed and left the app without its dependency. Despite the
+# command's name this routes to Flex Consumption package deployment, the only
+# deployment technology Flex supports.
 az functionapp deployment source config-zip `
-    -g $ResourceGroup -n $app --src $zip --build-remote true -o none
+    -g $ResourceGroup -n $app --src $zip -o none
 $published = $LASTEXITCODE -eq 0
 Remove-Item $zip -Force
 if (-not $published) {
     Write-Host ''
     Write-Host 'The package uploaded; the app did not come up.' -ForegroundColor Yellow
-    Write-Host 'What the handler printed on the way down is the diagnosis:'
     Write-Host ''
-    Write-Host "  python $(Join-Path $here 'diagnose.py') -g $ResourceGroup"
-    Write-Host ''
-    throw 'az functionapp deployment: the app is unhealthy after publishing'
+    # Run it rather than print it. A deploy that hands over a command to run
+    # is two round trips where one would do, and the log is the only thing
+    # that separates a crashed handler from one that never started.
+    & python (Join-Path $here 'diagnose.py') -g $ResourceGroup
+    throw 'the app is unhealthy after publishing'
 }
 
 Write-Host ''
 Write-Host '==> deployed' -ForegroundColor Green
 Write-Host "  MCP      https://$hostName/mcp/<cassette-id>"
 Write-Host "  summary  https://$hostName/summary/<cassette-id>"
+
+if ($SkipVerify) {
+    Write-Host ''
+    Write-Host 'Skipped verification. Deployed is not the same as right:'
+    Write-Host "  python $(Join-Path $here 'verify.py') https://$hostName -g $ResourceGroup"
+    return
+}
+
+# Deploying it is not the same as it being right, and finding that out in a
+# second command is a second round trip. verify.py waits for the app to come
+# up, replays every cassette against it, and runs the diagnosis itself if the
+# server never answers.
 Write-Host ''
-Write-Host 'Check it answers, without touching ConnectWise:'
-Write-Host "  Invoke-RestMethod https://$hostName/ | ConvertTo-Json"
+Write-Host '==> verifying'
+& python (Join-Path $here 'verify.py') "https://$hostName" -g $ResourceGroup
+if ($LASTEXITCODE -ne 0) {
+    throw 'the deployment is not serving the cassettes correctly (see above)'
+}
+
 Write-Host ''
 Write-Host 'Run the gate:'
 Write-Host '  python replay/run_replay.py `'
 Write-Host '      --cassette cassettes/<cassette-id>.json `'
-Write-Host '      --agent <agent-name> `'
 Write-Host "      --server-url https://$hostName/mcp/<cassette-id> ``"
 Write-Host '      --token $env:REPLAY_TOKEN'

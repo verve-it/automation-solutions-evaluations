@@ -44,6 +44,26 @@ from trace_to_eval import (AGENT_NAMES, K_AGENT, base_tool_name, is_tool_span,
 
 CASSETTE_VERSION = 1
 
+# A schema identifier, so a future reader can recognise this file without
+# guessing. Microsoft ships no record/replay format for MCP; several
+# independent projects do (mcp-replay, mcpcassette, mcp-cassette, Agent VCR)
+# and have converged on JSONL with a schema id in a meta header. Ours is a
+# single object with semantic interactions rather than raw JSON-RPC, for
+# reasons in docs/MIGRATION-READINESS.md — but declaring what it is costs
+# nothing and is what makes a converter possible later.
+CASSETTE_SCHEMA = "verve/mcp-cassette@1"
+
+# The OTel MCP semantic conventions are at Development stability and
+# explicitly iterating fast, with no versioned release to pin against. Record
+# which protocol version the recording saw, so a convention change is a diff
+# rather than an archaeology exercise.
+K_MCP_PROTO = "mcp.protocol.version"
+
+# What the agent was asked. Recorded so a replay needs nothing but the
+# cassette: the input is part of the recording, and asking a caller to retype
+# it invites asking a slightly different question than the one recorded.
+K_IN_MSGS = "gen_ai.input.messages"
+
 # Tools that change ConnectWise. Flagged so the replay server can assert the
 # agent attempted the same writes while performing none of them.
 WRITE_TOOLS = {"cw_create", "cw_update", "cw_update_ticket", "cw_delete",
@@ -70,8 +90,66 @@ def interaction_key(tool, raw_args):
     return f"{base_tool_name(tool)}|{canonical_args(raw_args)}"
 
 
+def mcp_protocol_version(spans):
+    """{op_id: protocol version} from whichever span carries it.
+
+    The attribute lives on `initialize` spans, not on tool calls, so this has
+    to look at every span for the orchestration rather than the tool spans
+    the cassette is built from.
+
+    App Insights coerces the value: MCP protocol versions are plain dates
+    like `2025-11-25`, and it stores `2025-11-25T00:00:00.0000000Z`. Trimmed
+    back to the date, because that is what the version actually is and what a
+    reader would compare against.
+    """
+    found = {}
+    for s in spans:
+        raw = s["d"].get(K_MCP_PROTO)
+        if not raw or s["op_id"] in found:
+            continue
+        text = str(raw)
+        if "T" in text and text[:10].count("-") == 2:
+            text = text[:10]
+        found[s["op_id"]] = text
+    return found
+
+
+def recorded_query(spans):
+    """{op_id: the text the entry agent was given}.
+
+    The input is on the `invoke_agent` span, not on any tool call, so this
+    walks every span for the orchestration. The earliest one is the entry
+    agent -- a child agent's invoke carries the hand-off, not the request.
+
+    Only the `user` part is taken. System instructions are the agent's, not
+    the run's, and replaying them as input would ask a different question.
+    """
+    found = {}
+    for s in sorted(spans, key=lambda s: s["timestamp"]):
+        raw = s["d"].get(K_IN_MSGS)
+        if not raw or s["op_id"] in found:
+            continue
+        try:
+            messages = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for message in messages if isinstance(messages, list) else []:
+            if (message or {}).get("role") != "user":
+                continue
+            text = "".join(
+                part.get("content") or ""
+                for part in (message.get("parts") or [])
+                if part.get("type") == "text")
+            if text.strip():
+                found[s["op_id"]] = text
+                break
+    return found
+
+
 def build(spans):
     """One cassette per orchestration."""
+    protocols = mcp_protocol_version(spans)
+    queries = recorded_query(spans)
     by_op = defaultdict(list)
     for s in spans:
         if is_tool_span(s):
@@ -116,7 +194,10 @@ def build(spans):
         if not interactions:
             continue
         cassettes.append({
+            "schema": CASSETTE_SCHEMA,
             "cassette_version": CASSETTE_VERSION,
+            "mcp_protocol_version": protocols.get(op_id),
+            "query": queries.get(op_id),
             "orchestration_id": op_id,
             "recorded": op_spans[0]["timestamp"],
             "agents": agents,

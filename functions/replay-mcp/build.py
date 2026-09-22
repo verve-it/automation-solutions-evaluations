@@ -39,6 +39,16 @@ SHARED = [
 
 OWN = ["server.py", "host.json", "requirements.txt"]
 
+# Everything the server serves, in one file at the package root.
+#
+# The package must contain NO DIRECTORIES. The deployment keeps files at the
+# root of wwwroot and drops subdirectories -- lib/ went that way first, and
+# tool_manifests/ went the same way once lib/ was flattened, each time as a
+# 502 with a stack trace behind it. A flat package cannot lose a directory
+# because it does not have one.
+PAYLOAD_NAME = "replay_payload.json"
+PAYLOAD_SCHEMA = "verve/replay-payload@1"
+
 
 def build_cassettes():
     """Cassettes are derived from the committed traces, not committed.
@@ -63,7 +73,7 @@ def build_cassettes():
                     "-o", os.path.join(ROOT, "cassettes")], check=True)
 
 
-def refuse_lossy(directory):
+def refuse_lossy(cassettes):
     """A lossy cassette is a corrupted fixture.
 
     It carries a truncated result, so the agent under test reasons over less
@@ -71,9 +81,7 @@ def refuse_lossy(directory):
     Better to refuse here than to discover it inside a gate.
     """
     bad = []
-    for name in sorted(os.listdir(directory)):
-        with open(os.path.join(directory, name), encoding="utf-8") as fh:
-            data = json.load(fh)
+    for name, data in sorted(cassettes.items()):
         if data.get("lossy"):
             bad.append((name, data.get("warnings", [])))
     if bad:
@@ -90,44 +98,55 @@ def main(argv):
 
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
-    for sub in ("cassettes", "tool_manifests"):
-        os.makedirs(os.path.join(OUT, sub))
+    os.makedirs(OUT)
 
     for name in OWN:
         shutil.copy2(os.path.join(HERE, name), OUT)
-    # Flat, beside server.py, not in lib/. A lib/ subdirectory did not survive
-    # the remote build -- the app came up with sys.path pointing at /home and
-    # no module to import -- and a file beside the entry point cannot be
-    # dropped without dropping the entry point too. Python puts a script's own
-    # directory on sys.path, so this also removes the path logic that was
-    # wrong in the first place.
+    # Flat, beside server.py. Python puts a script's own directory on
+    # sys.path, so this also removes the path logic that was wrong before.
     for path in SHARED:
         shutil.copy2(path, OUT)
 
-    manifests = os.path.join(ROOT, "tool_manifests")
-    for name in sorted(os.listdir(manifests)):
+    manifests = []
+    manifest_dir = os.path.join(ROOT, "tool_manifests")
+    for name in sorted(os.listdir(manifest_dir)):
         if name.endswith(".json"):
-            shutil.copy2(os.path.join(manifests, name),
-                         os.path.join(OUT, "tool_manifests"))
+            with open(os.path.join(manifest_dir, name), encoding="utf-8") as fh:
+                manifests.append(json.load(fh))
 
     if selected:
-        for path in selected:
-            shutil.copy2(path, os.path.join(OUT, "cassettes"))
+        chosen = list(selected)
     else:
         source = os.path.join(ROOT, "cassettes")
         build_cassettes()
-        for name in sorted(os.listdir(source)):
-            if name.endswith(".json"):
-                shutil.copy2(os.path.join(source, name),
-                             os.path.join(OUT, "cassettes"))
+        chosen = [os.path.join(source, name)
+                  for name in sorted(os.listdir(source))
+                  if name.endswith(".json")]
 
-    refuse_lossy(os.path.join(OUT, "cassettes"))
+    cassettes = {}
+    for path in chosen:
+        with open(path, encoding="utf-8") as fh:
+            cassettes[os.path.basename(path)[:-5]] = json.load(fh)
+
+    refuse_lossy(cassettes)
+
+    with open(os.path.join(OUT, PAYLOAD_NAME), "w", encoding="utf-8") as fh:
+        json.dump({"schema": PAYLOAD_SCHEMA,
+                   "cassettes": cassettes,
+                   "tool_manifests": manifests}, fh, ensure_ascii=False)
+
+    # Asserted, not assumed. This is the failure that cost three deploys.
+    nested = [name for name in os.listdir(OUT)
+              if os.path.isdir(os.path.join(OUT, name))]
+    if nested:
+        sys.exit(f"the package contains directories, which do not survive "
+                 f"deployment: {', '.join(nested)}")
 
     print(f"package -> {OUT}")
-    for base, _dirs, files in sorted(os.walk(OUT)):
-        for name in sorted(files):
-            full = os.path.join(base, name)
-            print("  ." + full[len(OUT):].replace(os.sep, "/"))
+    print(f"  {len(cassettes)} cassette(s), {len(manifests)} manifest(s) "
+          f"in {PAYLOAD_NAME}")
+    for name in sorted(os.listdir(OUT)):
+        print(f"  ./{name}")
     return 0
 
 
