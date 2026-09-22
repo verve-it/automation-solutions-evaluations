@@ -984,19 +984,29 @@ def test_an_orchestration_is_refused_because_its_children_are_not_stubbed():
     message = str(exc.value)
     assert "BY NAME" in message
     assert "live service" in message
-    assert "--allow-live-children" in message
+    assert "no override" in message
 
 
 def test_a_single_agent_cassette_is_not_refused():
     rr.refuse_unstubbed_children("c.json", ["connectwise-operations-agent"])
 
 
-def test_the_override_says_what_it_does(capsys):
-    rr.refuse_unstubbed_children("c.json", ["orchestrator", "child"],
-                                 allow=True)
-    out = capsys.readouterr().out
-    assert "REAL ConnectWise" in out
-    assert "writes" in out
+def test_there_is_no_way_to_replay_an_orchestration_anyway():
+    """Nothing in this repo may reach ConnectWise, so the refusal takes no
+    override.
+
+    It used to: --allow-live-children printed a warning and went ahead, which
+    made the one safeguard between a multi-agent cassette and a live write a
+    flag someone could set in a hurry. An eval that writes to a system of
+    record is not an eval.
+    """
+    import inspect
+    assert "allow" not in inspect.signature(
+        rr.refuse_unstubbed_children).parameters
+    source = inspect.getsource(rr)
+    assert "--allow-live-children" not in source.split('"""', 3)[-1]
+    with pytest.raises(SystemExit):
+        rr.refuse_unstubbed_children("c.json", ["orchestrator", "child"])
 
 
 # ------------------------------------------------- project facts, not constants

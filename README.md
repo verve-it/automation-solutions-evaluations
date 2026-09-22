@@ -22,9 +22,9 @@ because the first run already changed the data.
 
 That rules out re-running agents against production. It does not rule out
 replaying them against *recorded tool output* — see
-[Cassette replay](#cassette-replay-built-not-wired). Exactly one thing in this
-repo invokes agents at all: `staging-replay.yml`, pinned to the test project
-and the dev instance.
+[Cassette replay](#cassette-replay-built-not-wired). Nothing in this repo
+invokes an agent against real tools, in any environment: an eval that writes
+to a system of record is not an eval.
 
 ---
 
@@ -122,7 +122,7 @@ generic "evaluate any agent" framework.
 | every push / PR | `frozen-sets` — committed traces vs committed baselines | no |
 | nightly 06:00 UTC | `drift` — export → convert → score → **score in Foundry** | yes |
 | Monday 07:00 UTC | the above plus the judged sample | yes |
-| push to `staging` touching `replay/**` | `staging-replay` — **invokes agents** in the test project | yes |
+| called from the agents repo before deploy | `agent-gate` — replays against **stubbed** tools, scores, gates | yes |
 
 GitHub Actions does the scheduling; Foundry does the scoring and keeps the
 history.
@@ -297,7 +297,6 @@ replay/                   record/replay stub -- THE agent-change gate
   make_cassette.py          a trace -> an ordered cassette
   replay_server.py          serve a cassette as an MCP toolbox
   run_replay.py             bind an agent to it, invoke, score, tear down
-  full-triage.json          dev tickets for the live smoke test
 
 dataverse/                outcome evaluation -- human review as ground truth
   fetch_outcomes.py         --probe to discover the schema, then pull reviews
@@ -346,7 +345,6 @@ an agent does belongs there; anything that only measures belongs here. See
 | **The outcome join is unestablished** | all outcome evaluation. `dataverse/fetch_outcomes.py --probe` answers whether the orchestration record carries the App Insights `operation_Id`. Ticket id will not substitute — two orchestrations in the frozen set share ticket 805392. | `dataverse/README.md` |
 | **Continuous evaluation rule not created** | `foundry/continuous_eval.py` builds it; it needs an eval id and one run against the project. Until then the live path is only the nightly cron. | `docs/FOUNDRY.md` |
 | Hosting the replay server | the deterministic agent-change gate. `run_replay.py` does the Foundry wiring; the server still has to be reachable from Azure. | `docs/REPLAY.md` |
-| `replay/` ticket ids | the staging replay | `replay/README.md` |
 | Cost / latency budgets | gating on spend | set `--max-tokens` |
 | Skill versions | "which rules were in force" across versions | `load_skill` returns no version |
 | Intent on the ops hand-off | intent-keyed expectations for the ops agent | the orchestrator sends a JSON write plan with no `intent=` |

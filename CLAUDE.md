@@ -22,20 +22,29 @@ tears down.
 Verified end to end: 50/50 recorded calls matched, 4 writes replayed as
 recorded successes, zero ConnectWise requests.
 
-### Do not describe the live staging replay as the agent-change gate
+### Nothing here ever invokes an agent against real tools
 
-`.github/workflows/staging-replay.yml` invokes **real** tools against the dev
-ConnectWise instance. It is the **weekly smoke test for the write path** —
-slow, costs judge inference, leaves state behind, different answer every run.
-It is not how you decide whether an agent change is safe.
+Not in staging, not against the dev instance, not once a week, not behind a
+flag. An eval that writes to a system of record is not an eval.
+
+This used to be qualified. `.github/workflows/staging-replay.yml` ran
+`microsoft/ai-agent-evals` against the dev ConnectWise instance and was
+described here as "the weekly smoke test for the write path", and
+`run_replay.py` took `--allow-live-children` to replay an orchestration with
+its children pointed at the live service. Both are **removed**. The workflow
+never once passed — `DEFAULT_AGENT_IDS` was never set, so both of its runs
+failed before invoking anything — and the flag was one hurried run away from
+being the thing that made the whole apparatus pointless.
 
 | Gate | Mechanism | Tools |
 |---|---|---|
 | Eval-code change | frozen sets vs frozen baselines | none |
 | **Agent change** | **cassette replay** | **STUBBED** |
-| Agent change, judged | `ai-agent-evals` in staging | live, dev instance |
 | Production behaviour | recorded traces, `run_evals.py` | none |
-| Write path still works | one live staging run | live, dev instance |
+| Judged sample | recorded traces, Foundry evaluators | none |
+
+Every row is `none` or `STUBBED`. If a row ever reads otherwise, that is the
+bug.
 
 Reachability is solved by `functions/replay-mcp/`: Foundry calls the replay
 server, so it must be reachable from Azure. `localhost` cannot work and
@@ -197,11 +206,11 @@ toolbox — so replaying an orchestration stubs the orchestrator and sends every
 child's calls, **writes included**, to the live service. The journal would
 never show it.
 
-`run_replay.py` refuses a multi-agent cassette. `--allow-live-children`
-overrides it and says what that means. The two single-agent cassettes
-(`connectwise-operations-agent`) replay fully stubbed today. Fixing it for
-orchestrations needs the children addressable by version, which is the agent
-code's decision, not this script's.
+`run_replay.py` refuses a multi-agent cassette, with **no override** — the
+refusal is the only thing between such a cassette and a live write. The two
+single-agent cassettes (`connectwise-operations-agent`) replay fully stubbed
+today. Fixing it for orchestrations needs the children addressable by version,
+which is the agent code's decision, not this script's.
 
 ## Gating a deployment
 

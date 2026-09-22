@@ -68,8 +68,8 @@ the answer is that ASSERT already works this way:
   applicable.** Generated cases are durable inputs, not throwaway.
 - **`assert-ai-action` gates pull requests against a cached baseline**, using
   a paired-binary McNemar test for whether a change is a real regression
-  rather than noise — which is the same problem `--baseline-agent-id` solves
-  in the live staging replay, solved properly.
+  rather than noise — which is the problem `--baseline-agent-id` was for in
+  the live staging replay, solved properly and without invoking anything.
 - There is an **ASSERT → Foundry exporter** in flight (PR #267), so results
   need not stay local.
 
