@@ -89,6 +89,34 @@ are at **Development** stability in a repo that exists to iterate fast, with
 no version to pin. That, not a native converter arriving, is the thing likely
 to break first.
 
+## Project facts live in eval-config.json, not in scripts
+
+The point of this repo is evaluating **any** agent, so nothing about
+ConnectWise or triage is a constant in a script. `evalconfig.py` reads
+`eval-config.json`; `evalconfig.DEFAULTS` is deliberately empty, because a
+default that happens to fit this project is how the constants got embedded the
+first time.
+
+What can be derived is derived rather than configured:
+
+- **Agents come from the trace.** Every distinct `gen_ai.agent.name` in an
+  export is an agent. `learn_agents(spans)` returns the configured set plus
+  those, and it **returns** — it does not write `AGENT_NAMES`, because a
+  global that conversion rewrites makes every later read depend on which trace
+  was converted first, and `scrub_trace.protected_vocabulary()` reads it.
+  Pass the result to `tool_step(span, agents)`.
+- **Write tools come from the server.** MCP defines
+  `annotations.readOnlyHint` and `destructiveHint`; where a manifest has them
+  they decide, ahead of the config. `extract_tool_manifest.py` keeps them now
+  — it used to drop them.
+
+The old hard-coded `WRITE_TOOLS` was wrong in both directions: it named
+`cw_patch`, which does not exist, and missed eight tools that plainly mutate
+(`cw_log_time`, `cw_set_approval`, `cw_convert`, …). The committed cassettes
+happened not to call any of them, so the counts reported were right by luck.
+A missed write tool is counted as a read, and the gate then reports "0 writes,
+none performed" about a run that attempted several.
+
 ## Other things worth not re-deriving
 
 - **Root holds four scripts.** `export_traces` → `trace_to_eval` → `run_evals`,
@@ -136,6 +164,44 @@ the store degraded to in-process and each instance kept its own cursor.
 Replay state now goes over the blob REST API with a container SAS minted by
 `infra/main.bicep`. `requirements.txt` is empty, the deployment asks for no
 remote build, and the whole server is stdlib.
+
+## Binding is per agent kind, and every triage agent is HOSTED
+
+| Kind | Tools live | Rebind by |
+|---|---|---|
+| `prompt`, `voice` | `tools` in the definition | swapping `tools` |
+| `hosted` | inside the uploaded code | an environment variable + re-upload of the same code |
+| `workflow`, `external` | neither | refused by name |
+
+`--describe` against the project: 3 prompt agents (Classification, Intake,
+NotesAndCompany — all bound to a *confluence* MCP server) and 5 hosted
+(VerveOS, connectwise-operations-agent, triage-analysis-agent,
+triage-evaluation-agent, triage-orchestrator), every one `python main.py`
+with a single variable, `AZURE_AI_MODEL_DEPLOYMENT_NAME`.
+
+`--inspect-code` settled how they bind: every hosted agent reads
+`CONNECTWISE_TOOLBOX_NAME`, `CONNECTWISE_TOOLBOX_VERSION` and
+`CONNECTWISE_TOOLBOX_AUTH_SCOPE`, and the only host in their code is
+`ai.azure.com`. **They resolve a Foundry toolbox by name and hold no endpoint
+at all** — so a replay creates a temporary toolbox pointing at the replay
+server, names it in the clone's environment, and deletes it afterwards. No
+code change. The bearer token and session ride on the *toolbox's* headers,
+because Foundry is what calls the replay server, not the agent.
+
+## An orchestration cannot be fully stubbed, and is refused
+
+The orchestrator reaches its children over A2A **by name**
+(`TRIAGE_ANALYSIS_AGENT_NAME` and friends). A name resolves to that agent's
+own default version, whose environment still points at the real ConnectWise
+toolbox — so replaying an orchestration stubs the orchestrator and sends every
+child's calls, **writes included**, to the live service. The journal would
+never show it.
+
+`run_replay.py` refuses a multi-agent cassette. `--allow-live-children`
+overrides it and says what that means. The two single-agent cassettes
+(`connectwise-operations-agent`) replay fully stubbed today. Fixing it for
+orchestrations needs the children addressable by version, which is the agent
+code's decision, not this script's.
 
 ## Working agreements
 

@@ -356,7 +356,10 @@ def test_only_the_tools_are_swapped_when_cloning_an_agent():
         definition = FakeDef()
 
     import azure.ai.projects.models as models
-    out = rr.cloned_definition(FakeVersion(), "https://r.example/mcp", models)
+    payload = rr.definition_payload(FakeVersion())
+    out = rr.binding_for(payload).rebind(
+        payload, server_url="https://r.example/mcp", models=models,
+        token=None, session=None)
     assert out["model"] == "gpt-4o"
     assert out["instructions"] == "triage the ticket"
     assert out["temperature"] == 0.2
@@ -751,3 +754,299 @@ def test_create_version_takes_definition_as_a_keyword():
 def _read_source(module):
     import inspect
     return inspect.getsource(module)
+
+
+def test_a_prompt_agent_has_its_tools_swapped_and_nothing_else():
+    """Everything but the binding is carried over verbatim.
+
+    A replayed agent already differs from production by its tools; letting
+    the model or instructions drift as well makes the comparison meaningless.
+    """
+    models = pytest.importorskip("azure.ai.projects.models")
+
+    payload = {"kind": "prompt", "model": "gpt-5", "instructions": "triage",
+               "temperature": 0.2,
+               "tools": [{"type": "mcp", "server_label": "cw"}]}
+    binding = rr.binding_for(payload)
+    assert isinstance(binding, rr.PromptBinding)
+
+    clone = binding.rebind(payload, server_url="https://x/mcp/y",
+                           models=models, token="t", session="s")
+    assert clone["model"] == "gpt-5"
+    assert clone["instructions"] == "triage"
+    assert clone["temperature"] == 0.2
+    assert len(clone["tools"]) == 1
+    assert clone["tools"][0]["server_url"] == "https://x/mcp/y"
+    assert clone["tools"][0]["headers"]["Mcp-Session-Id"] == "s"
+    # The original is not mutated -- the base version must stay readable.
+    assert payload["tools"][0] == {"type": "mcp", "server_label": "cw"}
+
+
+class _FakeToolboxes:
+    def __init__(self):
+        self.created = None
+        self.deleted = None
+
+    def create_version(self, name, *, tools, description, metadata):
+        self.created = (name, tools, metadata)
+        return type("TV", (), {"name": name, "version": "1"})()
+
+    def delete(self, name):
+        self.deleted = name
+
+
+class _FakeAgents:
+    def __init__(self):
+        self.uploaded = None
+
+    def download_code(self, name, *, agent_version=None):
+        return iter([b"PK\x03\x04", b"-code-"])
+
+    def create_version_from_code(self, agent_name, *, definition, code,
+                                 description, metadata):
+        self.uploaded = (agent_name, definition, code.read())
+        return type("V", (), {"version": "44"})()
+
+
+def test_a_hosted_agent_can_also_be_given_a_url_variable():
+    """For a hosted agent that holds an endpoint rather than a toolbox name.
+
+    None in this project do -- --inspect-code showed them all naming a
+    toolbox -- but --replay-env-var covers the other shape, and the rest of
+    the definition still has to survive untouched.
+    """
+    models = pytest.importorskip("azure.ai.projects.models")
+    toolboxes = _FakeToolboxes()
+    client = type("C", (), {"toolboxes": toolboxes})()
+
+    payload = {"kind": "hosted", "cpu": "1", "memory": "2Gi",
+               "environment_variables": {"AZURE_AI_MODEL_DEPLOYMENT_NAME": "x"},
+               "code_configuration": {"runtime": "python_3_13"}}
+    binding = rr.binding_for(payload, ["CONNECTWISE_MCP_URL"])
+    assert isinstance(binding, rr.HostedBinding)
+    binding.prepare(client, server_url="https://x/mcp/y", token=None,
+                    session=None, models=models, label="replay-t")
+
+    clone = binding.rebind(payload, server_url="https://x/mcp/y", token=None,
+                           session=None, models=models)
+    env = clone["environment_variables"]
+    assert env["CONNECTWISE_MCP_URL"] == "https://x/mcp/y"
+    assert env[rr.TOOLBOX_NAME_VAR] == "replay-t"
+    # Carried over, not replaced.
+    assert env["AZURE_AI_MODEL_DEPLOYMENT_NAME"] == "x"
+    assert clone["cpu"] == "1" and clone["memory"] == "2Gi"
+    assert payload["environment_variables"] == {
+        "AZURE_AI_MODEL_DEPLOYMENT_NAME": "x"}
+
+
+def test_a_hosted_version_is_created_from_the_same_code():
+    """The clone must differ by the variables and nothing else."""
+    class Agents:
+        def __init__(self):
+            self.downloaded = None
+            self.uploaded = None
+
+        def download_code(self, name, *, agent_version=None):
+            self.downloaded = (name, agent_version)
+            return iter([b"PK\x03\x04", b"-agent-code-"])
+
+        def create_version_from_code(self, agent_name, *, definition, code,
+                                     description, metadata):
+            self.uploaded = (agent_name, definition, code.read(), metadata)
+            return type("V", (), {"version": "99"})()
+
+    agents = Agents()
+    binding = rr.HostedBinding(["CONNECTWISE_MCP_URL"])
+    created = binding.create(agents, "triage-orchestrator",
+                             {"kind": "hosted"}, description="d",
+                             metadata={"purpose": "p"}, base_version="65")
+
+    assert agents.downloaded == ("triage-orchestrator", "65")
+    assert agents.uploaded[2] == b"PK\x03\x04-agent-code-"
+    assert created.version == "99"
+
+
+def test_a_kind_with_nowhere_to_bind_is_refused_by_name():
+    with pytest.raises(SystemExit) as exc:
+        rr.binding_for({"kind": "workflow"})
+    message = str(exc.value)
+    assert "kind='workflow'" in message
+    assert "--describe" in message
+
+
+def test_describe_needs_no_cassette():
+    """Surveying a project should not require knowing which cassette to use."""
+    import inspect
+    source = inspect.getsource(rr.main)
+    assert "--cassette is required (or use --describe)" in source
+    signature = inspect.getsource(rr.describe)
+    assert "nothing was created or changed" in signature
+
+
+# ------------------------------------------ the hosted path, end to end (fake)
+
+def test_a_hosted_agent_binds_through_a_temporary_toolbox():
+    """These agents hold no endpoint; they name a toolbox.
+
+    --inspect-code showed every hosted agent reading
+    CONNECTWISE_TOOLBOX_NAME/_VERSION/_AUTH_SCOPE with ai.azure.com as the
+    only host in the code. So the replay creates a toolbox pointing at the
+    replay server and names it -- no code change, and the agent cannot tell.
+    """
+    models = pytest.importorskip("azure.ai.projects.models")
+
+    toolboxes = _FakeToolboxes()
+    client = type("C", (), {"toolboxes": toolboxes})()
+    binding = rr.HostedBinding()
+
+    binding.prepare(client, server_url="https://x/mcp/c", token="t",
+                    session="s", models=models, label="replay-abc123")
+
+    name, tools, metadata = toolboxes.created
+    assert name == "replay-abc123"
+    tool = tools[0].as_dict()
+    assert tool["server_url"] == "https://x/mcp/c"
+    assert tool["headers"]["Authorization"] == "Bearer t"
+    # The session travels on the TOOLBOX, because Foundry is what calls the
+    # replay server -- not the agent.
+    assert tool["headers"]["Mcp-Session-Id"] == "s"
+    assert metadata["purpose"] == rr.TEMP_MARKER
+
+    payload = {"kind": "hosted",
+               "environment_variables": {"AZURE_AI_MODEL_DEPLOYMENT_NAME": "m"}}
+    clone = binding.rebind(payload, server_url="https://x/mcp/c", token="t",
+                           session="s", models=models)
+    env = clone["environment_variables"]
+    assert env[rr.TOOLBOX_NAME_VAR] == "replay-abc123"
+    assert env[rr.TOOLBOX_VERSION_VAR] == "1"
+    assert env["AZURE_AI_MODEL_DEPLOYMENT_NAME"] == "m"
+
+    binding.teardown()
+    assert toolboxes.deleted == "replay-abc123"
+
+
+def test_rebinding_before_the_toolbox_exists_is_a_bug_not_a_silent_miss():
+    binding = rr.HostedBinding()
+    with pytest.raises(RuntimeError):
+        binding.rebind({"kind": "hosted"}, server_url="u", token=None,
+                       session=None)
+
+
+def test_the_hosted_clone_ships_the_same_code_bytes():
+    agents = _FakeAgents()
+    binding = rr.HostedBinding()
+    created = binding.create(agents, "connectwise-operations-agent",
+                             {"kind": "hosted"}, description="d",
+                             metadata={"purpose": "p"}, base_version="43")
+    assert agents.uploaded[2] == b"PK\x03\x04-code-"
+    assert created.version == "44"
+
+
+def test_an_orchestration_is_refused_because_its_children_are_not_stubbed():
+    """The guarantee this repo exists for, defended.
+
+    The orchestrator reaches its children by NAME. A name resolves to that
+    agent's own default version, whose environment still points at the real
+    ConnectWise toolbox -- so a replay of an orchestration sends the
+    children's calls, writes included, to the live service, and the journal
+    never sees them.
+    """
+    with pytest.raises(SystemExit) as exc:
+        rr.refuse_unstubbed_children(
+            "c.json",
+            ["triage-orchestrator", "triage-analysis-agent",
+             "connectwise-operations-agent"])
+    message = str(exc.value)
+    assert "BY NAME" in message
+    assert "live service" in message
+    assert "--allow-live-children" in message
+
+
+def test_a_single_agent_cassette_is_not_refused():
+    rr.refuse_unstubbed_children("c.json", ["connectwise-operations-agent"])
+
+
+def test_the_override_says_what_it_does(capsys):
+    rr.refuse_unstubbed_children("c.json", ["orchestrator", "child"],
+                                 allow=True)
+    out = capsys.readouterr().out
+    assert "REAL ConnectWise" in out
+    assert "writes" in out
+
+
+# ------------------------------------------------- project facts, not constants
+
+def test_a_write_tool_is_decided_by_the_server_then_the_config():
+    """The hard-coded set was wrong in both directions.
+
+    It named cw_patch, which does not exist in the manifest, and missed eight
+    tools that plainly mutate -- cw_log_time, cw_set_approval and friends. A
+    missed write tool is counted as a read, so the gate reports "0 writes,
+    none performed" about a run that attempted several. Nothing catches that.
+    """
+    import evalconfig
+
+    config = {"write_tools": {"names": ["cw_update"],
+                              "prefixes": ["cw_set", "cw_log"]}}
+
+    assert evalconfig.is_write_tool("cw_update", config) is True
+    assert evalconfig.is_write_tool("cw_set_approval", config) is True
+    assert evalconfig.is_write_tool("cw_log_time", config) is True
+    assert evalconfig.is_write_tool("cw_query", config) is False
+    # Foundry prefixes the server: the bare name is what is matched.
+    assert evalconfig.is_write_tool("SomeServer___cw_set_approval",
+                                    config) is True
+
+    # What the server says about itself wins over the config either way.
+    read_only = [{"tools": [{"name": "cw_update",
+                             "annotations": {"readOnlyHint": True}}]}]
+    assert evalconfig.is_write_tool("cw_update", config, read_only) is False
+    mutating = [{"tools": [{"name": "cw_query",
+                            "annotations": {"readOnlyHint": False}}]}]
+    assert evalconfig.is_write_tool("cw_query", config, mutating) is True
+
+
+def test_this_project_is_configured_not_compiled_in():
+    """Any agent, any tool server -- so nothing about ConnectWise is a
+    constant in a script."""
+    import evalconfig
+
+    config = evalconfig.load()
+    assert evalconfig.toolbox_env(config) == ("CONNECTWISE_TOOLBOX_NAME",
+                                              "CONNECTWISE_TOOLBOX_VERSION")
+    assert "cw_log_time" not in json.dumps(evalconfig.DEFAULTS)
+    assert evalconfig.DEFAULTS["agents"] == []
+    assert evalconfig.toolbox_env(evalconfig.DEFAULTS) == ("", "")
+
+    # The defaults must not quietly fit this project, or the next one inherits
+    # settings nobody chose.
+    assert evalconfig.is_write_tool("cw_update", evalconfig.DEFAULTS) is False
+
+
+def test_a_missing_config_file_still_runs(tmp_path):
+    import evalconfig
+    config = evalconfig.load(str(tmp_path / "absent.json"))
+    assert config == evalconfig.DEFAULTS
+
+
+def test_a_partial_config_gets_defaults_for_the_rest(tmp_path):
+    """A KeyError three calls later is a worse failure than a default."""
+    import evalconfig
+    path = tmp_path / "eval-config.json"
+    path.write_text(json.dumps({"write_tools": {"names": ["x_write"]}}))
+    config = evalconfig.load(str(path))
+    assert config["write_tools"]["names"] == ["x_write"]
+    assert config["write_tools"]["prefixes"] == []
+    assert config["agents"] == []
+
+
+def test_a_hosted_agent_with_no_configured_toolbox_vars_says_so():
+    """Better than creating a toolbox nothing will ever look at."""
+    models = pytest.importorskip("azure.ai.projects.models")
+    binding = rr.HostedBinding(name_var="", version_var="")
+    binding.name_var = binding.version_var = ""
+    client = type("C", (), {"toolboxes": _FakeToolboxes()})()
+    with pytest.raises(SystemExit) as exc:
+        binding.prepare(client, server_url="u", token=None, session=None,
+                        models=models, label="replay-x")
+    assert "eval-config.json" in str(exc.value)
