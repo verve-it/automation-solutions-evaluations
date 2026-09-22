@@ -105,3 +105,48 @@ def test_the_replay_step_fails_the_job_on_a_nonzero_exit(steps):
     pass while the replay failed."""
     replay = [s for s in steps if "run_replay.py" in s.get("run", "")][0]
     assert "pipefail" in replay["run"]
+
+
+def test_the_export_is_windowed_to_this_replay(steps):
+    """A flat --hours sweeps up whatever else the project served.
+
+    The gate exports traces from a project that also carries real traffic.
+    Scored by the hour, another team's run lands in this agent change's
+    verdict -- red for something the change did not do, or green because an
+    unrelated success diluted a failure. Either way the gate stops meaning
+    what it says.
+    """
+    export = [s for s in steps if "export_traces.py" in s.get("run", "")]
+    assert len(export) == 1
+    run = export[0]["run"]
+    assert "--since" in run and "--until" in run
+    assert "--hours" not in run
+    assert "steps.window.outputs" in run
+
+
+def test_the_window_refuses_to_guess(steps):
+    """If no manifest carried a window, the honest move is to fail.
+
+    Falling back to an hour is the bug this step exists to prevent, and it
+    would fail open: the gate would still go green, on the wrong data.
+    """
+    window = [s for s in steps if s.get("id") == "window"][0]
+    assert "sys.exit" in window["run"]
+    assert "started_utc" in window["run"] and "finished_utc" in window["run"]
+
+
+def test_the_raw_export_is_not_published(steps):
+    """Artifacts in a public repo are downloadable by anyone.
+
+    `replay-spans.json` and the Foundry dataset are a live export of a
+    project that also serves real traffic, and scrub_trace.py is deliberately
+    not automatable (propose -> human review -> apply). So the export stays
+    on the runner.
+    """
+    upload = [s for s in steps
+              if str(s.get("uses", "")).startswith("actions/upload-artifact")][0]
+    path = upload["with"]["path"]
+    assert "spans" not in path
+    assert "foundry-dataset" not in path
+    # and it still publishes the verdicts
+    assert "gate.json" in path

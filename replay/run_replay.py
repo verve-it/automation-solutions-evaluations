@@ -54,6 +54,12 @@ import datetime as _dt
 
 import evalconfig
 
+
+def _utcnow():
+    """ISO-8601 UTC to the second, the form export_traces --since/--until takes."""
+    return (_dt.datetime.now(_dt.timezone.utc)
+               .replace(microsecond=0).isoformat())
+
 CONFIG = evalconfig.load()
 
 # What the replay binds under, and which environment variables a hosted agent
@@ -701,7 +707,7 @@ def verdict(s, allow_divergence_after=None):
     return ok, "\n".join(lines)
 
 
-def write_manifest(path, args, base_version, temp_version, s):
+def write_manifest(path, args, base_version, temp_version, s, run=None):
     """Record what was actually tested, because the agent version will not.
 
     Foundry evaluation objects are scoped to the PROJECT, not to an agent --
@@ -718,6 +724,14 @@ def write_manifest(path, args, base_version, temp_version, s):
     This file is that record. Name any eval built from this run after
     `base_version` -- the thing under test -- rather than after the ephemeral
     clone, which is a fixture.
+
+    `run` carries the window this replay occupied and the ids the service
+    handed back. A gate exports traces afterwards and has to select THIS
+    run's spans: a flat `--hours 1` also sweeps up whatever else the project
+    produced in that hour, which scores unrelated traffic as if the agent
+    change had caused it. `started_utc`/`finished_utc` bound the export;
+    the ids are recorded so a span attribute carrying either can narrow it
+    further once one is confirmed to exist.
     """
     payload = {
         "agent": args.agent,
@@ -728,8 +742,7 @@ def write_manifest(path, args, base_version, temp_version, s):
         "cassette_id": s.get("cassette"),
         "server_url": args.server_url,
         "tools": "stubbed — no ConnectWise request, no write performed",
-        "replayed_utc": _dt.datetime.now(_dt.timezone.utc)
-                           .replace(microsecond=0).isoformat(),
+        "replayed_utc": _utcnow(),
         "replay_session": s.get("session"),
         "session_honoured": s.get("session_honoured"),
         "matched_prefix": s.get("matched_prefix"),
@@ -738,6 +751,7 @@ def write_manifest(path, args, base_version, temp_version, s):
         "first_divergence": s.get("first_divergence"),
         "suggested_eval_name": f"replay-{args.agent}-v{base_version}",
     }
+    payload.update(run or {})
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=1, ensure_ascii=False)
@@ -959,6 +973,8 @@ def main(argv=None):
               f"(clone of {base_version})")
 
         session = None
+        run_ids = {"agent_session_id": None, "response_id": None,
+                   "started_utc": _utcnow()}
         try:
             # VersionRefIndicator, not VersionIndicator: the latter is the
             # abstract discriminated base and takes no version at all. The
@@ -968,9 +984,11 @@ def main(argv=None):
                 version_indicator=models.VersionRefIndicator(
                     agent_version=str(temp_version)))
             session_id = getattr(session, "agent_session_id", None)
+            run_ids["agent_session_id"] = session_id
             print(f"session {session_id} — query: {str(query)[:70]}")
 
-            invoke_agent(client, args.agent, session_id, query)
+            response = invoke_agent(client, args.agent, session_id, query)
+            run_ids["response_id"] = getattr(response, "id", None)
         finally:
             if session is not None:
                 try:
@@ -985,10 +1003,12 @@ def main(argv=None):
             # After the version, not before: a version naming a toolbox that
             # no longer exists is a worse thing to leave behind than either.
             teardown_binding(binding)
+            run_ids["finished_utc"] = _utcnow()
 
         s = read_journal(server_url if not args.serve else base, args.token,
                          replay_session)
-        write_manifest(args.manifest, args, base_version, temp_version, s)
+        write_manifest(args.manifest, args, base_version, temp_version, s,
+                       run_ids)
         ok, text = verdict(s, args.min_matched_prefix)
         print("\nREPLAY")
         print(text)

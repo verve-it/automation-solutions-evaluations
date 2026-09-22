@@ -212,6 +212,20 @@ baseline, writes the table into `$GITHUB_STEP_SUMMARY`, and creates the run in
 Foundry → Evaluation. `needs:` in the calling workflow is what makes it a gate
 rather than a dashboard.
 
+Two things the gate must not do, both of which look like they work:
+
+- **Export by the clock.** The project also serves real traffic, so a flat
+  `--hours 1` scores whatever else ran in that hour as part of this agent
+  change's verdict. `run_replay.py` records `started_utc`/`finished_utc` in
+  its manifest and the gate exports that window; with no manifest it refuses
+  rather than widening.
+- **Publish the export.** A workflow artifact in a **public** repository is
+  downloadable by anyone, and `scrub_trace.py` is propose → human review →
+  apply, so it cannot be dropped into CI. Neither `agent-gate.yml` nor the
+  nightly drift job uploads raw spans or the Foundry dataset. Verdicts,
+  journals (which replay the already-scrubbed cassettes) and the Foundry run
+  are the record.
+
 `run_evals.py` gates on **regression vs baseline** by default and takes
 `--min-score` / `--min-check-score` for an absolute floor. They compose. Only
 `GATING` checks are held to the floor — a reporting check failing must not
