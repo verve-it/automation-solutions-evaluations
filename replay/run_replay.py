@@ -127,6 +127,64 @@ def summary(base, token=None, session=None):
 
 # ------------------------------------------------------------------- binding
 
+def agent_version_details(agents, name, version=None):
+    """The AgentVersionDetails, which is what carries `definition`.
+
+    `agents.get(name)` returns AgentDetails -- the agent, not a version of it
+    -- and it has no `definition`. The versions hang off it, and the one to
+    clone is `versions.latest` unless a version was named.
+    """
+    if version:
+        return agents.get_version(name, version)
+    details = agents.get(name)
+    latest = getattr(getattr(details, "versions", None), "latest", None)
+    if latest is None:
+        raise RuntimeError(
+            f"agent {name!r} has no versions to clone "
+            f"({type(details).__name__} carried none)")
+    return latest
+
+
+def invoke_agent(client, name, session_id, query):
+    """Run the agent so the replay actually happens.
+
+    A session binds a run to an agent version; it does not run anything. The
+    run goes through the agent's own OpenAI-compatible endpoint, which
+    `get_openai_client(agent_name=...)` returns.
+
+    How a response is pinned to an existing session is the one part of this
+    chain not confirmed against the SDK offline -- `responses.create` has no
+    session parameter, so the id is passed through `extra_body`, which is how
+    an OpenAI client carries anything the schema does not name. If the service
+    ignores or rejects it, the replay still ran against the temporary version;
+    the journal on the replay server is the record either way, and that is
+    what the verdict is computed from.
+    """
+    try:
+        openai_client = client.get_openai_client(agent_name=name)
+    except Exception as exc:
+        print(f"\nWARNING  could not open the agent endpoint: {exc}")
+        print("WARNING  the agent was not invoked, so the journal below is "
+              "whatever was already there.")
+        return None
+
+    extra = {"agent_session_id": session_id} if session_id else {}
+    try:
+        response = openai_client.responses.create(
+            model="", input=query, extra_body=extra)
+        print("invoked; response id "
+              f"{getattr(response, 'id', '?')}")
+        return response
+    except Exception as exc:
+        print(f"\nWARNING  invoke failed: {type(exc).__name__}: "
+              f"{str(exc)[:200]}")
+        print("WARNING  the temporary version was still created and is still "
+              "cleaned up. If this is a schema complaint about "
+              "agent_session_id, the session is bound to the version already "
+              "and the id may not need passing at all.")
+        return None
+
+
 def read_journal(base, token, session):
     """The journal for this replay, whichever bucket it landed in.
 
@@ -221,19 +279,53 @@ def cassette_agent(cassette_path):
     return agents[0], agents
 
 
+def _py():
+    """`python` on Windows, `python3` elsewhere.
+
+    Printing a command the reader cannot run is the same bug as `openssl` and
+    `export` were: correct advice for the wrong machine.
+    """
+    return "python" if os.name == "nt" else "python3"
+
+
+def _runner():
+    return ".\\tasks.ps1 cassettes" if os.name == "nt" else "make cassettes"
+
+
 def cassette_query(cassette_path):
-    """The input the recorded run was given, so the replay asks the same thing."""
+    """The input the recorded run was given, so the replay asks the same thing.
+
+    Retyping it is not equivalent. A slightly different question produces a
+    divergence the gate scores as the agent's, which is the failure this
+    whole apparatus exists to avoid.
+    """
     with open(cassette_path, encoding="utf-8") as fh:
         data = json.load(fh)
     for key in ("query", "input", "prompt"):
         if data.get(key):
             return data[key]
+
+    # A cassette built before make_cassette.py recorded the input has no
+    # `query` key at all; one built since, from a recording with no user
+    # message on its invoke span, has the key set to null. Same symptom, two
+    # different fixes, and telling them apart costs one `in`.
+    if "query" not in data:
+        raise SystemExit(
+            f"{os.path.basename(cassette_path)} predates the recording of "
+            "agent input, so it carries no query.\n\n"
+            "Cassettes are derived from the committed traces -- rebuild "
+            f"them:\n    {_runner()}\n\n"
+            f"(or `{_py()} replay/make_cassette.py traces/<trace>.json -o "
+            "cassettes` for one.)")
+
     inter = data.get("interactions") or []
     raise SystemExit(
-        f"{cassette_path} carries no recorded query "
-        f"({len(inter)} interactions). make_cassette.py records the tool "
-        "exchange; the agent input has to come from --query or from the "
-        "replay set.")
+        f"{os.path.basename(cassette_path)} was rebuilt but its recording "
+        f"carries no user input ({len(inter)} interactions).\n\n"
+        "make_cassette.py takes the query from gen_ai.input.messages on the "
+        "entry agent's invoke_agent span. A trace exported without that "
+        "attribute has nothing to take, so pass --query with the input the "
+        "run was given.")
 
 
 # ---------------------------------------------------------------- reporting
@@ -415,13 +507,16 @@ def main(argv=None):
         from azure.ai.projects import AIProjectClient, models
         from azure.identity import DefaultAzureCredential
 
+        # allow_preview is what lets get_openai_client() point at an agent's
+        # own endpoint, which is how a prompt agent is invoked.
         client = AIProjectClient(endpoint=args.project_endpoint,
-                                 credential=DefaultAzureCredential())
+                                 credential=DefaultAzureCredential(),
+                                 allow_preview=True)
         agents = client.agents
 
         try:
-            base_version = (agents.get_version(args.agent, args.agent_version)
-                            if args.agent_version else agents.get(args.agent))
+            base = agent_version_details(agents, args.agent,
+                                         args.agent_version)
         except Exception as exc:
             # "Not found" is not a useful answer when the caller did not
             # choose the name in the first place.
@@ -433,11 +528,11 @@ def main(argv=None):
             sys.exit(f"cannot read agent {args.agent!r}: {exc}\n"
                      + (f"\nAgents in this project:\n  "
                         + "\n  ".join(known) if known else ""))
-        definition = cloned_definition(base_version, server_url, models,
-                                       args.token, replay_session)
 
-        base_version = (getattr(base_version, "version", None)
-                        or args.agent_version or "latest")
+        definition = cloned_definition(base, server_url, models,
+                                       args.token, replay_session)
+        base_version = getattr(base, "version", None) or "latest"
+
         temp = agents.create_version(
             agent_name=args.agent,
             definition=definition,
@@ -449,15 +544,28 @@ def main(argv=None):
         print(f"created temporary version {temp_version} "
               f"(clone of {base_version})")
 
+        session = None
         try:
+            # VersionRefIndicator, not VersionIndicator: the latter is the
+            # abstract discriminated base and takes no version at all. The
+            # field is agent_version.
             session = agents.create_session(
                 agent_name=args.agent,
-                version_indicator=models.VersionIndicator(version=temp_version))
-            print(f"session {getattr(session, 'id', '?')} — query: {str(query)[:80]}")
-            print("\nNOTE: driving the session to completion is the one step "
-                  "this script cannot verify offline. If the SDK surface "
-                  "differs, the session object above is what to drive.")
+                version_indicator=models.VersionRefIndicator(
+                    agent_version=str(temp_version)))
+            session_id = getattr(session, "agent_session_id", None)
+            print(f"session {session_id} — query: {str(query)[:70]}")
+
+            invoke_agent(client, args.agent, session_id, query)
         finally:
+            if session is not None:
+                try:
+                    agents.stop_session(args.agent,
+                                        getattr(session, "agent_session_id"))
+                except Exception:
+                    # A session that will not stop is not a reason to leave a
+                    # temporary agent version behind.
+                    pass
             agents.delete_version(args.agent, temp_version)
             print(f"deleted temporary version {temp_version}")
 
