@@ -312,6 +312,7 @@ evaluator-versions.json   the registered versions a run pins
 baselines/                frozen results — COMMIT THESE
 traces/                   raw exports, dated, scrubbed, committed
 tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
+Makefile / tasks.ps1      the same shortcuts, for bash and PowerShell
 tests/                    unit tests + frozen-set replay
 docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
                           MCP-SERVER-FINDINGS, HISTORY-PURGE, CREDENTIALS,

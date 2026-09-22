@@ -373,7 +373,11 @@ def test_a_cassette_without_a_query_says_so_rather_than_inventing_one():
         path = fh.name
     with pytest.raises(SystemExit) as exc:
         rr.cassette_query(path)
-    assert "no recorded query" in str(exc.value)
+    # Never a fabricated input: replaying a question the recording did not
+    # ask produces a divergence the gate blames on the agent.
+    message = str(exc.value)
+    assert "no query" in message
+    assert "make cassettes" in message
 
 
 def test_divergence_alone_is_not_failure():
@@ -518,14 +522,33 @@ def test_cassette_records_the_agent_and_the_query():
     assert built[0]["agents"][0] == "triage-orchestrator"
 
 
-def test_a_cassette_without_a_recorded_query_says_so(tmp_path):
+def test_a_stale_cassette_says_to_rebuild(tmp_path):
+    """Built before make_cassette recorded the input: no `query` key at all.
+
+    The fix is `make cassettes`, not --query, and the difference matters --
+    typing the query by hand replays a question the recording did not ask.
+    """
     import run_replay
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"orchestration_id": "op", "agents": ["a"],
-                                "interactions": [], "recorded": "x"}))
+                                "interactions": [1, 2], "recorded": "x"}))
     with pytest.raises(SystemExit) as exc:
         run_replay.cassette_query(str(path))
-    assert "carries no recorded query" in str(exc.value)
+    assert "make cassettes" in str(exc.value)
+
+
+def test_a_rebuilt_cassette_with_no_input_says_something_else(tmp_path):
+    """`query` present and null: the trace itself carried no user message."""
+    import run_replay
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"orchestration_id": "op", "agents": ["a"],
+                                "interactions": [1, 2], "recorded": "x",
+                                "query": None}))
+    with pytest.raises(SystemExit) as exc:
+        run_replay.cassette_query(str(path))
+    message = str(exc.value)
+    assert "make cassettes" not in message
+    assert "--query" in message
 
 
 def test_the_entry_agent_comes_from_the_cassette(tmp_path):
@@ -543,3 +566,188 @@ def test_the_entry_agent_comes_from_the_cassette(tmp_path):
                                 "interactions": [], "recorded": "x"}))
     with pytest.raises(SystemExit):
         run_replay.cassette_agent(str(bare))
+
+
+def test_exporter_double_encoding_is_undone():
+    """Within one export, one orchestration's input arrived double-encoded.
+
+    The two orchestrations in 2026-09-03-full-triage.json are the same flow.
+    One carried a real newline (0x0a), the other the characters `\\`, `\\`,
+    `n`. Replaying the second verbatim asks a different question than
+    production was asked, and the gate scores the difference as the agent's.
+    """
+    double = "entityType=ticket" + chr(92) * 2 + "nentityId=805392"
+    repaired, rounds = mc.repair_escaping(double)
+    assert rounds == 1
+    assert repaired == "entityType=ticket\nentityId=805392"
+
+    single = "entityType=ticket" + chr(92) + "nentityId=805392"
+    assert mc.repair_escaping(single)[0] == "entityType=ticket\nentityId=805392"
+
+
+def test_text_that_is_not_an_encoding_artefact_is_left_alone():
+    """Narrow on purpose: rewriting real content would change the question."""
+    already = "entityType=ticket\nentityId=805392"
+    assert mc.repair_escaping(already) == (already, 0)
+
+    # A backslash-n mentioned in prose, alongside real line breaks.
+    prose = "use " + chr(92) + "n to break lines\nsecond line"
+    assert mc.repair_escaping(prose) == (prose, 0)
+
+
+def test_an_unescaped_query_does_not_make_a_cassette_lossy():
+    """`lossy` means a truncated RESULT -- a fixture the agent reasons over.
+
+    build.py refuses to package a lossy cassette, so conflating the two would
+    have blocked the deployment over a whitespace repair.
+    """
+    spans = [
+        span("invoke_agent", "a", ts="2026-09-03T17:00:00.000Z",
+             gen_ai__operation__name="invoke_agent",
+             gen_ai__input__messages=json.dumps([
+                 {"role": "user", "parts": [{"type": "text",
+                                             "content": "one" + chr(92) * 2
+                                                        + "ntwo"}]}])),
+    ]
+    spans += tool_call("cw_get_ticket", "a", args={"n": 1}, result="{}",
+                       ts="2026-09-03T17:00:10.000Z")
+    built = mc.build(spans)[0]
+    assert built["query"] == "one\ntwo"
+    assert built["query_unescaped_rounds"] == 1
+    assert built["lossy"] is False
+    assert built["warnings"] == []
+
+
+def test_every_tracked_python_file_compiles_without_warnings():
+    """The class of bug my own test runs could not see.
+
+    An invalid escape sequence is a SyntaxWarning on Python 3.12 and a hidden
+    DeprecationWarning on 3.11, so a docstring containing a stray backslash
+    printed a warning on the machine running the gate and nothing on the one
+    that wrote it. pytest did not catch it either: it imports through cached
+    bytecode, which is not recompiled.
+
+    compile() with warnings as errors surfaces it on every version, which is
+    what this does. It is a whole-repo check because the next one will be in a
+    different file.
+    """
+    import subprocess
+    import warnings
+
+    listed = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO,
+                            capture_output=True, text=True)
+    files = [f for f in listed.stdout.split() if f]
+    assert files, "git ls-files found no python files"
+
+    offenders = []
+    for name in files:
+        with open(os.path.join(REPO, name), encoding="utf-8") as fh:
+            source = fh.read()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            try:
+                compile(source, name, "exec")
+            except SyntaxWarning as exc:
+                offenders.append(f"{name}: {exc}")
+            except SyntaxError as exc:
+                # 3.11 escalates the warning into a SyntaxError under
+                # simplefilter("error"); a real syntax error would have failed
+                # the import long before this test ran.
+                offenders.append(f"{name}:{exc.lineno}: {exc.msg}")
+
+    assert not offenders, "\n".join(offenders)
+
+
+# ---------------------------------------------- the SDK shapes, against the SDK
+
+def test_the_definition_comes_from_a_version_not_the_agent():
+    """`agents.get(name)` returns the agent, which has no definition.
+
+    This is what failed on the first real run:
+        AttributeError: 'AgentDetails' object has no attribute 'definition'
+    The definition hangs off AgentVersionDetails, reached through
+    `versions.latest` or `get_version`.
+    """
+    class Definition:
+        def as_dict(self):
+            return {"model": "gpt-5", "tools": [{"type": "mcp"}]}
+
+    class VersionDetails:
+        version = "7"
+        definition = Definition()
+
+    class Versions:
+        latest = VersionDetails()
+
+    class AgentDetails:            # deliberately has no `definition`
+        name = "triage-orchestrator"
+        versions = Versions()
+
+    class Agents:
+        def __init__(self):
+            self.asked = None
+
+        def get(self, name):
+            return AgentDetails()
+
+        def get_version(self, name, version):
+            self.asked = (name, version)
+            return VersionDetails()
+
+    agents = Agents()
+    latest = rr.agent_version_details(agents, "triage-orchestrator")
+    assert latest.definition.as_dict()["model"] == "gpt-5"
+
+    pinned = rr.agent_version_details(agents, "triage-orchestrator", "3")
+    assert agents.asked == ("triage-orchestrator", "3")
+    assert pinned.version == "7"
+
+
+def test_an_agent_with_no_versions_says_so():
+    class Agents:
+        def get(self, name):
+            return type("AgentDetails", (), {"versions": None})()
+
+    with pytest.raises(RuntimeError) as exc:
+        rr.agent_version_details(Agents(), "nameless")
+    assert "no versions" in str(exc.value)
+
+
+def test_the_session_indicator_is_the_concrete_one():
+    """VersionIndicator is the abstract base and takes no version at all.
+
+    run_replay built `VersionIndicator(version=...)`, which the SDK rejects
+    outright -- the concrete class is VersionRefIndicator and its field is
+    `agent_version`. Asserted against the installed SDK rather than a fake, so
+    a shape change in the SDK fails here rather than on someone's first run.
+    """
+    models = pytest.importorskip("azure.ai.projects.models")
+
+    indicator = models.VersionRefIndicator(agent_version="7")
+    assert indicator.as_dict() == {"agent_version": "7", "type": "version_ref"}
+
+    with pytest.raises(TypeError):
+        models.VersionIndicator(version="7")
+
+    source = _read_source(rr)
+    assert "VersionRefIndicator" in source
+    assert "VersionIndicator(version=" not in source
+
+
+def test_create_version_takes_definition_as_a_keyword():
+    """Checked against the real signature, because two siblings did not."""
+    operations = pytest.importorskip("azure.ai.projects.operations")
+    import inspect
+
+    signature = inspect.signature(operations.AgentsOperations.create_version)
+    assert "definition" in signature.parameters
+    assert signature.parameters["definition"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    session_signature = inspect.signature(
+        operations.AgentsOperations.create_session)
+    assert "version_indicator" in session_signature.parameters
+
+
+def _read_source(module):
+    import inspect
+    return inspect.getsource(module)

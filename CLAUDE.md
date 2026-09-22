@@ -148,6 +148,10 @@ remote build, and the whole server is stdlib.
   cost a deploy cycle here and put a wrong explanation into five documents.
   When the log is out of reach, say so and ask for it -- that is one message,
   where a guess is a round trip.
+- **Half this repo's users are on PowerShell.** `openssl`, `export`, `make`
+  and `python3` have each blocked a run by being named in advice that could
+  not be followed. `tasks.ps1` mirrors the Makefile; messages that print a
+  command branch on `os.name`.
 - **Make the failure carry its own evidence.** Cheaper than another round
   trip: print the interpreter, the path, and the directory listing, so the
   next occurrence names itself.

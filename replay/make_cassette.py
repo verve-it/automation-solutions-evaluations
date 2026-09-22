@@ -114,6 +114,47 @@ def mcp_protocol_version(spans):
     return found
 
 
+# Enough rounds to undo a double encoding and stop. Not a loop until stable:
+# text that keeps looking escaped after this is not an encoding artefact, it
+# is content, and rewriting it would change the question.
+MAX_UNESCAPE_ROUNDS = 3
+
+
+def repair_escaping(text):
+    r"""Undo App Insights double-encoding a message, if that is what happened.
+
+    Within ONE export, one orchestration's input arrives with real newlines
+    (0x0a) and another's with the two characters `\` and `n` -- in the case
+    that prompted this, with two backslashes, having been encoded twice. The
+    exporter is inconsistent, not the agent.
+
+    It matters because the query is what the replay asks. Replaying
+    `entityType=ticket\\nentityId=805392` when production was given a real
+    newline asks a different question, and the gate scores the difference as
+    the agent's.
+
+    The condition is narrow on purpose: text that already contains a newline
+    is left alone, so a query that legitimately mentions a backslash-n is only
+    touched when it has no real line breaks at all. Returns the rounds applied
+    so the caller can say so rather than fixing it quietly.
+    """
+    rounds = 0
+    while ("\n" not in text and rounds < MAX_UNESCAPE_ROUNDS
+           and "\\n" in text):
+        # Longest first: two backslashes then n is one encoding layer, and
+        # stripping the short form first would leave a stray backslash.
+        if "\\\\n" in text:
+            text = (text.replace("\\\\r\\\\n", "\n")
+                        .replace("\\\\n", "\n")
+                        .replace("\\\\t", "\t"))
+        else:
+            text = (text.replace("\\r\\n", "\n")
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t"))
+        rounds += 1
+    return text, rounds
+
+
 def recorded_query(spans):
     """{op_id: the text the entry agent was given}.
 
@@ -141,7 +182,8 @@ def recorded_query(spans):
                 for part in (message.get("parts") or [])
                 if part.get("type") == "text")
             if text.strip():
-                found[s["op_id"]] = text
+                repaired, rounds = repair_escaping(text)
+                found[s["op_id"]] = (repaired, rounds)
                 break
     return found
 
@@ -197,7 +239,10 @@ def build(spans):
             "schema": CASSETTE_SCHEMA,
             "cassette_version": CASSETTE_VERSION,
             "mcp_protocol_version": protocols.get(op_id),
-            "query": queries.get(op_id),
+            "query": (queries.get(op_id) or (None, 0))[0],
+            # Recorded rather than fixed quietly: the query is what the replay
+            # asks, so a change to it belongs in the file and in the output.
+            "query_unescaped_rounds": (queries.get(op_id) or (None, 0))[1],
             "orchestration_id": op_id,
             "recorded": op_spans[0]["timestamp"],
             "agents": agents,
@@ -239,6 +284,9 @@ def main():
     for c in cassettes:
         name = f"{c['recorded'][:10]}-{c['orchestration_id'][:12]}.json"
         path = os.path.join(args.out, name)
+        # `lossy` means a truncated RESULT -- a corrupted fixture the agent
+        # would reason over. An unescaped query is neither corrupt nor a
+        # reason to refuse the cassette, so it is reported on its own line.
         flag = "LOSSY" if c["lossy"] else "ok   "
         detail = (f"{len(c['interactions']):>3} interactions, "
                   f"{c['writes']} write(s), {len(c['agents'])} agent(s)")
@@ -251,6 +299,10 @@ def main():
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(c, fh, ensure_ascii=False, indent=1)
         print(f"  {flag} {name}  {detail}")
+        if c.get("query_unescaped_rounds"):
+            print(f"          NOTE  the exporter escaped the recorded input "
+                  f"{c['query_unescaped_rounds']} time(s) over; unescaped, so "
+                  "the replay asks what the agent was given")
         for w in c["warnings"]:
             print(f"          WARNING {w}")
         written += 1

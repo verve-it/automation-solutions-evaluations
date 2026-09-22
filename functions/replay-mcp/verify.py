@@ -227,8 +227,8 @@ def run_diagnosis(resource_group):
     if not resource_group:
         print("\n  Pass -g <resource-group> and this runs the diagnosis for "
               "you. On its own:\n"
-              "    python3 functions/replay-mcp/diagnose.py -g "
-              "<resource-group>")
+              f"    {'python' if os.name == 'nt' else 'python3'} "
+              "functions/replay-mcp/diagnose.py -g <resource-group>")
         return
     script = os.path.join(HERE, "diagnose.py")
     print(f"\n=== diagnosing {resource_group} ===", flush=True)
@@ -339,7 +339,8 @@ def main(argv=None):
     if missing_locally:
         print("no local recording to compare against, skipped: "
               + ", ".join(missing_locally))
-        print("  (run `make cassettes`)")
+        print("  (run `.\\tasks.ps1 cassettes`)" if os.name == "nt"
+              else "  (run `make cassettes`)")
 
     if failures:
         print("FAILED")
