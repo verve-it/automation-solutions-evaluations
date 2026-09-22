@@ -27,7 +27,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -135,10 +137,20 @@ def replay(client, cassette_id, recording, verbose=False):
             writes += 1
 
     summary = client.summary(cassette_id, session)
-    if summary.get("replayed_calls") != len(recording["interactions"]):
+    replayed = len(recording["interactions"])
+    journalled = summary.get("replayed_calls")
+    if journalled != replayed:
+        # The journal is the replay state. Losing most of it means the calls
+        # went to instances that could not see each other's cursor -- so the
+        # queue positions were wrong too, which is what the mismatches are.
+        # Ordering is the whole reason a cassette is a queue and not a
+        # dictionary, so this is a failed gate, not a reporting glitch.
         problems.append(
-            f"journal has {summary.get('replayed_calls')} calls, replayed "
-            f"{len(recording['interactions'])}")
+            f"journal has {journalled} calls, replayed {replayed} — replay "
+            "state is not shared between instances. Each one kept its own "
+            "cursor, so a call could be answered with the first recorded "
+            "response where a later one was due. Ordering is the gate; "
+            "without shared state the result cannot be trusted.")
     if summary.get("diverged"):
         problems.append(f"{summary['diverged']} call(s) diverged")
 
@@ -169,6 +181,60 @@ def check_isolation(client, cassette_id, recording):
     return []
 
 
+def wait_for_health(client, seconds):
+    """Poll until the server answers, or until it is fair to call it broken.
+
+    A remote build finishes *after* the publish command returns, and a Flex
+    Consumption app that has scaled to zero takes time to come back. Reporting
+    either as a failure sends someone to read logs about a server that was
+    only starting. So wait, and say what it is doing while waiting.
+
+    Returns (health, None) or (None, why it failed).
+    """
+    deadline = time.monotonic() + max(seconds, 0)
+    waited = False
+    while True:
+        try:
+            return client.health(), None
+        except urllib.error.HTTPError as exc:
+            transient = exc.code in (502, 503, 504)
+            detail = f"health check returned {exc.code}: {exc.reason}"
+        except Exception as exc:
+            transient = True
+            detail = f"cannot reach {client.base}: {exc}"
+
+        if not transient or time.monotonic() >= deadline:
+            if transient:
+                detail += (f"\n  Still not answering after {seconds}s. The "
+                           "Functions host is up and the handler is not.")
+            return None, detail
+
+        if not waited:
+            print(f"waiting for the server to come up (up to {seconds}s) — "
+                  "a remote build finishes after the publish returns",
+                  flush=True)
+            waited = True
+        time.sleep(5)
+
+
+def run_diagnosis(resource_group):
+    """Print the handler's own output rather than a command to get it.
+
+    Without a resource group there is nothing to run, and printing a command
+    with `<resource-group>` still in it is what made the last round trip a
+    round trip. Say which flag would have answered it instead.
+    """
+    if not resource_group:
+        print("\n  Pass -g <resource-group> and this runs the diagnosis for "
+              "you. On its own:\n"
+              "    python3 functions/replay-mcp/diagnose.py -g "
+              "<resource-group>")
+        return
+    script = os.path.join(HERE, "diagnose.py")
+    print(f"\n=== diagnosing {resource_group} ===", flush=True)
+    subprocess.run([sys.executable, script, "-g", resource_group])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -183,29 +249,21 @@ def main(argv=None):
                     help="check only this one; repeatable")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print every mismatch")
+    ap.add_argument("-g", "--resource-group",
+                    help="run the diagnosis automatically if the server never "
+                         "answers, instead of printing a command to run next")
+    ap.add_argument("--wait", type=int, default=180,
+                    help="seconds to let the server finish starting before "
+                         "calling it broken (default 180). 0 checks once.")
     args = ap.parse_args(argv)
 
     client = Client(args.base_url, args.token)
 
-    try:
-        health = client.health()
-    except urllib.error.HTTPError as exc:
-        if exc.code in (502, 503):
-            return _fail(
-                f"health check returned {exc.code}: {exc.reason}\n"
-                "  The Functions host is up but the handler is not answering "
-                "on its port.\n"
-                "  Either it is still starting (remote build finishes after "
-                "the publish returns),\n"
-                "  or it crashed. What it printed on the way down is the "
-                "diagnosis:\n\n"
-                "    az monitor app-insights query -g <rg> --app <name>-replay-ai \\\n"
-                "      --analytics-query \"traces | where timestamp > ago(30m) "
-                "| project timestamp, message | order by timestamp desc | "
-                "take 50\"")
-        return _fail(f"health check returned {exc.code}: {exc.reason}")
-    except Exception as exc:
-        return _fail(f"cannot reach {args.base_url}: {exc}")
+    health, problem = wait_for_health(client, args.wait)
+    if problem:
+        _fail(problem)
+        run_diagnosis(args.resource_group)
+        return 1
 
     remote = health.get("cassettes") or []
     print(f"server    : {args.base_url}")
@@ -264,6 +322,19 @@ def main(argv=None):
                             "back different")
         failures.extend(f"{cassette_id}: {p}" for p in problems)
 
+    backend = None
+    try:
+        backend = client.health().get("state")
+    except Exception:
+        pass
+    if backend:
+        print(f"\nstate after replaying: {backend}")
+        if backend == "MemoryStore":
+            print("  In-process, not blob storage. Ordering holds only while "
+                  "one instance serves the whole run, and Flex Consumption "
+                  "does not promise that. The handler logs why the blob "
+                  "store was not used.")
+
     print()
     if missing_locally:
         print("no local recording to compare against, skipped: "
@@ -274,6 +345,11 @@ def main(argv=None):
         print("FAILED")
         for failure in failures:
             print(f"  {failure}")
+        # Any failure, not only a server that never answered. A wrong answer
+        # needs the handler's own output just as much as a missing one, and
+        # printing a command to fetch it is the round trip this exists to
+        # remove.
+        run_diagnosis(args.resource_group)
         return 1
 
     if not checked:

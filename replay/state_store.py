@@ -34,6 +34,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.error
+import urllib.request
+from urllib.parse import quote
 
 
 class Conflict(Exception):
@@ -63,6 +66,86 @@ class MemoryStore:
             nxt = 1 if current is None else current[1] + 1
             self._data[key] = (json.loads(json.dumps(state)), nxt)
             return nxt
+
+    def close(self):
+        pass
+
+
+class SasBlobStore:
+    """Blob state over plain HTTPS, with a container SAS. No SDK, no build.
+
+    `azure-storage-blob` is not importable in a custom handler. Oryx installs
+    it into `.python_packages/lib/site-packages`, which the Functions *Python
+    worker* adds to `sys.path` -- but a custom handler is `python server.py`
+    and gets none of that setup. The handler logged exactly that:
+
+        ModuleNotFoundError: No module named 'azure'
+
+    The blob REST API needs no SDK. Signing it would, so the signature is
+    minted once at deploy time as a container SAS and handed over as a URL;
+    everything here is urllib and json. That also takes `--build-remote` out
+    of the deployment: with nothing to install, there is nothing to install
+    wrongly.
+
+    The SAS is a secret, container-scoped and time-limited -- narrower than
+    the account key it replaces.
+    """
+
+    TIMEOUT = 15
+
+    def __init__(self, container_url):
+        base, _, query = container_url.partition("?")
+        self._base = base.rstrip("/")
+        self._query = query
+        if not self._query:
+            raise ValueError("REPLAY_STATE_SAS carries no SAS token")
+        self._probe()
+
+    def _url(self, key):
+        return f"{self._base}/{quote(key, safe='')}.json?{self._query}"
+
+    def _probe(self):
+        """A 404 is the success case: reachable, and the SAS authenticates.
+
+        Finding out on the first tools/call of a replay instead would make a
+        configuration mistake look like a mid-run failure of the agent.
+        """
+        try:
+            self._request("GET", self._url("__probe__"))
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+
+    def _request(self, method, url, body=None, headers=None):
+        request = urllib.request.Request(url, data=body, method=method,
+                                         headers=headers or {})
+        return urllib.request.urlopen(request, timeout=self.TIMEOUT)
+
+    def load(self, key):
+        try:
+            with self._request("GET", self._url(key)) as response:
+                payload = json.loads(response.read() or b"{}")
+                return payload, response.headers.get("ETag")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None, None
+            raise
+
+    def save(self, key, state, version):
+        body = json.dumps(state, ensure_ascii=False).encode("utf-8")
+        headers = {"x-ms-blob-type": "BlockBlob",
+                   "Content-Type": "application/json"}
+        # The conditional header is the whole point: two instances answering
+        # one replay means the ordering this gate depends on is already
+        # broken, and a silent last-writer-wins would hide it.
+        headers["If-Match" if version else "If-None-Match"] = version or "*"
+        try:
+            with self._request("PUT", self._url(key), body, headers) as resp:
+                return resp.headers.get("ETag")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (409, 412):
+                raise Conflict(key) from exc
+            raise
 
     def close(self):
         pass
@@ -218,7 +301,8 @@ except Exception:                       # pragma: no cover - local runs
     _MATCH_ETAG = None
 
 
-def open_store(account_url=None, container=None, connection_string=None):
+def open_store(account_url=None, container=None, connection_string=None,
+               sas_url=None):
     """A BlobStore when told where to put things, a MemoryStore otherwise.
 
     Deliberately not an error when unconfigured: `func start` on a laptop
@@ -232,11 +316,13 @@ def open_store(account_url=None, container=None, connection_string=None):
     carry on, and let the health endpoint report which backend is live so the
     verifier can say so too.
     """
-    if not (container and (account_url or connection_string)):
+    if not (sas_url or (container and (account_url or connection_string))):
         return MemoryStore()
 
     def resolve():
         try:
+            if sas_url:
+                return SasBlobStore(sas_url)
             return BlobStore(account_url, container,
                              connection_string=connection_string)
         except Exception as exc:

@@ -13,7 +13,7 @@ import pytest
 
 import make_cassette as mc
 import replay_server as rs
-from conftest import tool_call, REPO
+from conftest import span, tool_call, REPO
 
 
 # --- keying -----------------------------------------------------------------
@@ -431,3 +431,115 @@ def test_the_manifest_records_what_the_deleted_version_cannot(tmp_path):
     assert payload["suggested_eval_name"].endswith("v82")
     assert "87" not in payload["suggested_eval_name"]
     assert json.loads(out.read_text())["base_version"] == "82"
+
+
+# --- staying migratable -----------------------------------------------------
+
+def test_a_cassette_declares_a_schema_identifier():
+    """Microsoft ships no MCP record/replay format. Four independent projects
+    do -- mcp-replay, mcpcassette, mcp-cassette, Agent VCR -- and all of them
+    put a schema id in a meta header. A converter needs something to branch
+    on, and a file that does not say what it is cannot be recognised later."""
+    spans = mc.load_spans(os.path.join(REPO, "traces",
+                                       "2026-09-03-full-triage.json"))
+    cassettes = mc.build(spans)
+    assert cassettes
+    for c in cassettes:
+        assert c["schema"] == "verve/mcp-cassette@1"
+        assert c["cassette_version"] == 1
+
+
+def test_the_recorded_mcp_protocol_version_is_captured():
+    """The OTel MCP conventions are at Development stability with no
+    versioned release to pin against, so the protocol version the recording
+    saw is the only fixed point a future reader has."""
+    spans = mc.load_spans(os.path.join(REPO, "traces",
+                                       "2026-09-03-full-triage.json"))
+    for c in mc.build(spans):
+        assert c["mcp_protocol_version"] == "2025-11-25"
+
+
+def test_the_protocol_version_is_read_from_initialize_not_tool_spans():
+    """It is carried on `initialize`, which the cassette is not built from.
+    Looking only at tool spans silently yields None."""
+    spans = mc.load_spans(os.path.join(REPO, "traces",
+                                       "2026-09-03-full-triage.json"))
+    carriers = {s["name"].split()[0] for s in spans
+                if s["d"].get("mcp.protocol.version")}
+    assert carriers == {"initialize"}
+    assert not any(mc.is_tool_span(s) for s in spans
+                   if s["d"].get("mcp.protocol.version"))
+
+
+def test_an_app_insights_mangled_protocol_version_is_trimmed():
+    """MCP protocol versions are plain dates. App Insights stores
+    2025-11-25 as 2025-11-25T00:00:00.0000000Z."""
+    spans = [{"op_id": "op1", "d": {"mcp.protocol.version":
+                                    "2025-11-25T00:00:00.0000000Z"}}]
+    assert mc.mcp_protocol_version(spans) == {"op1": "2025-11-25"}
+
+
+def test_a_plain_version_is_left_alone():
+    spans = [{"op_id": "op1", "d": {"mcp.protocol.version": "2025-11-25"}},
+             {"op_id": "op2", "d": {"mcp.protocol.version": "draft"}}]
+    got = mc.mcp_protocol_version(spans)
+    assert got == {"op1": "2025-11-25", "op2": "draft"}
+
+
+def test_cassette_records_the_agent_and_the_query():
+    """A replay should need the cassette and a URL, nothing else.
+
+    The agent name and the input are both part of the recording. Asking a
+    caller to retype the query invites replaying a slightly different question
+    than the one recorded, which is a divergence the gate would blame on the
+    agent.
+    """
+    spans = [
+        span("invoke_agent", "triage-orchestrator", ts="2026-09-03T17:00:00.000Z",
+             gen_ai__operation__name="invoke_agent",
+             gen_ai__input__messages=json.dumps([
+                 {"role": "system", "parts": [{"type": "text",
+                                               "content": "you are an agent"}]},
+                 {"role": "user", "parts": [{"type": "text",
+                                             "content": "triage 805392"}]}])),
+        span("invoke_agent", "triage-analysis-agent", ts="2026-09-03T17:00:05.000Z",
+             gen_ai__operation__name="invoke_agent",
+             gen_ai__input__messages=json.dumps([
+                 {"role": "user", "parts": [{"type": "text",
+                                             "content": "hand-off, not the ask"}]}])),
+    ]
+    spans += tool_call("cw_get_ticket", "triage-orchestrator",
+                       args={"ticket_number": 805392}, result="{}",
+                       ts="2026-09-03T17:00:10.000Z")
+
+    built = mc.build(spans)
+    assert len(built) == 1
+    assert built[0]["query"] == "triage 805392"
+    assert built[0]["agents"][0] == "triage-orchestrator"
+
+
+def test_a_cassette_without_a_recorded_query_says_so(tmp_path):
+    import run_replay
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"orchestration_id": "op", "agents": ["a"],
+                                "interactions": [], "recorded": "x"}))
+    with pytest.raises(SystemExit) as exc:
+        run_replay.cassette_query(str(path))
+    assert "carries no recorded query" in str(exc.value)
+
+
+def test_the_entry_agent_comes_from_the_cassette(tmp_path):
+    import run_replay
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({
+        "orchestration_id": "op", "recorded": "x", "interactions": [],
+        "agents": ["triage-orchestrator", "connectwise-operations-agent"]}))
+    entry, everyone = run_replay.cassette_agent(str(path))
+    assert entry == "triage-orchestrator"
+    assert everyone[1] == "connectwise-operations-agent"
+
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"orchestration_id": "op", "agents": [],
+                                "interactions": [], "recorded": "x"}))
+    with pytest.raises(SystemExit):
+        run_replay.cassette_agent(str(bare))

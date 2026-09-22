@@ -36,6 +36,8 @@ Configuration, all through app settings
     REPLAY_TOOL_DEFS        tool manifest directory (default: ./tool_manifests)
     REPLAY_TOKEN            require `Authorization: Bearer <token>`
     REPLAY_ON_EXHAUSTED     repeat | diverge   (default: repeat)
+    REPLAY_STATE_SAS        container URL with a SAS — the one that needs no
+                            SDK, and so no build step
     REPLAY_STATE_ACCOUNT    https://<account>.blob.core.windows.net
     REPLAY_STATE_CONNECTION storage connection string, where nobody could
                             assign the identity a role
@@ -59,6 +61,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Everything the server serves, in one file at the package root. The platform
+# keeps root files and drops directories, so a directory in the package is a
+# 502 waiting to happen.
+PAYLOAD_NAME = "replay_payload.json"
+
+
+# Oryx installs dependencies into .python_packages/lib/site-packages, and the
+# Functions *Python worker* is what puts that on sys.path. A custom handler is
+# `python server.py` and gets none of that setup, which is why the app logged
+# `ModuleNotFoundError: No module named 'azure'` with the package plainly
+# deployed. Nothing here needs a dependency any more, but an installed one
+# should be usable rather than invisible.
+_ORYX = os.path.join(HERE, ".python_packages", "lib", "site-packages")
+if os.path.isdir(_ORYX) and _ORYX not in sys.path:
+    sys.path.append(_ORYX)
 
 
 def _package_listing(root, limit=60):
@@ -138,6 +156,13 @@ class Config:
     def __init__(self, env=None):
         env = env or os.environ
         get = lambda k, d=None: (env.get(k) or d)          # noqa: E731
+        # One flat file beside server.py, because a subdirectory does not
+        # survive the deployment: the Oryx repackage keeps files at the
+        # package root and drops directories. lib/ went that way, and then
+        # tool_manifests/ did. Directories are still the local layout, so
+        # both are read.
+        self.payload = get("REPLAY_PAYLOAD",
+                           os.path.join(HERE, PAYLOAD_NAME))
         self.cassette_dir = get("REPLAY_CASSETTE_DIR",
                                 os.path.join(HERE, "cassettes"))
         self.tool_defs = get("REPLAY_TOOL_DEFS",
@@ -145,19 +170,63 @@ class Config:
         self.default_cassette = get("REPLAY_CASSETTE")
         self.token = get("REPLAY_TOKEN")
         self.on_exhausted = get("REPLAY_ON_EXHAUSTED", "repeat")
+        self.state_sas = get("REPLAY_STATE_SAS")
         self.state_account = get("REPLAY_STATE_ACCOUNT")
         self.state_connection = get("REPLAY_STATE_CONNECTION")
         self.state_container = get("REPLAY_STATE_CONTAINER")
         self.port = int(get("FUNCTIONS_CUSTOMHANDLER_PORT", "8000"))
 
 
-def cassette_ids(directory):
-    if not os.path.isdir(directory):
-        return []
-    return sorted(f[:-5] for f in os.listdir(directory) if f.endswith(".json"))
+class Source:
+    """Where the cassettes and the tool manifests come from.
+
+    A deployed package is flat: `replay_payload.json` beside server.py holds
+    every cassette and every manifest, because the platform drops
+    subdirectories and a missing one is a 502 with a stack trace in it.
+
+    A checkout is not flat -- cassettes/ and tool_manifests/ are real
+    directories there and `make cassettes` writes into them -- so the payload
+    is preferred when present and the directories are used when it is not.
+    One shape for deployment, one for development, one reader.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.payload = None
+        if os.path.isfile(config.payload):
+            with open(config.payload, encoding="utf-8") as fh:
+                self.payload = json.load(fh)
+
+    @property
+    def origin(self):
+        return (f"payload {os.path.basename(self.config.payload)}"
+                if self.payload else f"directories under {HERE}")
+
+    def cassette_ids(self):
+        if self.payload is not None:
+            return sorted(self.payload.get("cassettes") or {})
+        directory = self.config.cassette_dir
+        if not os.path.isdir(directory):
+            return []
+        return sorted(f[:-5] for f in os.listdir(directory)
+                      if f.endswith(".json"))
+
+    def cassette(self, cassette_id):
+        if self.payload is not None:
+            return (self.payload.get("cassettes") or {}).get(cassette_id)
+        path = os.path.join(self.config.cassette_dir, f"{cassette_id}.json")
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def manifests(self):
+        if self.payload is not None:
+            return list(self.payload.get("tool_manifests") or [])
+        return load_tool_manifests([self.config.tool_defs])
 
 
-def resolve_cassette_id(config, from_path):
+def resolve_cassette_id(config, source, from_path):
     """URL wins, then the app setting, then the only one in the package.
 
     Falling back to "the only one" is not cleverness: a deployment carrying a
@@ -169,7 +238,7 @@ def resolve_cassette_id(config, from_path):
         return from_path
     if config.default_cassette:
         return config.default_cassette
-    available = cassette_ids(config.cassette_dir)
+    available = source.cassette_ids()
     return available[0] if len(available) == 1 else None
 
 
@@ -180,18 +249,17 @@ class Library:
     the cursor and journal are per-session, and those live in the store.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, source=None):
         self.config = config
-        self.manifests = load_tool_manifests([config.tool_defs])
+        self.source = source or Source(config)
+        self.manifests = self.source.manifests()
         self._cache = {}
 
     def get(self, cassette_id):
         if cassette_id not in self._cache:
-            path = os.path.join(self.config.cassette_dir, f"{cassette_id}.json")
-            if not os.path.isfile(path):
+            data = self.source.cassette(cassette_id)
+            if data is None:
                 return None
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
             tools, missing = tool_definitions(
                 Cassette(data, self.config.on_exhausted), self.manifests)
             self._cache[cassette_id] = (data, tools, missing)
@@ -258,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"error": "unauthorized"}, 401)
             return self._summary(parts, query)
         self._send({"status": "ok", "mode": "replay",
-                    "cassettes": cassette_ids(self.config.cassette_dir),
+                    "cassettes": self.library.source.cassette_ids(),
                     "writes": "never performed",
                     # Which backend the replay state actually got. `unresolved`
                     # until the first tools/call, `MemoryStore` if blob storage
@@ -281,12 +349,13 @@ class Handler(BaseHTTPRequestHandler):
         index = len(parts) - 1 - parts[::-1].index("summary")
         tail = parts[index + 1] if index + 1 < len(parts) else None
         cassette_id = resolve_cassette_id(
-            self.config, query.get("cassette", [None])[0] or tail)
+            self.config, self.library.source,
+            query.get("cassette", [None])[0] or tail)
         if cassette_id is None:
             return self._send({"error": "no_cassette", "message":
                                "name a cassette: /summary/<cassette-id>",
-                               "available": cassette_ids(
-                                   self.config.cassette_dir)}, 404)
+                               "available":
+                                   self.library.source.cassette_ids()}, 404)
         cassette, _tools = self.library.cassette(cassette_id)
         if cassette is None:
             return self._send({"error": "unknown_cassette",
@@ -309,12 +378,13 @@ class Handler(BaseHTTPRequestHandler):
             index = len(parts) - 1 - parts[::-1].index("mcp")
             if index + 1 < len(parts):
                 from_path = parts[index + 1]
-        cassette_id = resolve_cassette_id(self.config, from_path)
+        cassette_id = resolve_cassette_id(self.config, self.library.source,
+                                          from_path)
         if cassette_id is None:
             return self._send({"error": "no_cassette", "message":
                                "set REPLAY_CASSETTE or name one in the URL",
-                               "available": cassette_ids(
-                                   self.config.cassette_dir)}, 404)
+                               "available":
+                                   self.library.source.cassette_ids()}, 404)
 
         length = int(self.headers.get("Content-Length") or 0)
         try:
@@ -371,7 +441,7 @@ def main():
     Handler.config = config
     Handler.library = library
     Handler.store = open_store(config.state_account, config.state_container,
-                               config.state_connection)
+                               config.state_connection, config.state_sas)
 
     # Printed before anything can go wrong, so App Insights shows how far
     # start-up got even when it does.
@@ -382,16 +452,16 @@ def main():
     print(f"package   : {', '.join(_package_listing(HERE, limit=25))}",
           flush=True)
 
-    available = cassette_ids(config.cassette_dir)
-    print(f"cassettes : {len(available)} in {config.cassette_dir}")
+    available = library.source.cassette_ids()
+    print(f"source    : {library.source.origin}")
+    print(f"cassettes : {len(available)}")
     if not available:
         # A server with no cassettes answers 404 to every replay, which reads
         # like the gate found nothing rather than like a broken deployment.
         # Say it once, loudly, with the evidence.
         print("WARNING   no cassettes. Every replay will 404. The package "
-              "listing above is what actually arrived; if cassettes/ is "
-              "missing from it, the build or the deployment dropped it.",
-              flush=True)
+              f"listing above is what actually arrived; {PAYLOAD_NAME} "
+              "should be in it.", flush=True)
     for cid in available:
         entry = library.get(cid)
         if entry:

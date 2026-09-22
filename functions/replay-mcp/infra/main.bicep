@@ -72,6 +72,9 @@ param onExhausted string = 'repeat'
 @allowed(['identity', 'connectionString'])
 param storageAuth string = 'identity'
 
+@description('When the replay-state SAS expires. Minted at deploy time; redeploy to roll it. A year keeps a gate from failing on a Tuesday for a reason nobody remembers.')
+param stateSasExpiry string = dateTimeAdd(utcNow(), 'P1Y')
+
 param tags object = {
   workload: 'agent-eval'
   component: 'replay-mcp'
@@ -97,6 +100,23 @@ var useIdentity = storageAuth == 'identity'
 // nothing reads it.
 var storageKey = storage.listKeys().keys[0].value
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storageKey};EndpointSuffix=${environment().suffixes.storage}'
+
+// A container-scoped SAS, so the replay server can keep its state over plain
+// HTTPS with no SDK -- azure-storage-blob is not importable in a custom
+// handler, because Oryx installs it where only the Python *worker* looks. The
+// SAS is narrower than the account key it replaces: one container, read and
+// write, and it expires.
+//
+// Minted here rather than signed in the server: signing needs a crypto
+// implementation and the account key at runtime, and this needs neither.
+var stateSasToken = storage.listServiceSas('2023-05-01', {
+  canonicalizedResource: '/blob/${storage.name}/${stateContainer}'
+  signedResource: 'c'
+  signedPermission: 'rwdl'
+  signedProtocol: 'https'
+  signedExpiry: stateSasExpiry
+}).serviceSasToken
+var stateSasUrl = '${storage.properties.primaryEndpoints.blob}${stateContainer}?${stateSasToken}'
 
 // The identity is created either way, and the app carries it either way, so
 // that every expression below stays valid whichever branch is taken. ARM
@@ -266,6 +286,8 @@ resource site 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AzureWebJobsStorage', value: storageConnectionString }
         { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: storageConnectionString }
         { name: 'REPLAY_STATE_CONNECTION', value: storageConnectionString }
+        // The one that works without a dependency, so it is tried first.
+        { name: 'REPLAY_STATE_SAS', value: stateSasUrl }
       ])
     }
   }

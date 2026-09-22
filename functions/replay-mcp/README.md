@@ -39,8 +39,13 @@ python3 functions/replay-mcp/verify.py https://<app>.azurewebsites.net \
     --token "$REPLAY_TOKEN"
 ```
 
-It replays every deployed cassette from the local copy of the same recording
-and checks the four things the gate rests on: every recorded call comes back
+It waits up to 180 seconds for the server to come up first (`--wait`), because
+a remote build finishes *after* the publish command returns and a Flex app
+that scaled to zero takes time to come back — reporting either as a failure
+sends you to read logs about a server that was only starting.
+
+Then it replays every deployed cassette from the local copy of the same
+recording and checks the four things the gate rests on: every recorded call comes back
 byte-identical, writes are replayed as recorded successes, the advertised
 schemas still carry their enums, and two sessions do not consume each other's
 queue. Exits non-zero on any of them, so it can gate a deployment.
@@ -106,7 +111,7 @@ reopen the decision rather than deleting the test.
 |---|---|
 | `server.py` | the handler. Routing, auth, sessions, state. |
 | `host.json` | `mcp-custom-handler` profile; runs `python server.py` on port 8000 |
-| `build.py` | assembles `.build/` — rebuilds the cassettes, copies the shared modules and manifests |
+| `build.py` | assembles `.build/` — flat, one `replay_payload.json`, no directories |
 | `build.sh` | wrapper, so `make replay-package` keeps working |
 | `deploy.sh` / `deploy.ps1` | `az deployment group create` then package deployment |
 | `infra/rbac.bicep` | the role assignment alone, for whoever can make one |
@@ -114,6 +119,20 @@ reopen the decision rather than deleting the test.
 | `diagnose.py` | when it is not serving: state, settings, and the handler's own output |
 | `infra/main.bicep` | storage, Log Analytics, App Insights, FC1 plan, function app, identity, RBAC |
 | `infra/main.bicepparam` | the knobs |
+
+### The package is flat, and that is not tidiness
+
+`.build/` contains **no directories**. The deployment keeps files at the root
+of `wwwroot` and drops subdirectories: `lib/` went that way first, and once it
+was flattened `tool_manifests/` went the same way — each time as a 502 with a
+stack trace behind it and a round trip to find out.
+
+So every cassette and every tool manifest is in one file,
+`replay_payload.json`, beside `server.py`. `build.py` asserts the package has
+no directories before it finishes. A checkout still has `cassettes/` and
+`tool_manifests/` as real directories — `make cassettes` writes into them — so
+`Source` reads the payload when it is there and the directories when it is
+not. One reader, both shapes.
 
 **Nothing in `.build/` is authored.** `mcp_core.py`, `state_store.py`,
 `make_cassette.py` and `trace_to_eval.py` are copied from the one place each
@@ -124,6 +143,11 @@ this repo gates on. `tests/test_replay_hosting.py` asserts the local server and
 this one are the *same functions*, not two that agree today.
 
 ### When it answers 502
+
+**The deploy already ran the diagnostic for you.** If the publish ends with the
+app unhealthy, `deploy.sh` and `deploy.ps1` run `diagnose.py` themselves and
+print the handler's own output — handing over a command to run next is two
+round trips where one would do.
 
 The Functions host is up and the handler is not answering on its port. That is
 all a 502 says — it looks identical whether the process crashed, never
@@ -201,7 +225,8 @@ cassette, which is the old single-process behaviour rather than a failure.
 | `REPLAY_CASSETTE_DIR` | default `./cassettes` |
 | `REPLAY_TOOL_DEFS` | default `./tool_manifests` |
 | `REPLAY_ON_EXHAUSTED` | `repeat` (default) or `diverge` |
-| `REPLAY_STATE_ACCOUNT` | blob endpoint for replay state |
+| `REPLAY_STATE_SAS` | container URL with a SAS — the path that needs no SDK |
+| `REPLAY_STATE_ACCOUNT` | blob endpoint for replay state (SDK path) |
 | `REPLAY_STATE_CONTAINER` | container for replay state |
 
 Bicep sets all of these. Clear the last two and state stays in the process,
@@ -214,6 +239,38 @@ Azure CLI accepts **one** parameter source per deployment: a `.bicepparam`
 file *or* inline parameters, never both. Environment variables are how a
 parameter file stays parameterised, and they read the same from bash and
 PowerShell.
+
+---
+
+## Replay state uses no SDK, and the deployment does no build
+
+`azure-storage-blob` is **not importable in a custom handler.** Oryx installs
+it into `.python_packages/lib/site-packages`, which the Functions *Python
+worker* puts on `sys.path` — and a custom handler is `python server.py` with
+none of that setup. The deployed app said so plainly:
+
+```
+WARNING  replay state could not use blob storage: ModuleNotFoundError: No module named 'azure'
+```
+
+That is why the journal came back with 3 of 50 calls in it: the store had
+degraded to in-process, every instance kept its own cursor, and calls were
+answered with the first recorded response where a later one was due.
+
+So state goes over the **blob REST API with a container SAS**, minted at
+deploy time by `infra/main.bicep` and handed to the app as
+`REPLAY_STATE_SAS`. Signing would need crypto and the account key at runtime;
+a SAS needs neither, so the store is `urllib` and `json`. The SAS is narrower
+than the account key it replaces: one container, read and write, and it
+expires — `stateSasExpiry`, a year by default. Redeploy to roll it.
+
+`requirements.txt` is therefore empty and the deployment asks for **no remote
+build**. A build that installs packages where nothing looks is worse than no
+build: it succeeds, and the app is still missing its dependency.
+
+`server.py` does add `.python_packages/lib/site-packages` to `sys.path` when
+it exists, so a dependency that does get installed is usable rather than
+invisible. Nothing needs one today.
 
 ---
 

@@ -234,6 +234,31 @@ is preview-flagged, and we set the flag because the sample does. Worth it -- a
 preview flag is a smaller problem than a stub that cannot advertise an enum --
 but it is a trade.
 
+### A replay takes the cassette and a URL
+
+```
+python3 replay/run_replay.py \
+    --cassette cassettes/<cassette-id>.json \
+    --server-url https://<app>.azurewebsites.net/mcp/<cassette-id> \
+    --token "$REPLAY_TOKEN" --dry-run
+```
+
+**Not the agent name, and not the query.** Both are in the recording:
+`agents[0]` is the entry agent and `query` is what it was given. Asking a
+caller to retype the query invites replaying a slightly different question
+than the one recorded, and the gate would score the difference as the agent's.
+
+A cassette with several agents replays by running its **entry** agent. The
+children are reached over A2A, which `make_cassette.py` deliberately leaves
+out of the toolbox, so each child is replayed as its own agent run rather than
+answered from the cassette.
+
+`AZURE_AI_PROJECT_ENDPOINT` is the one thing the caller supplies, and it is
+not deployed with the replay server on purpose: traffic is one way. Foundry
+calls the replay server; the server never calls Foundry, so the value would be
+dead config in the function app. CI already holds it as a GitHub Actions
+variable on the staging and production environments.
+
 ### State, and why it is not in the process
 
 `Cassette.cursor` is a per-key queue position: the same call appears several
