@@ -203,6 +203,22 @@ overrides it and says what that means. The two single-agent cassettes
 orchestrations needs the children addressable by version, which is the agent
 code's decision, not this script's.
 
+## Gating a deployment
+
+`.github/workflows/agent-gate.yml` is a **reusable** workflow (`workflow_call`)
+because the agents merge in another repository. It verifies the replay server,
+replays every single-agent cassette against stubbed tools, scores against the
+baseline, writes the table into `$GITHUB_STEP_SUMMARY`, and creates the run in
+Foundry → Evaluation. `needs:` in the calling workflow is what makes it a gate
+rather than a dashboard.
+
+`run_evals.py` gates on **regression vs baseline** by default and takes
+`--min-score` / `--min-check-score` for an absolute floor. They compose. Only
+`GATING` checks are held to the floor — a reporting check failing must not
+block a deploy. A check result is `{"passed": True|False|None}`; `None` means
+the check did not apply and is excluded from its denominator, never counted as
+either verdict.
+
 ## Working agreements
 
 - **Patches, not pushes.** Deliver a `git format-patch` file. Do not push.

@@ -8,7 +8,7 @@ trace_to_eval.py and prints pass/fail per run plus a summary.
     python3 trace_to_eval.py spans.json -o ./out
     python3 run_evals.py ./out/eval_runs.jsonl
     python3 run_evals.py ./out/eval_runs.jsonl --expected expected.json \
-                         --baseline baselines/full-triage-2026-09-16.json \
+                         --baseline baselines/full-triage-2026-09-18.json \
                          --json artifacts/run.json
 
 Every check here is computable from the trace alone. They exist because each
@@ -566,6 +566,125 @@ def print_diff(regressions, fixes, lost, new_runs, missing):
     print()
 
 
+def score_rates(rows):
+    """Overall pass rate, and each check's rate over the runs it applied to.
+
+    A check is tri-state: True, False, or None for "did not apply" --
+    `cost_latency` with no thresholds set, `valid_tool_args` with no schema
+    for the tool. Counting None as either verdict is wrong in both
+    directions, so it is excluded from that check's denominator and reported
+    separately.
+
+    The row-level verdict comes from GATING only; the other checks report
+    without blocking. A summary that mixed them would show a red build
+    alongside a check that had nothing to do with it.
+    """
+    total = len(rows)
+    overall = (sum(1 for r in rows if r["passed"]) / total) if total else 0.0
+
+    tally = {}
+    for row in rows:
+        for name, result in (row.get("checks") or {}).items():
+            verdict = (result or {}).get("passed")
+            passed, applied, skipped = tally.get(name, (0, 0, 0))
+            if verdict is None:
+                tally[name] = (passed, applied, skipped + 1)
+            else:
+                tally[name] = (passed + (1 if verdict else 0), applied + 1,
+                               skipped)
+
+    per_check = {name: {"rate": (p / a if a else None), "applied": a,
+                        "skipped": s, "gating": name in GATING}
+                 for name, (p, a, s) in tally.items()}
+    return overall, per_check
+
+
+def print_thresholds(rows, min_score, min_check_score):
+    """Absolute floors. Returns True if any was missed."""
+    overall, per_check = score_rates(rows)
+    failed = False
+
+    if min_score is not None:
+        ok = overall >= min_score
+        failed |= not ok
+        print(f"\nthreshold  overall {overall:.1%} "
+              f"{'>=' if ok else '<'} {min_score:.1%}  "
+              f"{'ok' if ok else 'FAIL'}")
+
+    if min_check_score is not None:
+        # Only gating checks can fail a build, so only they are held to the
+        # floor. Holding a reporting check to it would fail a deploy for
+        # something the gate itself does not treat as a failure.
+        short = {n: c["rate"] for n, c in per_check.items()
+                 if c["gating"] and c["rate"] is not None
+                 and c["rate"] < min_check_score}
+        failed |= bool(short)
+        print(f"threshold  each gating check >= {min_check_score:.1%}  "
+              f"{'ok' if not short else 'FAIL'}")
+        for name, rate in sorted(short.items(), key=lambda kv: kv[1]):
+            print(f"             {name:<22} {rate:.1%}")
+    return failed
+
+
+def write_summary(path, rows, baseline_path, min_score, min_check_score):
+    """A table a builder can read when the build is red.
+
+    An exit code says a gate failed; it does not say which check, on how many
+    runs, or whether it was already failing. That is the difference between a
+    red build someone fixes and a red build someone reruns.
+
+    Appends, because $GITHUB_STEP_SUMMARY accumulates across steps.
+    """
+    overall, per_check = score_rates(rows)
+    passing = sum(1 for r in rows if r["passed"])
+    lines = ["## Agent evaluation", ""]
+    lines.append(f"**{passing} of {len(rows)} runs passed every gating check "
+                 f"— {overall:.0%}**")
+    if min_score is not None:
+        lines.append(f"Threshold {min_score:.0%} — "
+                     f"**{'PASS' if overall >= min_score else 'FAIL'}**")
+
+    lines += ["", "| Check | Gates? | Pass rate | Failing | N/A |",
+              "|---|---|---|---|---|"]
+    for name, c in sorted(per_check.items(),
+                          key=lambda kv: (not kv[1]["gating"],
+                                          kv[1]["rate"] is None,
+                                          kv[1]["rate"] or 0)):
+        rate = "n/a" if c["rate"] is None else f"{c['rate']:.0%}"
+        if (min_check_score is not None and c["gating"]
+                and c["rate"] is not None and c["rate"] < min_check_score):
+            rate += " :warning:"
+        failing = sum(1 for r in rows
+                      if ((r.get("checks") or {}).get(name)
+                          or {}).get("passed") is False)
+        lines.append(f"| `{name}` | {'yes' if c['gating'] else 'no'} | "
+                     f"{rate} | {failing} | {c['skipped']} |")
+
+    failing_rows = [r for r in rows if not r["passed"]]
+    if failing_rows:
+        lines += ["", "### Runs that failed a gating check", "",
+                  "| Agent | Intent | Failed |", "|---|---|---|"]
+        for row in failing_rows[:25]:
+            bad = ", ".join(f"`{n}`" for n in (row.get("failed_gating") or []))
+            lines.append(f"| {row.get('run_agent', '?')} | "
+                         f"{row.get('intent') or '?'} | {bad} |")
+        if len(failing_rows) > 25:
+            lines.append(f"| … | | {len(failing_rows) - 25} more |")
+
+    lines += ["", "Checks marked *no* report but never fail the build. "
+                  "`n/a` means the check did not apply to that run — no "
+                  "schema for the tool, or no threshold configured."]
+    if baseline_path:
+        lines.append(f"Compared against `{os.path.basename(baseline_path)}`: "
+                     "a run that was already failing does not fail the build, "
+                     "a regression does.")
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("jsonl", help="eval_runs.jsonl from trace_to_eval.py")
@@ -577,6 +696,19 @@ def main():
                     help="uncached input + output per run; unset = track only")
     ap.add_argument("--max-duration-ms", type=int,
                     help="wall clock per run; unset = track only")
+    ap.add_argument("--min-score", type=float, metavar="FRACTION",
+                    help="fail unless at least this fraction of runs pass "
+                         "every check. An absolute floor, for gating a "
+                         "deployment; --baseline gates on regression instead, "
+                         "and the two compose.")
+    ap.add_argument("--min-check-score", type=float, metavar="FRACTION",
+                    help="fail unless EACH check passes on at least this "
+                         "fraction of runs. Catches one check collapsing "
+                         "while the overall rate stays high.")
+    ap.add_argument("--summary", metavar="PATH",
+                    help="write a markdown summary here — point it at "
+                         "$GITHUB_STEP_SUMMARY so a red build shows the "
+                         "scores instead of only the exit code.")
     ap.add_argument("--allow-lost-coverage", action="store_true",
                     help="do not fail when a check that used to score now "
                          "skips (use when intentionally retiring a check)")
@@ -604,6 +736,15 @@ def main():
         failed_diff = bool(regressions) or bool(lost and
                                                 not args.allow_lost_coverage)
 
+    failed_threshold = False
+    if args.min_score is not None or args.min_check_score is not None:
+        failed_threshold = print_thresholds(rows, args.min_score,
+                                            args.min_check_score)
+
+    if args.summary:
+        write_summary(args.summary, rows, args.baseline, args.min_score,
+                      args.min_check_score)
+
     if args.json:
         parent = os.path.dirname(os.path.abspath(args.json))
         os.makedirs(parent, exist_ok=True)
@@ -615,6 +756,11 @@ def main():
     # run that was already failing stays failing without blocking unrelated
     # work. Gate on delta while known issues are open, or the suite is red
     # permanently and people route around it.
+    # A threshold and a baseline answer different questions -- "is this good
+    # enough to ship" and "is this worse than last time" -- so either can fail
+    # the build and neither overrides the other.
+    if failed_threshold:
+        return 1
     if args.baseline:
         return 1 if failed_diff else 0
     return 0 if all(r["passed"] for r in rows) else 1
