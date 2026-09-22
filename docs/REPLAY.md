@@ -234,6 +234,85 @@ is preview-flagged, and we set the flag because the sample does. Worth it -- a
 preview flag is a smaller problem than a stub that cannot advertise an enum --
 but it is a trade.
 
+### Binding is per agent kind
+
+A replay points the agent at the replay server. Where that binding lives
+depends on what kind of agent it is, so `run_replay.py` handles each kind
+explicitly rather than assuming one shape:
+
+| Kind | Where the tools are | How a replay rebinds it |
+|---|---|---|
+| `prompt`, `voice` | `tools` in the definition | swap `tools`, copy every other field verbatim |
+| `hosted` | inside the uploaded code | set an environment variable, re-upload the **same code bytes** |
+| `workflow`, `external` | neither | refused by name |
+
+Every triage agent in this project is **hosted** — `--describe` says so — so
+the hosted path is the one that matters, not an edge case.
+
+For a hosted agent the clone differs from its base version by exactly the
+variables named and nothing else: `download_code` returns the current bytes
+and they go straight back through `create_version_from_code`. That is the same
+guarantee the prompt path gives by copying every other field.
+
+### How these agents actually bind, and why that is lucky
+
+`--inspect-code` reported every hosted agent in this project reading
+`CONNECTWISE_TOOLBOX_NAME`, `CONNECTWISE_TOOLBOX_VERSION` and
+`CONNECTWISE_TOOLBOX_AUTH_SCOPE`, with `ai.azure.com` as the only host in the
+code. They resolve a **Foundry toolbox by name** and hold no endpoint.
+
+So the replay creates a toolbox whose one tool points at the replay server,
+names it in the clone's environment, runs, and deletes it. **No code change,
+and the agent cannot tell the difference.** The bearer token and session go in
+the *toolbox's* headers rather than the agent's environment, because Foundry
+is what calls the replay server.
+
+A toolbox left behind would answer a real agent with recorded data, so
+teardown runs even when the agent version is never created, and a failure to
+delete one is reported rather than swallowed.
+
+### An orchestration is refused
+
+The orchestrator reaches its children **by name**. A name resolves to that
+child's own default version, whose environment still points at the real
+ConnectWise toolbox — so a replay of an orchestration would stub the
+orchestrator and send every child's calls, **including writes**, to the live
+service, with nothing in the journal to show for it.
+
+`run_replay.py` refuses a multi-agent cassette and names the single-agent ones
+that do replay fully stubbed. `--allow-live-children` overrides it and says
+plainly what that costs.
+
+### Checking what an agent reads
+
+That is a fact about the code, and the code is downloadable:
+
+```
+python3 replay/run_replay.py --describe                      # kinds and tools
+python3 replay/run_replay.py --describe --inspect-code       # what the code reads
+```
+
+`--inspect-code` downloads a hosted agent's zip, reports which environment
+variables its Python reads and which hosts it names, and saves nothing. Only
+the shape is printed — not the source, and no values.
+
+If the code reads nothing from the environment, the endpoint is fixed in the
+code and a replay needs a code change rather than a variable. `--inspect-code`
+says that in as many words.
+
+Name the variable once it is known:
+
+```
+python3 replay/run_replay.py --cassette ... --server-url ... \
+    --replay-env-var CONNECTWISE_MCP_URL
+```
+
+Defaults are tried when none is given (`CONNECTWISE_MCP_URL`,
+`MCP_SERVER_URL`, `REPLAY_MCP_URL`) and the token and session go alongside as
+`REPLAY_MCP_TOKEN` and `REPLAY_MCP_SESSION`. Those are defaults, not
+assumptions — setting a variable nothing reads changes nothing, which is why
+`--inspect-code` exists.
+
 ### A replay takes the cassette and a URL
 
 ```

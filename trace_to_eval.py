@@ -32,13 +32,32 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 # Agents that are run boundaries. A tool call whose name matches one of these
-# is an A2A hand-off, not an ordinary tool. Extend as you add agents.
-AGENT_NAMES = {
-    "triage-orchestrator",
-    "triage-analysis-agent",
-    "connectwise-operations-agent",
-    "triage-evaluation-agent",
-}
+# is an A2A hand-off, not an ordinary tool -- and an agent missing from the
+# set has its hand-off scored as a tool call and its run collapsed into its
+# caller's, silently.
+#
+# So the set is no longer written down here. It comes from eval-config.json,
+# and `learn_agents()` adds every agent the trace itself names, because an
+# agent that appears in a recording is an agent whether or not anyone
+# remembered to list it. Kept as a module global because several scripts
+# import it; `learn_agents` is what keeps it honest.
+import evalconfig
+
+AGENT_NAMES = evalconfig.agent_names()
+
+
+def learn_agents(spans):
+    """The configured agents plus every agent this trace names. Returns; does
+    not assign.
+
+    Deliberately not a mutation of AGENT_NAMES. A global that conversion
+    rewrites makes every later read depend on which trace was converted first
+    -- which is an order dependence in the code, not just in the tests, and
+    `scrub_trace.protected_vocabulary()` reads this set to decide what must
+    never be redacted. It should not matter what ran before it.
+    """
+    seen = {s["d"].get(K_AGENT) for s in spans if s.get("d")}
+    return evalconfig.agent_names(seen=seen)
 
 # gen_ai attribute keys
 K_AGENT      = "gen_ai.agent.name"
@@ -500,7 +519,7 @@ def unwrap_call_tool(name, args):
     return inner_name, inner_args, True
 
 
-def tool_step(s):
+def tool_step(s, agents=None):
     d = s["d"]
     args = d.get(K_TOOL_ARGS, "") or ""
     res = d.get(K_TOOL_RES, "") or ""
@@ -519,7 +538,11 @@ def tool_step(s):
         "error_kind": kind,
         "empty": is_empty_result(res),
         "errored": kind is not None,
-        "is_a2a": name in AGENT_NAMES,
+        # `agents` is the set this trace actually showed, when the caller
+        # worked it out. Falling back to the configured set keeps every
+        # existing caller working; passing it is what makes a new agent's
+        # hand-off a hand-off on the first run rather than the second.
+        "is_a2a": name in (AGENT_NAMES if agents is None else agents),
         "success": s["success"],
         "duration_ms": s["duration"],
     }
@@ -755,6 +778,9 @@ def resolve_tool_definitions(span_defs, toolboxes, manifests):
 
 def convert(spans, manifests=None):
     manifests = manifests or []
+    # The agents that ran are in the trace; threaded through rather than
+    # written to a global, so nothing downstream depends on call order.
+    agents = learn_agents(spans)
     by_op = defaultdict(list)
     for s in spans:
         by_op[s["op_id"]].append(s)
@@ -775,7 +801,7 @@ def convert(spans, manifests=None):
         # read the intent off its caller's hand-off.
         steps_by_agent = {}
         for agent, aspans in by_agent.items():
-            steps = [tool_step(s) for s in aspans if is_tool_span(s)]
+            steps = [tool_step(s, agents) for s in aspans if is_tool_span(s)]
             steps.sort(key=lambda st: st["timestamp"])
             steps_by_agent[agent] = steps
         inbound = inbound_intents(steps_by_agent)

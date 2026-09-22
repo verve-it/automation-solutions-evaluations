@@ -1,0 +1,27 @@
+{
+  "_comment": "Facts about THIS project. evalconfig.py explains why each is here rather than in a script.",
+
+  "_agents": "The trace is the source of truth; these only cover an export that missed one.",
+  "agents": [
+    "triage-orchestrator",
+    "triage-analysis-agent",
+    "triage-evaluation-agent",
+    "connectwise-operations-agent",
+    "VerveOS"
+  ],
+
+  "_write_tools": "cw_patch was in the old hard-coded set and does not exist. Eight tools that plainly mutate were missing from it. Prefixes cover the family so a new cw_set_* or cw_update_* is a write the day it appears.",
+  "write_tools": {
+    "names": ["cw_create", "cw_update", "cw_delete"],
+    "prefixes": ["cw_create", "cw_update", "cw_delete", "cw_set", "cw_log",
+                 "cw_copy", "cw_convert", "cw_apply"]
+  },
+
+  "_toolbox_env": "What the hosted agents' code reads to find their toolbox, per --inspect-code.",
+  "toolbox_env": {
+    "name": "CONNECTWISE_TOOLBOX_NAME",
+    "version": "CONNECTWISE_TOOLBOX_VERSION"
+  },
+
+  "replay_tool_label": "connectwise_replay"
+}

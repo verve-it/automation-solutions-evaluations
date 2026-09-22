@@ -40,7 +40,8 @@ import argparse, json, os, sys
 from collections import defaultdict
 
 from trace_to_eval import (AGENT_NAMES, K_AGENT, base_tool_name, is_tool_span,
-                           load_spans, tool_step)
+                           learn_agents, load_spans, load_tool_manifests,
+                           tool_step)
 
 CASSETTE_VERSION = 1
 
@@ -64,10 +65,19 @@ K_MCP_PROTO = "mcp.protocol.version"
 # it invites asking a slightly different question than the one recorded.
 K_IN_MSGS = "gen_ai.input.messages"
 
-# Tools that change ConnectWise. Flagged so the replay server can assert the
-# agent attempted the same writes while performing none of them.
-WRITE_TOOLS = {"cw_create", "cw_update", "cw_update_ticket", "cw_delete",
-               "cw_patch"}
+# Which tools change the system under test is a fact about that system, not
+# about replaying, so it comes from eval-config.json and from what the MCP
+# server says about itself -- `annotations.readOnlyHint` and
+# `destructiveHint`, which the spec defines for exactly this.
+#
+# It was a set written here, and it was wrong in both directions: it named
+# cw_patch, which does not exist, and missed eight tools that plainly mutate.
+# Nothing caught it because a missed write tool is counted as a read, and the
+# gate then reports "0 writes, none performed" about a run that attempted
+# several.
+import evalconfig
+
+CONFIG = evalconfig.load()
 
 
 def canonical_args(raw):
@@ -188,8 +198,9 @@ def recorded_query(spans):
     return found
 
 
-def build(spans):
+def build(spans, manifests=()):
     """One cassette per orchestration."""
+    agents_seen = learn_agents(spans)
     protocols = mcp_protocol_version(spans)
     queries = recorded_query(spans)
     by_op = defaultdict(list)
@@ -204,7 +215,7 @@ def build(spans):
         agents = []
 
         for seq, s in enumerate(op_spans):
-            step = tool_step(s)
+            step = tool_step(s, agents_seen)
             agent = s["d"].get(K_AGENT, "")
             if agent and agent not in agents:
                 agents.append(agent)
@@ -227,7 +238,8 @@ def build(spans):
                 "arguments": _maybe_json(step["arguments"]),
                 "result": step["result"],
                 "success": step["success"],
-                "is_write": bare in WRITE_TOOLS,
+                "is_write": evalconfig.is_write_tool(bare, CONFIG,
+                                                    manifests),
                 "truncated": step["truncated"],
                 "error_kind": step["error_kind"],
                 "duration_ms": step["duration_ms"],
@@ -272,12 +284,17 @@ def main():
     ap.add_argument("spans", help="trace export (JSON or CSV)")
     ap.add_argument("-o", "--out", default="./cassettes",
                     help="output directory")
+    ap.add_argument("--tool-defs", action="append", metavar="PATH",
+                    help="tool manifest or directory. Its readOnlyHint / "
+                         "destructiveHint annotations decide which calls are "
+                         "writes, ahead of eval-config.json.")
     ap.add_argument("--strict", action="store_true",
                     help="refuse to write a cassette containing a truncated "
                          "result. Use this for anything that gates.")
     args = ap.parse_args()
 
-    cassettes = build(load_spans(args.spans))
+    cassettes = build(load_spans(args.spans),
+                      load_tool_manifests(args.tool_defs))
     os.makedirs(args.out, exist_ok=True)
 
     written, skipped = 0, 0
