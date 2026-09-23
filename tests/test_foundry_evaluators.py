@@ -269,7 +269,7 @@ def test_register_dry_run_calls_nothing(tmp_path):
          "--out", str(out)],
         cwd=REPO, check=True, capture_output=True, text=True)
     assert "nothing was called" in result.stdout
-    assert len(json.loads(out.read_text())) == len(checks.EVALUATORS)
+    assert len(json.loads(out.read_text(encoding="utf-8"))) == len(checks.EVALUATORS)
 
 
 # --- registration payload shape ---------------------------------------------
@@ -627,7 +627,7 @@ def test_lock_file_is_read_and_versions_coerced_to_strings(tmp_path):
     import run_cloud_eval
 
     lock = tmp_path / "v.json"
-    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}))
+    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}), encoding="utf-8")
     assert run_cloud_eval.load_lock(str(lock)) == {"cw_trajectory": "4",
                                                    "cw_no_dead_ends": "2"}
 

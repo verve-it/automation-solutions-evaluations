@@ -114,7 +114,7 @@ def cassette(tmp_path):
     path.write_text(json.dumps({
         "orchestration_id": "rec" + "0" * 29, "agents": [OPS], "query": "q",
         "interactions": [{"tool": f"{LABEL}___cw_query"},
-                         {"tool": "load_skill"}]}))
+                         {"tool": "load_skill"}]}), encoding="utf-8")
     return str(path)
 
 
@@ -198,7 +198,7 @@ def test_the_clone_names_the_replay_toolbox(run):
 
 def test_the_manifest_carries_what_attribution_checks(run, tmp_path):
     assert run(FakeProject()) == 0
-    m = json.loads((tmp_path / "manifest.json").read_text())
+    m = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert m["agent"] == OPS and m["replay_agent"] == REPLAY
     assert m["temp_version"] == "8" and m["replay_toolbox"][1] == "1"
     assert m["server_label"] == LABEL

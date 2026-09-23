@@ -395,4 +395,4 @@ def test_the_summary_names_what_failed(tmp_path):
     assert "`no_wasted_calls`" in text
     # Appends: $GITHUB_STEP_SUMMARY accumulates across steps.
     e.write_summary(str(path), rows, None, None, None)
-    assert path.read_text().count("## Agent evaluation") == 2
+    assert path.read_text(encoding="utf-8").count("## Agent evaluation") == 2

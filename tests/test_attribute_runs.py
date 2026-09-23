@@ -143,7 +143,7 @@ def _journal_for(recorded_op):
         subprocess.run([sys.executable, os.path.join(REPO, "trace_to_eval.py"),
                         OPS_TRACE, "-o", out, "--tool-defs", TOOL_DEFS],
                        check=True, capture_output=True)
-        for line in open(os.path.join(out, "eval_runs.jsonl")):
+        for line in open(os.path.join(out, "eval_runs.jsonl"), encoding="utf-8"):
             row = json.loads(line)
             _JOURNALS[row["orchestration_id"]] = dict(collections.Counter(
                 n.split("___", 1)[1] for n in row["tool_names"] if "___" in n))
@@ -195,8 +195,8 @@ class Window:
                   baselines=BASELINES):
         spans_path, runs = _convert(spans or self.spans, self.tmp / "window")
         if rows is not None:
-            rows = rows(json.loads(l) for l in open(runs) if l.strip())
-            with open(runs, "w") as fh:
+            rows = rows(json.loads(l) for l in open(runs, encoding="utf-8") if l.strip())
+            with open(runs, "w", encoding="utf-8") as fh:
                 fh.writelines(json.dumps(r) + "\n" for r in rows)
         paths = (manifests if manifests and isinstance(manifests[0], str)
                  else self.write_manifests(manifests))
@@ -213,7 +213,7 @@ class Window:
                         "--strict-baseline", *extra])
 
     def rows(self):
-        return [json.loads(l) for l in open(self.tmp / "replay.jsonl")]
+        return [json.loads(l) for l in open(self.tmp / "replay.jsonl", encoding="utf-8")]
 
 
 @pytest.fixture
@@ -295,7 +295,7 @@ def test_a_reporting_regression_does_not_fail_the_build(w, capsys):
     assert w.attribute() == 0
     rows = w.rows()
     rows[0]["truncated_results"] = 1
-    with open(w.tmp / "replay.jsonl", "w") as fh:
+    with open(w.tmp / "replay.jsonl", "w", encoding="utf-8") as fh:
         fh.writelines(json.dumps(r) + "\n" for r in rows)
     assert w.gate() == 0
     out = capsys.readouterr().out
@@ -362,7 +362,7 @@ def test_the_foundry_dataset_sees_the_recordings_identity(w):
                     str(w.tmp / "replay-spans.json"), "--expected", EXPECTED,
                     "--tool-defs", TOOL_DEFS, "--no-messages", "-o", str(out)],
                    check=True, capture_output=True)
-    rows = [json.loads(l) for l in open(out) if l.strip()]
+    rows = [json.loads(l) for l in open(out, encoding="utf-8") if l.strip()]
     assert len(rows) == 2
     assert all(r["tool_definitions"] and r["expected_actions"] for r in rows)
 
@@ -488,11 +488,11 @@ def test_local_tools_come_from_config_and_every_recording_of_the_agent(
     b = tmp_path / "b.json"
     other = tmp_path / "c.json"
     a.write_text(json.dumps({"agents": [OPS], "interactions": [
-        {"tool": "load_skill"}, {"tool": PREFIXED + "cw_query"}]}))
+        {"tool": "load_skill"}, {"tool": PREFIXED + "cw_query"}]}), encoding="utf-8")
     b.write_text(json.dumps({"agents": [OPS], "interactions": [
-        {"tool": "tool_search"}]}))
+        {"tool": "tool_search"}]}), encoding="utf-8")
     other.write_text(json.dumps({"agents": ["someone-else"], "interactions": [
-        {"tool": "their_local_thing"}]}))
+        {"tool": "their_local_thing"}]}), encoding="utf-8")
     monkeypatch.setattr(rr, "CONFIG", {"local_tools": ["run_skill_script"]})
     assert rr.recorded_local_tools(str(a)) == [
         "load_skill", "run_skill_script", "tool_search"]
@@ -577,9 +577,9 @@ def test_a_recording_with_no_baseline_is_a_hard_failure(w, tmp_path):
 def test_a_recording_in_two_baselines_is_refused(w, tmp_path):
     two = tmp_path / "two"
     two.mkdir()
-    ops = open(os.path.join(BASELINES, "ops-worst-case-2026-09-18.json")).read()
-    (two / "a.json").write_text(ops)
-    (two / "b.json").write_text(ops)
+    ops = open(os.path.join(BASELINES, "ops-worst-case-2026-09-18.json"), encoding="utf-8").read()
+    (two / "a.json").write_text(ops, encoding="utf-8")
+    (two / "b.json").write_text(ops, encoding="utf-8")
     assert w.attribute(baselines=str(two)) == ar.EXIT_FAILED
 
 
@@ -637,7 +637,7 @@ def test_a_hard_attribution_failure_is_explained_in_the_summary(w, tmp_path):
     summary = tmp_path / "summary.md"
     assert w.attribute(baselines=str(empty),
                        extra=["--summary", str(summary)]) == ar.EXIT_FAILED
-    assert "no committed baseline" in summary.read_text()
+    assert "no committed baseline" in summary.read_text(encoding="utf-8")
 
 
 def test_a_retryable_failure_is_summarised_only_on_the_final_attempt(w, tmp_path):
@@ -648,7 +648,7 @@ def test_a_retryable_failure_is_summarised_only_on_the_final_attempt(w, tmp_path
     assert not summary.exists()
     assert w.attribute(spans=spans, extra=["--summary", str(summary),
                                            "--final"]) == ar.EXIT_NOT_YET
-    assert "no scored run" in summary.read_text()
+    assert "no scored run" in summary.read_text(encoding="utf-8")
 
 
 def test_a_strict_failure_is_explained_in_the_summary(w, tmp_path):
@@ -657,7 +657,7 @@ def test_a_strict_failure_is_explained_in_the_summary(w, tmp_path):
     assert ev.main([runs, "--expected", EXPECTED, "--strict-baseline",
                     "--summary", str(summary), "--baseline",
                     os.path.join(BASELINES, "ops-worst-case-2026-09-18.json")]) == 1
-    text = summary.read_text()
+    text = summary.read_text(encoding="utf-8")
     assert "Strict comparison failed" in text and "no baseline row" in text
 
 
@@ -688,7 +688,7 @@ def test_strict_passes_when_everything_was_compared():
 
 def test_strict_needs_a_baseline(tmp_path):
     runs = tmp_path / "r.jsonl"
-    runs.write_text("")
+    runs.write_text("", encoding="utf-8")
     with pytest.raises(SystemExit):
         ev.main([str(runs), "--strict-baseline"])
 
@@ -710,12 +710,12 @@ def test_lost_coverage_on_a_reporting_check_does_not_fail(tmp_path, monkeypatch,
     now = [_scored({"no_truncation": {"passed": None, "reason": "n/a"},
                     "trajectory": {"passed": True, "reason": ""}})]
     monkeypatch.setattr(ev, "score", lambda runs, cfg: now)
-    (tmp_path / "runs.jsonl").write_text("{}\n")
-    (tmp_path / "base.json").write_text(json.dumps(base))
+    (tmp_path / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "base.json").write_text(json.dumps(base), encoding="utf-8")
     summary = tmp_path / "summary.md"
     assert ev.main([str(tmp_path / "runs.jsonl"), "--baseline",
                     str(tmp_path / "base.json"), "--summary", str(summary)]) == 0
-    text = summary.read_text()
+    text = summary.read_text(encoding="utf-8")
     assert "| `no_truncation` | no | stopped scoring |" in text
 
 
@@ -723,12 +723,12 @@ def test_lost_coverage_on_a_gating_check_fails(tmp_path, monkeypatch, quiet_repo
     base = [_scored({"trajectory": {"passed": True, "reason": ""}})]
     now = [_scored({"trajectory": {"passed": None, "reason": "no expected"}})]
     monkeypatch.setattr(ev, "score", lambda runs, cfg: now)
-    (tmp_path / "runs.jsonl").write_text("{}\n")
-    (tmp_path / "base.json").write_text(json.dumps(base))
+    (tmp_path / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "base.json").write_text(json.dumps(base), encoding="utf-8")
     summary = tmp_path / "summary.md"
     assert ev.main([str(tmp_path / "runs.jsonl"), "--baseline",
                     str(tmp_path / "base.json"), "--summary", str(summary)]) == 1
-    assert "| `trajectory` | yes | stopped scoring |" in summary.read_text()
+    assert "| `trajectory` | yes | stopped scoring |" in summary.read_text(encoding="utf-8")
 
 
 def test_a_reporting_regression_is_marked_as_not_gating_in_the_summary(
@@ -736,12 +736,12 @@ def test_a_reporting_regression_is_marked_as_not_gating_in_the_summary(
     base = [_scored({"no_tool_errors": {"passed": True, "reason": ""}})]
     now = [_scored({"no_tool_errors": {"passed": False, "reason": "1/9"}})]
     monkeypatch.setattr(ev, "score", lambda runs, cfg: now)
-    (tmp_path / "runs.jsonl").write_text("{}\n")
-    (tmp_path / "base.json").write_text(json.dumps(base))
+    (tmp_path / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "base.json").write_text(json.dumps(base), encoding="utf-8")
     summary = tmp_path / "summary.md"
     assert ev.main([str(tmp_path / "runs.jsonl"), "--baseline",
                     str(tmp_path / "base.json"), "--summary", str(summary)]) == 0
-    assert "| `no_tool_errors` | no | **regressed** |" in summary.read_text()
+    assert "| `no_tool_errors` | no | **regressed** |" in summary.read_text(encoding="utf-8")
 
 
 def test_only_gating_entries_fail_a_build():
@@ -755,7 +755,7 @@ def test_the_manifest_records_which_recording_it_replayed(tmp_path):
     import argparse
     cassette = tmp_path / "c.json"
     cassette.write_text(json.dumps({"orchestration_id": "rec123",
-                                    "agents": [OPS, "child"]}))
+                                    "agents": [OPS, "child"]}), encoding="utf-8")
     args = argparse.Namespace(agent=OPS, cassette=str(cassette),
                               server_url="https://r.example.net/mcp",
                               manifest=str(tmp_path / "m.json"))
@@ -780,20 +780,20 @@ def test_the_replay_binds_under_the_recordings_server_label(tmp_path):
     renamed tool, a changed trajectory and a changed contract."""
     c = tmp_path / "c.json"
     c.write_text(json.dumps({"interactions": [
-        {"tool": f"{PREFIXED}cw_query"}, {"tool": "load_skill"}]}))
+        {"tool": f"{PREFIXED}cw_query"}, {"tool": "load_skill"}]}), encoding="utf-8")
     assert rr.recorded_server_label(str(c)) == PREFIXED.rstrip("_")
 
 
 def test_a_recording_with_no_mcp_call_falls_back_to_config(tmp_path):
     c = tmp_path / "c.json"
-    c.write_text(json.dumps({"interactions": [{"tool": "load_skill"}]}))
+    c.write_text(json.dumps({"interactions": [{"tool": "load_skill"}]}), encoding="utf-8")
     assert rr.recorded_server_label(str(c)) == rr.REPLAY_TOOL_LABEL
 
 
 def test_a_recording_of_two_mcp_servers_is_refused(tmp_path):
     c = tmp_path / "c.json"
     c.write_text(json.dumps({"interactions": [
-        {"tool": "a___x"}, {"tool": "b___y"}]}))
+        {"tool": "a___x"}, {"tool": "b___y"}]}), encoding="utf-8")
     with pytest.raises(SystemExit):
         rr.recorded_server_label(str(c))
 
@@ -850,7 +850,7 @@ def test_the_dry_run_shows_the_replay_agent_and_the_recorded_label(tmp_path,
     c = tmp_path / "c.json"
     c.write_text(json.dumps({"orchestration_id": "rec", "agents": [OPS],
                              "query": "q",
-                             "interactions": [{"tool": f"{PREFIXED}cw_query"}]}))
+                             "interactions": [{"tool": f"{PREFIXED}cw_query"}]}), encoding="utf-8")
     assert rr.main(["--cassette", str(c), "--server-url",
                     "https://replay.example.net/mcp/x", "--dry-run"]) == 0
     out = capsys.readouterr().out

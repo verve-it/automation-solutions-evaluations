@@ -241,11 +241,11 @@ def test_the_window_step_names_the_replay_agents(steps, tmp_path):
     (art / "manifest-a.json").write_text(json.dumps({
         "agent": "ops", "replay_agent": "ops-replay",
         "started_utc": "2026-09-22T10:00:00+00:00",
-        "finished_utc": "2026-09-22T10:04:00+00:00"}))
+        "finished_utc": "2026-09-22T10:04:00+00:00"}), encoding="utf-8")
     out = tmp_path / "out.txt"
     subprocess.run([sys.executable, "-c", body], cwd=tmp_path, check=True,
                    env={"GITHUB_OUTPUT": str(out), "PATH": "/usr/bin:/bin"})
-    got = dict(l.split("=", 1) for l in out.read_text().splitlines())
+    got = dict(l.split("=", 1) for l in out.read_text(encoding="utf-8").splitlines())
     assert got["agents"] == "ops-replay"
     assert got["since"].startswith("2026-09-22T09:55")
     assert got["until"].startswith("2026-09-22T10:09")
@@ -309,7 +309,7 @@ def _run_attribute_step(steps, tmp_path, rcs, export_from=1):
     os.symlink(os.path.join(REPO, "tool_manifests"), work / "tool_manifests")
     for name, body in (("python", FAKE_PY), ("sleep", "#!/bin/sh\nexit 0\n")):
         path = bin_ / name
-        path.write_text(body)
+        path.write_text(body, encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
     env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", STATE=str(state),
                GATE_REPO=REPO, RCS=",".join(map(str, rcs)),
@@ -318,7 +318,7 @@ def _run_attribute_step(steps, tmp_path, rcs, export_from=1):
     p = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", script],
                        cwd=work, env=env, capture_output=True, text=True)
     argv = state / "attribute.argv"
-    calls = [json.loads(l) for l in open(argv)] if argv.exists() else []
+    calls = [json.loads(l) for l in open(argv, encoding="utf-8")] if argv.exists() else []
     return p.returncode, calls, p.stdout + p.stderr
 
 

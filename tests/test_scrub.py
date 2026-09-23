@@ -279,16 +279,16 @@ def test_learn_withholds_protected_vocabulary(tmp_path, monkeypatch, capsys):
     payload = {"gen_ai.tool.call.result":
                json.dumps({key: term.title(), "note": "Contact Grant Johnson"})}
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([{"customDimensions": json.dumps(payload)}]))
+    trace.write_text(json.dumps([{"customDimensions": json.dumps(payload)}]), encoding="utf-8")
 
-    assert term.title() in s.propose(json.loads(trace.read_text())), \
+    assert term.title() in s.propose(json.loads(trace.read_text(encoding="utf-8"))), \
         "the term is not proposed at all -- the test proves nothing"
 
     out = tmp_path / "candidates.json"
     monkeypatch.setattr("sys.argv",
                         ["scrub_trace.py", str(trace), "--learn", str(out)])
     assert s.main() == 0
-    proposed = list(json.loads(out.read_text()))
+    proposed = list(json.loads(out.read_text(encoding="utf-8")))
     assert term not in {k.strip().lower() for k in proposed}, proposed
     assert "withheld" in capsys.readouterr().out
     # and the real name beside it is still proposed
@@ -339,9 +339,9 @@ def test_a_short_salt_is_refused(tmp_path, monkeypatch, capsys):
     """A short salt is brute-forceable against a known name list, which is
     the attack the pseudonyms exist to stop."""
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([_nonjson("hello")]))
+    trace.write_text(json.dumps([_nonjson("hello")]), encoding="utf-8")
     redact = tmp_path / "r.json"
-    redact.write_text(json.dumps({"hello": "VALUE"}))
+    redact.write_text(json.dumps({"hello": "VALUE"}), encoding="utf-8")
     out = tmp_path / "o.json"
     monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
                                      "--redact-file", str(redact),
@@ -354,16 +354,16 @@ def test_a_short_salt_is_refused(tmp_path, monkeypatch, capsys):
 
 def test_a_scrub_writes_a_sidecar_naming_its_salt(tmp_path, monkeypatch):
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([_nonjson("contact Jeff Gilbert")]))
+    trace.write_text(json.dumps([_nonjson("contact Jeff Gilbert")]), encoding="utf-8")
     redact = tmp_path / "r.json"
-    redact.write_text(json.dumps({"Jeff Gilbert": "PERSON"}))
+    redact.write_text(json.dumps({"Jeff Gilbert": "PERSON"}), encoding="utf-8")
     out = tmp_path / "o.json"
     salt = "z" * 32
     monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
                                      "--redact-file", str(redact),
                                      "--salt", salt, "-o", str(out)])
     assert s.main() == 0
-    side = json.loads((tmp_path / "o.json.scrub.json").read_text())
+    side = json.loads((tmp_path / "o.json.scrub.json").read_text(encoding="utf-8"))
     assert side["salt_fingerprint"] == s.salt_fingerprint(salt)
     assert side["literals"] == 1
     assert salt not in json.dumps(side), "the sidecar must never carry the salt"
@@ -441,17 +441,17 @@ def test_an_underscore_literal_is_a_literal_and_a_comment_is_not(
         tmp_path, monkeypatch, capsys):
     trace = tmp_path / "t.json"
     trace.write_text(json.dumps([row(**{
-        "gen_ai.tool.call.result": "ran as _svc_backup for Eli Seale"})]))
+        "gen_ai.tool.call.result": "ran as _svc_backup for Eli Seale"})]), encoding="utf-8")
     redact = tmp_path / "r.json"
     redact.write_text(json.dumps({"_comment": "reviewed 2026-09-23",
                                   "_svc_backup": "USER?",
-                                  "Eli Seale": "PERSON"}))
+                                  "Eli Seale": "PERSON"}), encoding="utf-8")
     out = tmp_path / "o.json"
     monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
                                      "--redact-file", str(redact),
                                      "-o", str(out), "--salt", "x" * 16])
     assert s.main() == 0
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert "_svc_backup" not in text and "Eli Seale" not in text
     assert "1 comment key(s) ignored: '_comment'" in capsys.readouterr().out
 

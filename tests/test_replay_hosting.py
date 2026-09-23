@@ -96,7 +96,7 @@ def _cassette_fixture():
 # ------------------------------------------------------------ cassette choice
 
 def test_url_beats_setting_beats_the_only_one(tmp_path):
-    (tmp_path / "only.json").write_text("{}")
+    (tmp_path / "only.json").write_text("{}", encoding="utf-8")
     env = {"REPLAY_CASSETTE_DIR": str(tmp_path),
            "REPLAY_PAYLOAD": str(tmp_path / "absent.json")}
     config = server.Config(dict(env, REPLAY_CASSETTE="from-setting"))
@@ -107,7 +107,7 @@ def test_url_beats_setting_beats_the_only_one(tmp_path):
     bare = server.Config(dict(env))
     assert server.resolve_cassette_id(bare, server.Source(bare), None) == "only"
 
-    (tmp_path / "other.json").write_text("{}")
+    (tmp_path / "other.json").write_text("{}", encoding="utf-8")
     ambiguous = server.Config(dict(env))
     assert server.resolve_cassette_id(
         ambiguous, server.Source(ambiguous), None) is None
@@ -117,7 +117,7 @@ def test_payload_is_preferred_over_directories(tmp_path):
     """Deployment is flat; a checkout is not. One reader, both shapes."""
     directory = tmp_path / "cassettes"
     directory.mkdir()
-    (directory / "from-disk.json").write_text(json.dumps(_cassette_fixture()))
+    (directory / "from-disk.json").write_text(json.dumps(_cassette_fixture()), encoding="utf-8")
 
     config = server.Config({"REPLAY_CASSETTE_DIR": str(directory),
                             "REPLAY_PAYLOAD": str(tmp_path / "absent.json")})
@@ -127,7 +127,7 @@ def test_payload_is_preferred_over_directories(tmp_path):
     payload.write_text(json.dumps({
         "schema": "verve/replay-payload@1",
         "cassettes": {"from-payload": _cassette_fixture()},
-        "tool_manifests": [{"tools": []}]}))
+        "tool_manifests": [{"tools": []}]}), encoding="utf-8")
     flat = server.Config({"REPLAY_CASSETTE_DIR": str(directory),
                           "REPLAY_PAYLOAD": str(payload)})
     source = server.Source(flat)
@@ -158,7 +158,7 @@ def hosted(tmp_path):
 
     cassette_dir = tmp_path / "cassettes"
     cassette_dir.mkdir()
-    (cassette_dir / "fixture.json").write_text(json.dumps(_cassette_fixture()))
+    (cassette_dir / "fixture.json").write_text(json.dumps(_cassette_fixture()), encoding="utf-8")
 
     config = server.Config({"REPLAY_CASSETTE_DIR": str(cassette_dir),
                             "REPLAY_TOOL_DEFS": os.path.join(REPO,
@@ -1122,7 +1122,7 @@ def test_the_built_package_starts_on_its_own(tmp_path):
     (package / build.PAYLOAD_NAME).write_text(json.dumps({
         "schema": build.PAYLOAD_SCHEMA,
         "cassettes": {"fixture": _cassette_fixture()},
-        "tool_manifests": []}))
+        "tool_manifests": []}), encoding="utf-8")
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1182,7 +1182,7 @@ def recordings(tmp_path):
     """A local copy of what the hosted server is serving."""
     directory = tmp_path / "local"
     directory.mkdir()
-    (directory / "fixture.json").write_text(json.dumps(_cassette_fixture()))
+    (directory / "fixture.json").write_text(json.dumps(_cassette_fixture()), encoding="utf-8")
     return str(directory)
 
 
@@ -1352,7 +1352,7 @@ def _fan_out_cassette():
 def _serve_fan_out(tmp_path, recordings):
     for d in (tmp_path / "cassettes", recordings):
         (d if hasattr(d, "joinpath") else __import__("pathlib").Path(d)) \
-            .joinpath("fan.json").write_text(json.dumps(_fan_out_cassette()))
+            .joinpath("fan.json").write_text(json.dumps(_fan_out_cassette()), encoding="utf-8")
 
 
 def test_verifier_checks_a_concurrent_fan_out(hosted, recordings, blob_stub,

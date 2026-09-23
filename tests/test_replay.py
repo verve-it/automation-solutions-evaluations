@@ -438,7 +438,7 @@ def test_the_manifest_records_what_the_deleted_version_cannot(tmp_path):
     # the eval names the thing under test, not the fixture
     assert payload["suggested_eval_name"].endswith("v82")
     assert "87" not in payload["suggested_eval_name"]
-    assert json.loads(out.read_text())["base_version"] == "82"
+    assert json.loads(out.read_text(encoding="utf-8"))["base_version"] == "82"
 
 
 def test_the_manifest_carries_the_window_the_gate_exports_by(tmp_path):
@@ -560,7 +560,7 @@ def test_a_stale_cassette_says_to_rebuild(tmp_path):
     import run_replay
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"orchestration_id": "op", "agents": ["a"],
-                                "interactions": [1, 2], "recorded": "x"}))
+                                "interactions": [1, 2], "recorded": "x"}), encoding="utf-8")
     with pytest.raises(SystemExit) as exc:
         run_replay.cassette_query(str(path))
     assert run_replay._runner() in str(exc.value)
@@ -572,7 +572,7 @@ def test_a_rebuilt_cassette_with_no_input_says_something_else(tmp_path):
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"orchestration_id": "op", "agents": ["a"],
                                 "interactions": [1, 2], "recorded": "x",
-                                "query": None}))
+                                "query": None}), encoding="utf-8")
     with pytest.raises(SystemExit) as exc:
         run_replay.cassette_query(str(path))
     message = str(exc.value)
@@ -585,14 +585,14 @@ def test_the_entry_agent_comes_from_the_cassette(tmp_path):
     path = tmp_path / "c.json"
     path.write_text(json.dumps({
         "orchestration_id": "op", "recorded": "x", "interactions": [],
-        "agents": ["triage-orchestrator", "connectwise-operations-agent"]}))
+        "agents": ["triage-orchestrator", "connectwise-operations-agent"]}), encoding="utf-8")
     entry, everyone = run_replay.cassette_agent(str(path))
     assert entry == "triage-orchestrator"
     assert everyone[1] == "connectwise-operations-agent"
 
     bare = tmp_path / "bare.json"
     bare.write_text(json.dumps({"orchestration_id": "op", "agents": [],
-                                "interactions": [], "recorded": "x"}))
+                                "interactions": [], "recorded": "x"}), encoding="utf-8")
     with pytest.raises(SystemExit):
         run_replay.cassette_agent(str(bare))
 
@@ -1069,7 +1069,7 @@ def test_a_partial_config_gets_defaults_for_the_rest(tmp_path):
     """A KeyError three calls later is a worse failure than a default."""
     import evalconfig
     path = tmp_path / "eval-config.json"
-    path.write_text(json.dumps({"write_tools": {"names": ["x_write"]}}))
+    path.write_text(json.dumps({"write_tools": {"names": ["x_write"]}}), encoding="utf-8")
     config = evalconfig.load(str(path))
     assert config["write_tools"]["names"] == ["x_write"]
     assert config["write_tools"]["prefixes"] == []
