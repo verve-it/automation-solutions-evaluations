@@ -250,7 +250,14 @@ def summary(base, token=None, session=None):
         req.add_header("Authorization", f"Bearer {token}")
     if session:
         req.add_header("Mcp-Session-Id", session)
-    return json.loads(urllib.request.urlopen(req).read())
+    try:
+        return json.loads(urllib.request.urlopen(req).read())
+    except urllib.error.HTTPError as exc:
+        # The body says why -- `replay state unavailable: ...` on a 503 --
+        # and a bare traceback drops it.
+        body = exc.read().decode("utf-8", "replace")[:500]
+        raise SystemExit(f"GET {summary_url(base)} returned {exc.code}: "
+                         f"{body or exc.reason}")
 
 
 # ------------------------------------------------------------------- binding

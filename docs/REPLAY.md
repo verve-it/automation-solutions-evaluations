@@ -45,8 +45,9 @@ run for gating an agent change:
 
 The left column is why it was removed rather than kept as a smoke test.
 
-The one thing it cannot do is tell you a write still *works*. Keep a
-low-frequency live run for that, as a smoke test rather than a gate.
+The one thing it cannot do is tell you a write still *works* against the live
+service. Nothing in this repo answers that by writing, at any frequency: it is
+the tool server's own tests' question, not an agent evaluation's.
 
 ## How it works
 
@@ -149,9 +150,9 @@ With that URL in hand:
 
 ```bash
 python3 replay/run_replay.py \
-    --cassette cassettes/2026-09-03-4dda7f4fa5f0.json \
-    --agent triage-orchestrator \
-    --server-url https://replay.example.net/mcp
+    --cassette cassettes/2026-09-15-73d29f4c3a13.json \
+    --agent connectwise-operations-agent \
+    --server-url https://<app>.azurewebsites.net/mcp/2026-09-15-73d29f4c3a13
 ```
 
 It reads the agent version under test, clones its definition with **only the
@@ -377,6 +378,18 @@ the replay is unordered, rather than an answer that looks fine. The journal
 survives an instance recycle, which is what makes `/summary` worth reading
 afterwards.
 
+The store reaches blob storage as the function app's **managed identity** --
+a token from the platform's `IDENTITY_ENDPOINT`, a bearer header on the blob
+REST API, no key and nothing that expires -- or, where the identity could
+not be given a role, with a container SAS minted at deploy time. Both are
+stdlib: the SDKs cannot be imported by a custom handler. If the configured
+store cannot be reached the server still starts -- a handler that will not
+start is a 502 that says nothing -- but answers every MCP call with
+`replay state unavailable: <cause>` and retries the store a few seconds later.
+It never answers from in-process state, which another instance cannot see.
+`GET /?resolve=1` reports the store or the cause; `verify.py` fails anything
+but blob storage, fails an expired SAS and warns thirty days ahead.
+
 Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary`
 is the journal — tool names, canonicalised arguments carrying ticket and
 company identifiers, every attempted write.
@@ -400,14 +413,15 @@ That is why `run_replay.py` writes `artifacts/replay-run.json`:
 
 ```json
 {
-  "agent": "triage-orchestrator",
+  "agent": "connectwise-operations-agent",
+  "replay_agent": "connectwise-operations-agent-replay",
   "base_version": "82",
-  "temp_version": "87",
+  "temp_version": "3",
   "temp_version_deleted": true,
-  "cassette": "2026-09-03-4dda7f4fa5f0.json",
+  "cassette": "2026-09-15-73d29f4c3a13.json",
   "tools": "stubbed — no ConnectWise request, no write performed",
   "matched_prefix": 50,
-  "suggested_eval_name": "replay-triage-orchestrator-v82"
+  "suggested_eval_name": "replay-connectwise-operations-agent-v82"
 }
 ```
 

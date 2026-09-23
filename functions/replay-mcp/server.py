@@ -36,12 +36,14 @@ Configuration, all through app settings
     REPLAY_TOOL_DEFS        tool manifest directory (default: ./tool_manifests)
     REPLAY_TOKEN            require `Authorization: Bearer <token>`
     REPLAY_ON_EXHAUSTED     repeat | diverge   (default: repeat)
-    REPLAY_STATE_SAS        container URL with a SAS — the one that needs no
-                            SDK, and so no build step
-    REPLAY_STATE_ACCOUNT    https://<account>.blob.core.windows.net
-    REPLAY_STATE_CONNECTION storage connection string, where nobody could
-                            assign the identity a role
+    REPLAY_STATE_ACCOUNT    https://<account>.blob.core.windows.net -- with
+                            REPLAY_STATE_CONTAINER, state is kept as the
+                            app's managed identity (AZURE_CLIENT_ID)
     REPLAY_STATE_CONTAINER  container for per-session replay state
+    REPLAY_STATE_SAS        container URL with a SAS, for a deployment that
+                            could not give the identity a role; preferred
+                            when set
+    AZURE_CLIENT_ID         the user-assigned identity to ask for a token as
 
 Routes
 ------
@@ -69,17 +71,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # keeps root files and drops directories, so a directory in the package is a
 # 502 waiting to happen.
 PAYLOAD_NAME = "replay_payload.json"
-
-
-# Oryx installs dependencies into .python_packages/lib/site-packages, and the
-# Functions *Python worker* is what puts that on sys.path. A custom handler is
-# `python server.py` and gets none of that setup, which is why the app logged
-# `ModuleNotFoundError: No module named 'azure'` with the package plainly
-# deployed. Nothing here needs a dependency any more, but an installed one
-# should be usable rather than invisible.
-_ORYX = os.path.join(HERE, ".python_packages", "lib", "site-packages")
-if os.path.isdir(_ORYX) and _ORYX not in sys.path:
-    sys.path.append(_ORYX)
 
 
 def _package_listing(root, limit=60):
@@ -126,10 +117,10 @@ def _import_shared():
 
 def _bind():
     from mcp_core import Cassette, handle_rpc, parse_error, tool_definitions
-    from state_store import Conflict, open_store
+    from state_store import Conflict, Unavailable, open_store
     from trace_to_eval import load_tool_manifests
     return (Cassette, handle_rpc, parse_error, tool_definitions, Conflict,
-            open_store, load_tool_manifests)
+            Unavailable, open_store, load_tool_manifests)
 
 
 # Reported, not raised. A custom handler that dies on import is a 502, and a
@@ -137,7 +128,7 @@ def _bind():
 # the interpreter is wrong, or the port is.
 try:
     (Cassette, handle_rpc, parse_error, tool_definitions, Conflict,
-     open_store, load_tool_manifests) = _import_shared()
+     Unavailable, open_store, load_tool_manifests) = _import_shared()
 except ImportError as exc:
     print(f"FATAL  {exc}", flush=True)
     print(f"FATAL  python {sys.version.split()[0]} at {sys.executable}",
@@ -145,8 +136,8 @@ except ImportError as exc:
     print(f"FATAL  server.py is in {HERE}", flush=True)
     print(f"FATAL  looked in: {sys.path[:4]}", flush=True)
     print("FATAL  the package should carry mcp_core.py, state_store.py, "
-          "make_cassette.py and trace_to_eval.py beside server.py. "
-          "build.py puts them there.", flush=True)
+          "make_cassette.py, trace_to_eval.py and evalconfig.py beside "
+          "server.py. build.py puts them there.", flush=True)
     print("FATAL  what is actually deployed:", flush=True)
     for entry in _package_listing(HERE):
         print(f"FATAL    {entry}", flush=True)
@@ -175,8 +166,8 @@ class Config:
         self.on_exhausted = get("REPLAY_ON_EXHAUSTED", "repeat")
         self.state_sas = get("REPLAY_STATE_SAS")
         self.state_account = get("REPLAY_STATE_ACCOUNT")
-        self.state_connection = get("REPLAY_STATE_CONNECTION")
         self.state_container = get("REPLAY_STATE_CONTAINER")
+        self.client_id = get("AZURE_CLIENT_ID")
         self.port = int(get("FUNCTIONS_CUSTOMHANDLER_PORT", "8000"))
 
 
@@ -328,15 +319,23 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._send({"error": "unauthorized"}, 401)
             return self._summary(parts, query)
+        # `?resolve=1` resolves the store first, so the answer is about this
+        # instance's store rather than `unresolved` because no MCP call has
+        # reached it yet. Opt-in: a plain GET / stays free of network calls.
+        if "resolve" in query and hasattr(self.store, "resolve"):
+            self.store.resolve()
         self._send({"status": "ok", "mode": "replay",
                     "cassettes": self.library.source.cassette_ids(),
                     "writes": "never performed",
-                    # Which backend the replay state actually got. `unresolved`
-                    # until the first tools/call, `MemoryStore` if blob storage
-                    # could not be reached -- which is a working server with a
-                    # weaker ordering guarantee, and worth saying out loud.
+                    # Which store the replay state is in: IdentityBlobStore or
+                    # SasBlobStore; `unresolved` before first use;
+                    # `unavailable` (with the cause in state_detail) while a
+                    # configured store cannot be reached; MemoryStore only
+                    # when none is configured. verify.py fails all but the
+                    # first two, and an expired SAS.
                     "state": getattr(self.store, "backend",
-                                     type(self.store).__name__)})
+                                     type(self.store).__name__),
+                    "state_detail": getattr(self.store, "detail", {}) or {}})
 
     def _summary(self, parts, query):
         """The journal for one replay.
@@ -365,7 +364,12 @@ class Handler(BaseHTTPRequestHandler):
                                "cassette": cassette_id}, 404)
         session = (query.get("session", [None])[0]
                    or self.headers.get("Mcp-Session-Id"))
-        state, _version = self.store.load(_state_key(cassette_id, session))
+        try:
+            state, _version = self.store.load(_state_key(cassette_id, session))
+        except Unavailable as exc:
+            return self._send({"error": "state_unavailable",
+                               "message": f"replay state unavailable: {exc}"},
+                              503)
         cassette.load_state(state)
         summary = cassette.summary()
         summary["session"] = session or "default"
@@ -409,7 +413,25 @@ class Handler(BaseHTTPRequestHandler):
                                "cassette": cassette_id}, 404)
 
         key = _state_key(cassette_id, session)
+        try:
+            return self._answer(req, key, cassette_id, cassette, tools,
+                                session)
+        except Unavailable as exc:
+            # Never answered from in-process state: another instance would
+            # not see the cursor move, and the agent would get a plausible
+            # answer from the wrong place in the recording. Logged per call,
+            # so a gate failure can be matched to the refusals behind it.
+            cause = str(exc).rstrip(".")
+            _log_refusal(-32003, session, cassette_id, req, cause)
+            return self._send(
+                {"jsonrpc": "2.0", "id": req.get("id"),
+                 "error": {"code": -32003, "message":
+                           f"replay state unavailable: {cause}. Re-run the "
+                           "replay once it is back: a replay whose state "
+                           "could not be kept is not ordered."}},
+                503, session)
 
+    def _answer(self, req, key, cassette_id, cassette, tools, session):
         # Only a tools/call advances anything. Writing state for every
         # initialize and tools/list would multiply blob writes for no gain.
         if req.get("method") != "tools/call":
@@ -434,6 +456,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Still losing after every retry: something is contending far harder
         # than a fan-out can. Say so rather than answer from stale state.
+        _log_refusal(-32002, session, cassette_id, req,
+                     f"lost {SAVE_ATTEMPTS} races")
         return self._send(
             {"jsonrpc": "2.0", "id": req.get("id"),
              "error": {"code": -32002, "message":
@@ -465,8 +489,22 @@ def _session_lock(key):
         return _SESSION_LOCKS.setdefault(key, threading.Lock())
 
 
+def _log_refusal(code, session, cassette_id, req, cause):
+    tool = (req.get("params") or {}).get("name") or ""
+    print(f"REFUSED  {code} session={session or 'default'} "
+          f"cassette={cassette_id} method={req.get('method')} tool={tool}: "
+          f"{cause}", flush=True)
+
+
 def _state_key(cassette_id, session):
     return f"{cassette_id}.{session or 'default'}"
+
+
+def build_store(config):
+    """The store the app settings name. Separate so the wiring is tested:
+    the last silent failure here was a setting reaching the wrong store."""
+    return open_store(config.state_account, config.state_container,
+                      config.state_sas, config.client_id)
 
 
 def main():
@@ -474,8 +512,7 @@ def main():
     library = Library(config)
     Handler.config = config
     Handler.library = library
-    Handler.store = open_store(config.state_account, config.state_container,
-                               config.state_connection, config.state_sas)
+    Handler.store = build_store(config)
 
     # Printed before anything can go wrong, so App Insights shows how far
     # start-up got even when it does.
@@ -485,6 +522,14 @@ def main():
     print(f"handler   : {HERE}", flush=True)
     print(f"package   : {', '.join(_package_listing(HERE, limit=25))}",
           flush=True)
+    # Names only, never values: the identity header is a per-process secret.
+    # If state falls back to in-process, this line says whether the platform
+    # offered an identity endpoint at all.
+    present = [k for k in ("IDENTITY_ENDPOINT", "IDENTITY_HEADER",
+                           "AZURE_CLIENT_ID", "REPLAY_STATE_ACCOUNT",
+                           "REPLAY_STATE_CONTAINER", "REPLAY_STATE_SAS")
+               if os.environ.get(k)]
+    print(f"state env : {', '.join(present) or 'none'}", flush=True)
 
     available = library.source.cassette_ids()
     print(f"source    : {library.source.origin}")

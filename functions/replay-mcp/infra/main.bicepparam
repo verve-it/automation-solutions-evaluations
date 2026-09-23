@@ -26,10 +26,16 @@ param defaultCassette = readEnvironmentVariable('REPLAY_CASSETTE', '')
 param onExhausted = readEnvironmentVariable('REPLAY_ON_EXHAUSTED', 'repeat')
 
 // identity is the one to want: no storage key exists anywhere. It needs
-// Microsoft.Authorization/roleAssignments/write at deploy time, which is User
-// Access Administrator or Owner -- Contributor does not include it.
+// Microsoft.Authorization/roleAssignments/write at deploy time -- Role Based
+// Access Control Administrator, User Access Administrator or Owner, alongside
+// Contributor, which does not include it.
 //
 // connectionString needs nothing beyond Contributor and puts a storage key in
 // app settings instead. Start there if you cannot assign roles, have someone
-// who can run infra/rbac.bicep, then redeploy with identity.
+// who can grant the role (infra/rbac.bicep), then redeploy with identity and
+// REPLAY_ASSIGN_ROLE=false.
 param storageAuth = readEnvironmentVariable('REPLAY_STORAGE_AUTH', 'identity')
+
+// false once the role has been granted by someone else: the deployment then
+// does not declare the assignment, so it needs no roleAssignments/write.
+param assignRole = bool(readEnvironmentVariable('REPLAY_ASSIGN_ROLE', 'true'))

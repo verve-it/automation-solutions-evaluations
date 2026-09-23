@@ -211,7 +211,10 @@ def routing_failures(m, row, rows):
                     f"{_fmt(excess)}. They went somewhere other than the "
                     "stub. (A tool the recording never called locally counts "
                     "here too -- if the change added a local tool, re-record "
-                    "the cassette.)", False))
+                    "the cassette. And a call the stub REFUSED is not "
+                    "journalled: if the replay server's log has `REFUSED` "
+                    "lines for this replay's session, its state store failed "
+                    "mid-run; re-run the replay.)", False))
     missing = {t: n - every.get(t, 0) for t, n in journal.items()
                if every.get(t, 0) < n}
     if missing and not excess:

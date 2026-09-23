@@ -21,6 +21,10 @@
 .EXAMPLE
     $env:REPLAY_TOKEN = '<existing token>'
     .\deploy.ps1 -ResourceGroup Verve-CopilotCapacity -Location eastus2
+
+    Redeploying: set the SAME token the callers hold (the GitHub environments'
+    REPLAY_TOKEN). -NewToken on a redeploy locks every caller out until they
+    are updated too.
 #>
 [CmdletBinding()]
 param(
@@ -33,18 +37,25 @@ param(
     # Consumption does not serve is not a reason to make a second group.
     [string] $Location,
 
-    # Generate a token, use it, and print it once. Print once because it is
-    # never recoverable from the deployment afterwards -- it goes into an app
-    # setting and Azure will not read a secure parameter back out.
+    # Generate a token, use it, and print it once. A new token on a REDEPLOY
+    # locks out every caller holding the old one. The value can be read back
+    # from the app's settings (REPLAY_TOKEN) by anyone allowed to list them,
+    # not from the deployment's secure parameter.
     [switch] $NewToken,
 
     # identity is the one to want: no storage key exists anywhere. It needs
-    # Microsoft.Authorization/roleAssignments/write at deploy time, which is
-    # User Access Administrator or Owner -- Contributor does not include it.
+    # Microsoft.Authorization/roleAssignments/write at deploy time -- Role
+    # Based Access Control Administrator, User Access Administrator or Owner,
+    # alongside Contributor, which does not include it.
     # connectionString needs nothing beyond Contributor and puts a storage key
     # in app settings instead.
     [ValidateSet('identity', 'connectionString')]
     [string] $StorageAuth = 'identity',
+
+    # Someone else has already granted the identity its storage role
+    # (infra/rbac.bicep). The template then does not declare the assignment,
+    # so a deployer without roleAssignments/write can still deploy identity.
+    [switch] $SkipRoleAssignment,
 
     # Deploy without checking the result. Only for when the cassettes are
     # known good and you are iterating on infrastructure.
@@ -69,7 +80,7 @@ if ($NewToken) {
     (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
     $env:REPLAY_TOKEN = [BitConverter]::ToString($bytes).Replace('-', '').ToLower()
     Write-Host ''
-    Write-Host 'REPLAY_TOKEN (save this now -- it is not recoverable later):' -ForegroundColor Yellow
+    Write-Host 'REPLAY_TOKEN (save it now; later only from the app settings):' -ForegroundColor Yellow
     Write-Host "  $($env:REPLAY_TOKEN)"
     Write-Host ''
 }
@@ -136,25 +147,49 @@ if ($supported -notcontains ($Location -replace '\s', '').ToLower()) {
 }
 Write-Host '    ok'
 
+# main.bicepparam reads these. Restored after the deployment so they do not
+# linger in the caller's session and steer a later deployment silently.
+$saved = @{}
+foreach ($var in 'REPLAY_STORAGE_AUTH', 'REPLAY_ASSIGN_ROLE', 'REPLAY_LOCATION') {
+    $saved[$var] = [Environment]::GetEnvironmentVariable($var)
+}
 $env:REPLAY_STORAGE_AUTH = $StorageAuth
-Write-Host "==> template (storage auth: $StorageAuth)"
+$env:REPLAY_ASSIGN_ROLE = if ($SkipRoleAssignment) { 'false' } else { 'true' }
+Write-Host "==> template (storage auth: $StorageAuth, assign role: $($env:REPLAY_ASSIGN_ROLE))"
 # One parameter source only: the CLI will not take a .bicepparam file and
 # inline -p overrides in the same deployment. main.bicepparam reads these.
 $env:REPLAY_LOCATION = $Location
 $deploymentName = "replay-mcp-$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))"
-$json = az deployment group create `
-    -g $ResourceGroup `
-    -n $deploymentName `
-    -f (Join-Path $here 'infra/main.bicep') `
-    -p (Join-Path $here 'infra/main.bicepparam') `
-    --query properties.outputs -o json 2>&1
-if ($LASTEXITCODE -ne 0) {
+try {
+    $json = az deployment group create `
+        -g $ResourceGroup `
+        -n $deploymentName `
+        -f (Join-Path $here 'infra/main.bicep') `
+        -p (Join-Path $here 'infra/main.bicepparam') `
+        --query properties.outputs -o json 2>&1
+    $deployExit = $LASTEXITCODE
+}
+finally {
+    foreach ($var in $saved.Keys) {
+        [Environment]::SetEnvironmentVariable($var, $saved[$var])
+    }
+}
+if ($deployExit -ne 0) {
     $text = ($json | Out-String)
     Write-Host $text
-    # The one failure with a specific answer. Assigning a role needs User
-    # Access Administrator or Owner; Contributor stops exactly here, after the
-    # storage account already exists.
-    if ($text -match 'roleAssignments') {
+    # The one failure with a specific answer. Assigning a role needs Role
+    # Based Access Control Administrator, User Access Administrator or Owner;
+    # Contributor stops exactly here, after the storage account already exists.
+    if ($text -match 'RoleAssignmentExists') {
+        Write-Host ''
+        Write-Host 'The identity already has its role, granted outside this template' -ForegroundColor Yellow
+        Write-Host '(e.g. az role assignment create, under another name). Deploy without'
+        Write-Host 'declaring it, now and every time after:'
+        Write-Host ''
+        Write-Host "    .\deploy.ps1 -ResourceGroup $ResourceGroup -Location $Location -SkipRoleAssignment"
+        Write-Host ''
+    }
+    elseif ($text -match 'roleAssignments') {
         Write-Host ''
         Write-Host 'That is the role assignment, and it is the only step Contributor' -ForegroundColor Yellow
         Write-Host 'cannot do. Two ways on:'
@@ -162,17 +197,24 @@ if ($LASTEXITCODE -ne 0) {
         Write-Host '  1. Deploy without it -- a storage key goes into app settings'
         Write-Host '     instead of the identity being granted a role:'
         Write-Host ''
-        Write-Host "       .\deploy.ps1 -ResourceGroup $ResourceGroup -StorageAuth connectionString"
+        Write-Host "       .\deploy.ps1 -ResourceGroup $ResourceGroup -Location $Location -StorageAuth connectionString"
         Write-Host ''
-        Write-Host '  2. Have someone with User Access Administrator or Owner run'
-        Write-Host '     infra/rbac.bicep, then redeploy as you did just now. The key'
-        Write-Host '     disappears from configuration and nothing else changes.'
+        Write-Host '  2. Have someone with Role Based Access Control Administrator,'
+        Write-Host '     User Access Administrator or Owner grant it (infra/rbac.bicep'
+        Write-Host '     says how), then redeploy without declaring it again:'
+        Write-Host ''
+        Write-Host "       .\deploy.ps1 -ResourceGroup $ResourceGroup -Location $Location -SkipRoleAssignment"
+        Write-Host ''
+        Write-Host '     The key disappears from configuration and nothing else changes.'
+        Write-Host '     Their values:'
+        Write-Host "       az storage account list -g $ResourceGroup --query `"[].name`" -o tsv"
+        Write-Host "       az identity list -g $ResourceGroup --query `"[].{name:name, principalId:principalId}`" -o table"
         Write-Host ''
         Write-Host 'Nothing is half-built: the deployment is incremental and re-running'
         Write-Host 'it is safe.'
         Write-Host ''
     }
-    throw "az deployment group create failed (exit $LASTEXITCODE)"
+    throw "az deployment group create failed (exit $deployExit)"
 }
 
 $outputs = $json | ConvertFrom-Json
@@ -241,6 +283,8 @@ Write-Host ''
 Write-Host '==> deployed' -ForegroundColor Green
 Write-Host "  MCP      https://$hostName/mcp/<cassette-id>"
 Write-Host "  summary  https://$hostName/summary/<cassette-id>"
+Write-Host "  storage  $($outputs.storageAccountName.value) (auth: $($outputs.storageAuthMode.value))"
+Write-Host "  identity $($outputs.identityName.value) (principal $($outputs.identityPrincipalId.value))"
 
 if ($SkipVerify) {
     Write-Host ''

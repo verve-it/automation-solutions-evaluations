@@ -25,13 +25,14 @@ import subprocess
 import sys
 
 EXPECTED_SETTINGS = [
-    # First, because its absence is the failure that says least. The
-    # mcp-custom-handler profile is preview; without this the host never
-    # starts the handler and everything answers 502.
+    # The mcp-custom-handler profile is preview-flagged and Bicep sets this
+    # because Microsoft's sample does. It was NOT the cause of the early
+    # 502s: host 4.1054.250.26428 honoured the profile without it. Listed so
+    # its presence is visible, not because its absence explains anything.
     "AzureWebJobsFeatureFlags",
     "REPLAY_TOKEN", "REPLAY_CASSETTE", "REPLAY_ON_EXHAUSTED",
     "REPLAY_STATE_CONTAINER", "REPLAY_STATE_ACCOUNT",
-    "REPLAY_STATE_CONNECTION", "AzureWebJobsStorage",
+    "REPLAY_STATE_SAS", "AzureWebJobsStorage",
     "AzureWebJobsStorage__accountName", "AZURE_CLIENT_ID",
     "APPLICATIONINSIGHTS_CONNECTION_STRING",
 ]
@@ -129,13 +130,12 @@ def main(argv=None):
         if extra:
             print(f"  other: {', '.join(extra)}")
         if "AzureWebJobsFeatureFlags" not in present:
-            print("\n  AzureWebJobsFeatureFlags is NOT set. The "
-                  "mcp-custom-handler profile in host.json is preview and is "
-                  "ignored without it, so the handler never starts and every "
-                  "request is a 502. Redeploy the template, or set it:\n"
-                  "    az functionapp config appsettings set -g <rg> -n <app> "
-                  "\\\n      --settings "
-                  "AzureWebJobsFeatureFlags=EnableMcpCustomHandlerPreview")
+            print("\n  AzureWebJobsFeatureFlags is not set. infra/main.bicep "
+                  "sets it (EnableMcpCustomHandlerPreview) because Microsoft's "
+                  "sample does, but host 4.1054.250.26428 honoured the "
+                  "mcp-custom-handler profile without it: its absence was not "
+                  "the cause of the earlier 502s. Read the handler output "
+                  "below before blaming it.")
 
     section("last deployment")
     deployments, err = az("functionapp", "deployment", "list-publishing-"

@@ -7,8 +7,9 @@
 # setup. The app logged `ModuleNotFoundError: No module named 'azure'` with the
 # package plainly deployed.
 #
-# Replay state now goes over the blob REST API with a container SAS minted at
-# deploy time -- urllib and json, no SDK. See replay/state_store.py.
+# Replay state now goes over the blob REST API, urllib and json, as the app's
+# managed identity (a token from the platform's identity endpoint) or with a
+# container SAS minted at deploy time. See replay/state_store.py.
 #
 # Because there is nothing to install, the deployment asks for no remote build.
 # One fewer step that can half-succeed.

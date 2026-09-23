@@ -6,7 +6,13 @@
 #
 # Idempotent: re-running redeploys the template and republishes the package.
 # The token is read from the environment rather than stored, because the
-# cassettes it protects carry ticket and company identifiers.
+# cassettes it protects carry ticket and company identifiers. Redeploying?
+# Export the SAME token the callers hold (the GitHub environments' REPLAY_TOKEN);
+# a new one locks every caller out until they are updated too.
+#
+#   REPLAY_STORAGE_AUTH  identity (default) | connectionString
+#   REPLAY_ASSIGN_ROLE   true (default) | false once someone else granted the
+#                        identity its role (infra/rbac.bicep)
 set -euo pipefail
 
 RG="${1:-}"
@@ -60,7 +66,7 @@ if ! echo "$SUPPORTED" | grep -qx "$(echo "$LOCATION" | tr -d " " | tr "[:upper:
 fi
 echo "    ok"
 
-echo "==> template (storage auth: ${REPLAY_STORAGE_AUTH:-identity})"
+echo "==> template (storage auth: ${REPLAY_STORAGE_AUTH:-identity}, assign role: ${REPLAY_ASSIGN_ROLE:-true})"
 # One parameter source only: the CLI will not take a .bicepparam file and
 # inline -p overrides in the same deployment. main.bicepparam reads these.
 export REPLAY_LOCATION="$LOCATION"
@@ -71,10 +77,17 @@ if ! OUT=$(az deployment group create \
   -p "$HERE/infra/main.bicepparam" \
   --query properties.outputs -o json 2>&1); then
   echo "$OUT" >&2
-  # The one failure with a specific answer. Assigning a role needs User Access
-  # Administrator or Owner; Contributor stops exactly here, after the storage
-  # account already exists.
-  if echo "$OUT" | grep -q "roleAssignments"; then
+  # The one failure with a specific answer. Assigning a role needs Role Based
+  # Access Control Administrator, User Access Administrator or Owner;
+  # Contributor stops exactly here, after the storage account already exists.
+  if echo "$OUT" | grep -q "RoleAssignmentExists"; then
+    echo >&2
+    echo "The identity already has its role, granted outside this template" >&2
+    echo "(e.g. az role assignment create, under another name). Deploy without" >&2
+    echo "declaring it, now and every time after:" >&2
+    echo >&2
+    echo "  REPLAY_ASSIGN_ROLE=false $0 $RG $LOCATION" >&2
+  elif echo "$OUT" | grep -q "roleAssignments"; then
     echo >&2
     echo "That is the role assignment, and it is the only step Contributor" >&2
     echo "cannot do. Two ways on:" >&2
@@ -84,9 +97,16 @@ if ! OUT=$(az deployment group create \
     echo >&2
     echo "       REPLAY_STORAGE_AUTH=connectionString $0 $RG $LOCATION" >&2
     echo >&2
-    echo "  2. Have someone with User Access Administrator or Owner run" >&2
-    echo "     infra/rbac.bicep, then redeploy as you did just now. The key" >&2
-    echo "     disappears from configuration and nothing else changes." >&2
+    echo "  2. Have someone with Role Based Access Control Administrator," >&2
+    echo "     User Access Administrator or Owner grant it (infra/rbac.bicep" >&2
+    echo "     says how), then redeploy without declaring it again:" >&2
+    echo >&2
+    echo "       REPLAY_ASSIGN_ROLE=false $0 $RG $LOCATION" >&2
+    echo >&2
+    echo "     The key disappears from configuration and nothing else changes." >&2
+    echo "     Their values:" >&2
+    echo "       az storage account list -g $RG --query \"[].name\" -o tsv" >&2
+    echo "       az identity list -g $RG --query \"[].{name:name, principalId:principalId}\" -o table" >&2
     echo >&2
     echo "Nothing is half-built: the deployment is incremental and re-running" >&2
     echo "it is safe." >&2
@@ -94,8 +114,9 @@ if ! OUT=$(az deployment group create \
   exit 1
 fi
 
-APP=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["functionAppName"]["value"])')
-HOSTNAME=$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["functionAppHostName"]["value"])')
+output() { echo "$OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['$1']['value'])"; }
+APP=$(output functionAppName)
+HOSTNAME=$(output functionAppHostName)
 
 echo "==> package"
 python3 "$HERE/build.py"
@@ -145,6 +166,8 @@ echo
 echo "==> deployed"
 echo "  MCP      https://$HOSTNAME/mcp/<cassette-id>"
 echo "  summary  https://$HOSTNAME/summary/<cassette-id>"
+echo "  storage  $(output storageAccountName) (auth: $(output storageAuthMode))"
+echo "  identity $(output identityName) (principal $(output identityPrincipalId))"
 
 if [ -n "${SKIP_VERIFY:-}" ]; then
   echo

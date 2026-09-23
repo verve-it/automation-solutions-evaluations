@@ -35,6 +35,12 @@ SHARED = [
     os.path.join(ROOT, "replay", "state_store.py"),
     os.path.join(ROOT, "replay", "make_cassette.py"),
     os.path.join(ROOT, "trace_to_eval.py"),
+    # trace_to_eval and make_cassette import evalconfig at module level, so
+    # a package without it dies on import -- every request a 502. It did,
+    # from the commit that added evalconfig until this line. The config file
+    # rides along so the hosted import reads what a checkout reads.
+    os.path.join(ROOT, "evalconfig.py"),
+    os.path.join(ROOT, "eval-config.json"),
 ]
 
 OWN = ["server.py", "host.json", "requirements.txt"]

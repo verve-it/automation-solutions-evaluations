@@ -25,9 +25,11 @@ so `-NewToken` generates one and prints it once:
 .\deploy.ps1 -ResourceGroup my-resource-group -NewToken
 ```
 
-Save that token when it prints. It goes into a secure app setting and Azure
-will not read it back out, so it is not recoverable from the deployment.
-Re-running with `-NewToken` issues a new one and rotates it.
+Save that token when it prints. It cannot be read back from the deployment's
+secure parameter, only from the app's settings (`REPLAY_TOKEN`), by anyone
+allowed to list them. Re-running with `-NewToken` issues a new one and rotates
+it -- which locks out every caller holding the old one, the gate included,
+until they are updated. On a redeploy, set the existing token instead.
 
 Either script provisions everything in `infra/main.bicep` and publishes the
 package, then prints the `run_replay.py` command to use next.
@@ -40,15 +42,17 @@ python3 functions/replay-mcp/verify.py https://<app>.azurewebsites.net \
 ```
 
 It waits up to 180 seconds for the server to come up first (`--wait`), because
-a remote build finishes *after* the publish command returns and a Flex app
-that scaled to zero takes time to come back — reporting either as a failure
-sends you to read logs about a server that was only starting.
+a new deployment takes a while to start serving and a Flex app that scaled to
+zero takes time to come back — reporting either as a failure sends you to read
+logs about a server that was only starting.
 
 Then it replays every deployed cassette from the local copy of the same
-recording and checks the four things the gate rests on: every recorded call comes back
+recording and checks what the gate rests on: every recorded call comes back
 byte-identical, writes are replayed as recorded successes, the advertised
-schemas still carry their enums, and two sessions do not consume each other's
-queue. Exits non-zero on any of them, so it can gate a deployment.
+schemas still carry their enums, two sessions do not consume each other's
+queue, a concurrent fan-out is answered and journalled in full, and replay
+state is in blob storage (not in the process) with a SAS that has not expired.
+Exits non-zero on any of them, so it can gate a deployment.
 
 ### Region
 
@@ -164,11 +168,14 @@ handler's own stdout from Application Insights.
 
 The server is built not to be the cause. Start-up prints the interpreter, its
 path and the working directory before anything can fail; a missing module says
-which one and where it looked; and the replay state backend is resolved on
-**first use**, not at start-up, because walking a credential chain to failure
-took 37 seconds in testing — long enough on its own for the host to give up.
-If blob storage cannot be reached the server still serves, with in-process
-state and a loud warning, and `/` reports which backend it got.
+which one and where it looked; and the replay state store is reached on
+**first use**, not at start-up, because anything slow on the start-up path
+(a token, a firewall) turns into a host that gives up and a 502 that says
+nothing. If the configured store cannot be reached the server still starts,
+but answers every MCP call with `replay state unavailable: <cause>` and tries
+the store again a few seconds later -- it never answers from in-process state
+another instance cannot see. `GET /?resolve=1` reports the store or the cause,
+and `verify.py` **fails** anything but blob storage.
 
 ---
 
@@ -181,12 +188,10 @@ exists. `az` takes the resource group explicitly and does not search, so both
 scripts use:
 
 ```
-az functionapp deployment source config-zip -g <rg> -n <app> \
-    --src package.zip --build-remote true
+az functionapp deployment source config-zip -g <rg> -n <app> --src package.zip
 ```
 
-`--build-remote` is not optional for Python: `requirements.txt` has to be
-installed somewhere, and it is not going to be a Windows laptop. Despite the
+No `--build-remote`: there is nothing to build (see below). Despite the
 command's name this routes to **Flex Consumption package deployment**, which is
 the only deployment technology Flex supports — plain zip deploy is not.
 
@@ -203,7 +208,7 @@ window fails in a way that reads like the app was never created.
 | `POST /mcp/<cassette-id>` | MCP streamable HTTP |
 | `POST /mcp` | same, using `REPLAY_CASSETTE` |
 | `GET /summary/<cassette-id>` | the replay journal for one session |
-| `GET /` | health, and nothing else |
+| `GET /` | health, and nothing else; `?resolve=1` reaches the state store first |
 
 `/` is open so the platform can probe it. Everything else takes the bearer
 token: `/summary` is the journal, which carries canonicalised tool arguments —
@@ -225,16 +230,21 @@ cassette, which is the old single-process behaviour rather than a failure.
 | `REPLAY_CASSETTE_DIR` | default `./cassettes` |
 | `REPLAY_TOOL_DEFS` | default `./tool_manifests` |
 | `REPLAY_ON_EXHAUSTED` | `repeat` (default) or `diverge` |
-| `REPLAY_STATE_SAS` | container URL with a SAS — the path that needs no SDK |
-| `REPLAY_STATE_ACCOUNT` | blob endpoint for replay state (SDK path) |
-| `REPLAY_STATE_CONTAINER` | container for replay state |
+| `REPLAY_STATE_CONTAINER` | container for replay state (both modes) |
+| `REPLAY_STATE_ACCOUNT` | blob endpoint; with the container, state is kept as the managed identity (`storageAuth=identity`) |
+| `AZURE_CLIENT_ID` | the user-assigned identity to ask for a token as (`storageAuth=identity`) |
+| `REPLAY_STATE_SAS` | container URL with a SAS (`storageAuth=connectionString`); wins when set |
 
-Bicep sets all of these. Clear the last two and state stays in the process,
-which is correct only while one instance serves a whole replay.
+Bicep sets `REPLAY_TOKEN`, `REPLAY_CASSETTE`, `REPLAY_ON_EXHAUSTED`,
+`REPLAY_STATE_CONTAINER`, and the state settings for the mode it deploys;
+the two directories default to the flat package's payload. With no state
+setting at all, state is in the process: right for a laptop, and `verify.py`
+fails it on a hosted app.
 
 `infra/main.bicepparam` takes its own values from the environment —
 `REPLAY_NAME`, `REPLAY_LOCATION`, `REPLAY_TOKEN`, `REPLAY_CASSETTE`,
-`REPLAY_ON_EXHAUSTED` — rather than from inline `-p` overrides, because the
+`REPLAY_ON_EXHAUSTED`, `REPLAY_STORAGE_AUTH`, `REPLAY_ASSIGN_ROLE` — rather
+than from inline `-p` overrides, because the
 Azure CLI accepts **one** parameter source per deployment: a `.bicepparam`
 file *or* inline parameters, never both. Environment variables are how a
 parameter file stays parameterised, and they read the same from bash and
@@ -257,20 +267,26 @@ That is why the journal came back with 3 of 50 calls in it: the store had
 degraded to in-process, every instance kept its own cursor, and calls were
 answered with the first recorded response where a later one was due.
 
-So state goes over the **blob REST API with a container SAS**, minted at
-deploy time by `infra/main.bicep` and handed to the app as
-`REPLAY_STATE_SAS`. Signing would need crypto and the account key at runtime;
-a SAS needs neither, so the store is `urllib` and `json`. The SAS is narrower
-than the account key it replaces: one container, read and write, and it
-expires — `stateSasExpiry`, a year by default. Redeploy to roll it.
+So state goes over the **blob REST API**, `urllib` and `json`, authorised one
+of two ways:
+
+| `storageAuth` | How | Expires |
+|---|---|---|
+| `identity` (default) | the app's user-assigned managed identity: a token from the platform's identity endpoint (`IDENTITY_ENDPOINT`, `X-IDENTITY-HEADER`, api 2019-08-01), sent as a bearer header | nothing |
+| `connectionString` | a container SAS minted at deploy time and handed over as `REPLAY_STATE_SAS` | `stateSasExpiry`, a year by default; `/` reports it, `verify.py` warns 30 days out and fails after. Redeploy to roll it. |
+
+The identity path used to go through `azure-storage-blob`, which cannot import
+here, so the **default** deployment silently kept state in-process. It is
+stdlib now; the SDK store is gone. A role assigned directly to the identity
+takes up to ~10 minutes to take effect; until then verify reports the store
+`unavailable` with a 403, and the server retries by itself.
 
 `requirements.txt` is therefore empty and the deployment asks for **no remote
 build**. A build that installs packages where nothing looks is worse than no
 build: it succeeds, and the app is still missing its dependency.
 
-`server.py` does add `.python_packages/lib/site-packages` to `sys.path` when
-it exists, so a dependency that does get installed is usable rather than
-invisible. Nothing needs one today.
+Nothing here needs a dependency, so `server.py` no longer puts
+`.python_packages` on `sys.path` either.
 
 ---
 
@@ -289,10 +305,12 @@ blob storage, guarded by its ETag, makes the question moot. It also means the
 journal survives an instance recycle mid-run, which is what makes `/summary`
 worth reading afterwards.
 
-The ETag check is not there to arbitrate a race between agent turns, which are
-sequential. It is there to make a lost update **loud**: two instances answering
-one session means the replay is already unordered, and the server returns a
-409 saying so rather than an answer that looks fine.
+The ETag makes a lost update **loud**. Calls in one session are not
+sequential -- the ops agent sends up to nine at once -- so the server
+serialises a session's calls within an instance, and when another instance
+saves first it reloads and re-applies the call. Only a race lost on every
+retry is a 409, saying the replay is unordered rather than giving an answer
+that looks fine.
 
 ---
 
@@ -302,7 +320,7 @@ one session means the replay is already unordered, and the server returns a
 
 | | Needs | Cost |
 |---|---|---|
-| `identity` (default) | `Microsoft.Authorization/roleAssignments/write` at deploy time — User Access Administrator or Owner | none. No key exists anywhere. |
+| `identity` (default) | `Microsoft.Authorization/roleAssignments/write` at deploy time — Role Based Access Control Administrator, User Access Administrator or Owner | none. No key exists anywhere. |
 | `connectionString` | nothing beyond Contributor | a storage account key sits in app settings, readable by anyone who can read the app's configuration, and it does not rotate itself |
 
 Contributor stops at exactly one step: granting the identity Storage Blob Data
@@ -320,18 +338,31 @@ two ways on.
 REPLAY_STORAGE_AUTH=connectionString ./deploy.sh my-resource-group
 ```
 
-**Then, when someone who can assign roles is available**, they run
-`infra/rbac.bicep` — the role assignment alone, nothing else, safe to run while
-the app is serving:
+**If you hold one of those roles as well as Contributor**, just deploy on the
+default `identity`: the template assigns the role itself.
 
-```bash
-az deployment group create -g <rg> -f infra/rbac.bicep \
-    -p storageAccountName=<storage> identityName=<name>-replay-id
+**If the roles are split between people**, the role holder grants it --
+`infra/rbac.bicep` (running a deployment needs Contributor as well, or Owner
+alone) or the one `az role assignment create` in its header -- and you
+redeploy on identity
+*without* declaring the assignment, which a Contributor cannot put even when
+it already exists:
+
+```powershell
+.\deploy.ps1 -ResourceGroup <rg> -StorageAuth identity -SkipRoleAssignment
 ```
 
-and you redeploy as normal. The key disappears from configuration and nothing
-else about the app changes. Both templates compute the assignment name from the
-same inputs, so running both is idempotent rather than a duplicate.
+```bash
+REPLAY_STORAGE_AUTH=identity REPLAY_ASSIGN_ROLE=false ./deploy.sh <rg>
+```
+
+The key and the SAS disappear from configuration and nothing else about the
+app changes. The deploy scripts print the storage account and identity names
+they need. A role assigned directly to the identity takes up to ~10 minutes to
+take effect; the same identity carries the host's storage and the deployment
+package, so in that window the app may not start at all. rbac.bicep computes
+the assignment name the same way main.bicep does, so running both is
+idempotent rather than a duplicate.
 
 The identity is created in **both** modes, deliberately. ARM evaluates both
 sides of a ternary, so a reference to a resource that only sometimes exists is

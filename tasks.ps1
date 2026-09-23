@@ -25,9 +25,13 @@ param(
     # replay: which cassette to serve.
     [string] $Cassette,
 
-    # replay-deploy: the resource group, and optionally the region.
+    # replay-deploy: the resource group, and optionally the region, storage
+    # auth and whether the template assigns the identity its role.
     [string] $ResourceGroup,
     [string] $Location = 'eastus2',
+    [ValidateSet('identity', 'connectionString')]
+    [string] $StorageAuth = 'identity',
+    [switch] $SkipRoleAssignment,
 
     # replay-verify: the deployed server.
     [string] $Url
@@ -68,7 +72,7 @@ switch ($Target) {
         Write-Host '  cassettes           build replay cassettes from the committed traces'
         Write-Host '  replay              serve a cassette as an MCP toolbox  -Cassette <path>'
         Write-Host '  replay-package      assemble the Azure Function deployment package'
-        Write-Host '  replay-deploy       provision and publish  -ResourceGroup <rg> [-Location]'
+        Write-Host '  replay-deploy       provision and publish  -ResourceGroup <rg> [-Location] [-StorageAuth] [-SkipRoleAssignment]'
         Write-Host '  replay-verify       replay every cassette against the hosted server  -Url <url>'
         Write-Host '  foundry-dataset     build the Foundry evaluation dataset'
         Write-Host '  foundry-register    print the evaluator payloads without calling Foundry'
@@ -128,7 +132,8 @@ switch ($Target) {
             throw 'usage: .\tasks.ps1 replay-deploy -ResourceGroup <rg> [-Location <region>]'
         }
         & (Join-Path $here 'functions/replay-mcp/deploy.ps1') `
-            -ResourceGroup $ResourceGroup -Location $Location
+            -ResourceGroup $ResourceGroup -Location $Location `
+            -StorageAuth $StorageAuth -SkipRoleAssignment:$SkipRoleAssignment
     }
 
     'replay-verify' {

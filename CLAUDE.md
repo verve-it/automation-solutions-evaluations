@@ -170,9 +170,36 @@ that setup. The app logged `ModuleNotFoundError: No module named 'azure'` with
 the package plainly deployed, and that is why a 50-call replay journalled 3 —
 the store degraded to in-process and each instance kept its own cursor.
 
-Replay state now goes over the blob REST API with a container SAS minted by
-`infra/main.bicep`. `requirements.txt` is empty, the deployment asks for no
-remote build, and the whole server is stdlib.
+Replay state goes over the blob REST API, stdlib only, two ways:
+
+- **`storageAuth=identity` (the default):** a token from the platform's
+  managed-identity endpoint (`IDENTITY_ENDPOINT` / `IDENTITY_HEADER`, api
+  2019-08-01, `client_id` = the user-assigned identity) as a bearer header.
+  Nothing to leak, nothing to expire. This mode used to reach an SDK-based
+  store that could not import, and fell back to in-process state *silently* —
+  the default deployment was the broken one. That store is deleted.
+- **`storageAuth=connectionString`:** a container SAS minted by
+  `infra/main.bicep`. It expires (`stateSasExpiry`, a year); `/` reports when,
+  and `verify.py` warns 30 days out and fails once it has.
+
+**`verify.py` fails any backend but those two.** It used to print a NOTE on
+in-process state and pass. It reads `GET /?resolve=1`, so the answer is about
+a store the instance has actually reached, and the gate runs verify first.
+
+**A configured store is durable or an error, never in-process.** A store that
+cannot be reached is not swapped for a MemoryStore: the server still starts
+(a handler that will not start is a 502 that says nothing), answers every MCP
+call with `replay state unavailable: <cause>`, and tries the store again a few
+seconds later. The fallback it replaced was kept for the instance's life, so
+one failed token request on one instance of a scaled-out app gave it its own
+cursor and the agent answers from the wrong place in the recording.
+
+A role assigned directly to the identity takes up to ~10 minutes (the ~24
+hours in Microsoft's managed-identity docs is for group membership, which
+this does not use). `requirements.txt` is empty, the deployment asks for no
+remote build, and the whole server is stdlib. `build.py` ships `evalconfig.py`:
+without it the package could not import, and
+`test_the_built_package_starts_on_its_own` now starts it in isolation.
 
 ## Binding is per agent kind, and every triage agent is HOSTED
 

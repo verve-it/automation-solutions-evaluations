@@ -55,22 +55,29 @@ param onExhausted string = 'repeat'
   How the function app authenticates to storage.
 
   identity          the managed identity, with a role assignment. No key
-                    exists to leak. Needs Microsoft.Authorization/
-                    roleAssignments/write on the resource group AT DEPLOY
-                    TIME -- that is User Access Administrator or Owner, which
-                    Contributor does not include.
+                    exists to leak, and replay state is kept with a token
+                    from the platform's identity endpoint (stdlib, no SDK).
+                    Needs Microsoft.Authorization/roleAssignments/write on
+                    the resource group AT DEPLOY TIME -- Role Based Access
+                    Control Administrator, User Access Administrator or
+                    Owner, alongside Contributor (which does not include it)
+                    -- unless assignRole is false.
 
   connectionString  a storage account key in app settings. Needs nothing
                     beyond Contributor. The key is a real secret sitting in
                     configuration, readable by anyone who can read the app's
                     settings, and it does not rotate on its own.
 
-  Start on connectionString if you cannot assign roles, then have someone who
-  can run infra/rbac.bicep and redeploy with storageAuth=identity. Nothing
-  else about the app changes.
+  Start on connectionString if you cannot assign roles. Then have someone who
+  can grant the role (infra/rbac.bicep, or the `az role assignment create`
+  in its header), and redeploy with storageAuth=identity and assignRole=false.
+  Nothing else about the app changes.
 */
 @allowed(['identity', 'connectionString'])
 param storageAuth string = 'identity'
+
+@description('Assign the identity its storage role in this deployment. false when someone else has granted it already (infra/rbac.bicep): ARM re-puts every resource it declares, so a deployer without roleAssignments/write fails on an assignment that already exists.')
+param assignRole bool = true
 
 @description('When the replay-state SAS expires. Minted at deploy time; redeploy to roll it. A year keeps a gate from failing on a Tuesday for a reason nobody remembers.')
 param stateSasExpiry string = dateTimeAdd(utcNow(), 'P1Y')
@@ -87,9 +94,12 @@ var functionAppName = '${name}-replay-${take(suffix, 6)}'
 var deploymentContainer = 'deploymentpackage'
 var stateContainer = 'replay-state'
 
-// Storage Blob Data Owner. Owner rather than Contributor because the app
-// creates the state container on first use, and because the Flex deployment
-// container is managed by the platform through this same identity.
+// Storage Blob Data Owner, on the account. The host's own storage
+// (AzureWebJobsStorage) and the Flex deployment container use this identity
+// too, not just the replay state -- so while the assignment is still taking
+// effect (up to ~10 minutes) the app may not start at all. The replay state
+// itself needs only read and write on blobs in its container, which Bicep
+// creates; nothing creates containers at runtime.
 var blobDataOwner = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
 
 var useIdentity = storageAuth == 'identity'
@@ -101,11 +111,11 @@ var useIdentity = storageAuth == 'identity'
 var storageKey = storage.listKeys().keys[0].value
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storageKey};EndpointSuffix=${environment().suffixes.storage}'
 
-// A container-scoped SAS, so the replay server can keep its state over plain
-// HTTPS with no SDK -- azure-storage-blob is not importable in a custom
-// handler, because Oryx installs it where only the Python *worker* looks. The
+// A container-scoped SAS, for storageAuth=connectionString only: there the
+// identity has no role, so the replay server keeps its state with this over
+// plain HTTPS. (Under identity it asks the platform for a token instead.) The
 // SAS is narrower than the account key it replaces: one container, read and
-// write, and it expires.
+// write, and it expires -- /health reports when, and verify.py fails after.
 //
 // Minted here rather than signed in the server: signing needs a crypto
 // implementation and the account key at runtime, and this needs neither.
@@ -172,7 +182,7 @@ resource replayStateContainer 'Microsoft.Storage/storageAccounts/blobServices/co
   properties: { publicAccess: 'None' }
 }
 
-resource storageRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useIdentity) {
+resource storageRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useIdentity && assignRole) {
   name: guid(storage.id, identity.id, blobDataOwner)
   scope: storage
   properties: {
@@ -257,12 +267,11 @@ resource site 'Microsoft.Web/sites@2023-12-01' = {
     siteConfig: {
       minTlsVersion: '1.2'
       appSettings: union([
-        // Load-bearing and invisible. The mcp-custom-handler configuration
-        // profile in host.json is PREVIEW, and without this flag the host
-        // does not recognise it: it looks for functions, finds none, never
-        // starts the handler, and answers 502 to everything. Nothing in the
-        // failure names the flag. Microsoft's own sample carries it in
-        // local.settings.json, which is the only place it is written down.
+        // Microsoft's sample sets this in local.settings.json, and the name
+        // says the mcp-custom-handler profile is preview, so it is set here
+        // too. It was NOT the cause of the early 502s: host 4.1054.250.26428
+        // honoured the profile without it. Read the handler's log before
+        // blaming its absence.
         { name: 'AzureWebJobsFeatureFlags', value: 'EnableMcpCustomHandlerPreview' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: insights.properties.ConnectionString }
         { name: 'REPLAY_TOKEN', value: replayToken }
@@ -275,9 +284,10 @@ resource site 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AzureWebJobsStorage__accountName', value: storage.name }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: identity.properties.clientId }
-        // DefaultAzureCredential inside state_store.py picks the user-assigned
-        // identity from this. Without it, it would try the system-assigned one,
-        // which this app does not have.
+        // state_store.IdentityBlobStore asks the platform's identity endpoint
+        // (IDENTITY_ENDPOINT) for a storage token AS this identity. Without
+        // the client id it would ask for the system-assigned one, which this
+        // app does not have. Stdlib only: no SDK, so nothing to import.
         { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
         { name: 'REPLAY_STATE_ACCOUNT', value: storage.properties.primaryEndpoints.blob }
       ] : [
@@ -285,8 +295,8 @@ resource site 'Microsoft.Web/sites@2023-12-01' = {
         // role needs a permission Contributor does not carry; see storageAuth.
         { name: 'AzureWebJobsStorage', value: storageConnectionString }
         { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: storageConnectionString }
-        { name: 'REPLAY_STATE_CONNECTION', value: storageConnectionString }
-        // The one that works without a dependency, so it is tried first.
+        // Replay state with a container SAS: this mode has no role for the
+        // identity. (Identity mode asks for a token instead; see above.)
         { name: 'REPLAY_STATE_SAS', value: stateSasUrl }
       ])
     }
@@ -307,4 +317,5 @@ output deploymentContainerName string = deploymentContainer
 output stateContainerName string = stateContainer
 output identityClientId string = identity.properties.clientId
 output identityPrincipalId string = identity.properties.principalId
+output identityName string = identity.name
 output storageAuthMode string = storageAuth
