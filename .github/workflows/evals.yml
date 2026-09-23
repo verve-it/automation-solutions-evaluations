@@ -179,7 +179,13 @@ jobs:
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # The CI apps hold roles on the Foundry project and the Log
+          # Analytics workspace only, so no subscription is visible to them
+          # and a plain login fails with "No subscriptions found". Nothing
+          # here uses ARM: Foundry and Log Analytics are data-plane calls
+          # with a tenant token. No subscription-id either -- azure/login
+          # runs `az account set` on one, which fails the same way.
+          allow-no-subscriptions: true
 
       - name: Show target
         run: |

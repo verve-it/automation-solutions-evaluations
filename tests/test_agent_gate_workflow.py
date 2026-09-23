@@ -420,3 +420,56 @@ def test_no_workflow_invokes_an_agent_against_real_tools():
             steps = [line for line in text.splitlines()
                      if token in line and not line.lstrip().startswith("#")]
             assert not steps, f"{os.path.basename(path)}: {steps}"
+
+
+@pytest.mark.parametrize("name", ["agent-gate.yml", "evals.yml"])
+def test_azure_login_needs_no_visible_subscription(name):
+    """The CI apps hold roles on the project and the workspace only, so they
+    see no subscription: a plain login fails "No subscriptions found", and a
+    subscription-id makes azure/login run `az account set`, which fails the
+    same way. Nothing in CI uses ARM."""
+    path = os.path.join(REPO, ".github", "workflows", name)
+    with open(path, encoding="utf-8") as fh:
+        wf = yaml.safe_load(fh)
+    logins = [s for job in wf["jobs"].values() for s in job.get("steps", [])
+              if str(s.get("uses", "")).startswith("azure/login")]
+    assert logins
+    for step in logins:
+        assert step["with"].get("allow-no-subscriptions") is True
+        assert "subscription-id" not in step["with"]
+
+
+def test_the_caller_deploys_staging_then_gates_then_deploys_prod(workflow):
+    """The gate replays the LATEST version in the project it is pointed at:
+    before the staging deploy, or against prod, it tests what is already
+    there instead of the change."""
+    path = os.path.join(REPO, "docs", "agent-gate-caller.yml")
+    with open(path, encoding="utf-8") as fh:
+        caller = yaml.safe_load(fh)
+    jobs = caller["jobs"]
+    gate = jobs["gate"]
+    assert gate["uses"] == ("verve-it/automation-solutions-evaluations/"
+                            ".github/workflows/agent-gate.yml@main")
+    assert gate["needs"] == "deploy-staging"
+    assert gate["with"]["environment"] == "staging"
+    assert gate["secrets"] == "inherit"
+    assert jobs["deploy-prod"]["needs"] == "gate"
+    assert jobs["deploy-staging"]["environment"] == "staging"
+    assert caller["permissions"]["id-token"] == "write"
+    # Every input it passes is one the gate declares.
+    on = workflow.get("on") or workflow.get(True)
+    declared = set(on["workflow_call"]["inputs"])
+    assert set(gate["with"]) <= declared
+
+
+def test_the_configuration_check_runs_before_login_and_names_everything(steps):
+    names = [s.get("name") or s.get("uses") for s in steps]
+    assert names.index("Check the gate is configured") < \
+        names.index("azure/login@v2")
+    check = next(s for s in steps if s.get("name") == "Check the gate is configured")
+    gate_text = open(GATE, encoding="utf-8").read()
+    import re
+    read = set(re.findall(r"(?:vars|secrets)\.([A-Z_]+)", gate_text))
+    optional = {"AZURE_JUDGE_DEPLOYMENT"}
+    for name in read - optional:
+        assert name in check["run"], name

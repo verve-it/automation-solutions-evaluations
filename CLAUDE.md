@@ -227,7 +227,9 @@ because Foundry is what calls the replay server, not the agent.
 ## The clone is never a version of the agent under test
 
 It is a version of **`<agent>-replay`**, a separate agent that nothing but
-`run_replay.py` calls. A new version of `connectwise-operations-agent` itself
+`run_replay.py` calls. It is **made on demand and deleted after the run**: a
+first version creates it, so any agent replays with no per-agent setup, and
+nothing named `-replay` lingers between runs for anything to call. A new version of `connectwise-operations-agent` itself
 would be what that name resolves to while it existed — the SDK says only
 *draft* versions are excluded from "latest", and `create_version_from_code`,
 the only way to make a hosted version, takes no draft flag — so production

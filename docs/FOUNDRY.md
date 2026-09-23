@@ -243,7 +243,7 @@ Set on the GitHub environment (`staging` and `prod`), not repo-wide:
 
 | Name | Kind | Example |
 |---|---|---|
-| `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | var | federated credential for that project |
+| `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` | var | federated credential for that project (login is `allow-no-subscriptions`; no subscription id is read) |
 | `AZURE_AI_PROJECT_ENDPOINT` | var | the project endpoint; the replay guard checks this contains `automation-solutions-test` |
 | `AZURE_JUDGE_DEPLOYMENT` | var | the pinned judge deployment — see below |
 | `DEFAULT_AGENT_IDS` | var | `staging` only: `agent-name:version` to replay when a push supplies none |

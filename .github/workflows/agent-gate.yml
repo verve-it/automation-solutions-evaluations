@@ -5,19 +5,20 @@
 # what it does — which is how you decide whether an agent change is safe to
 # deploy. No ConnectWise request is made, for reads or writes.
 #
-# Called from the repository that holds the agents, before it deploys:
+# It replays the LATEST version of each recorded agent in the named project,
+# so it runs after the agent reaches staging and before it reaches prod:
 #
-#   jobs:
-#     evals:
-#       uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
-#       with:
-#         environment: staging
-#       secrets: inherit
-#     deploy:
-#       needs: evals          # <- the gate
+#   deploy-staging -> gate (environment: staging) -> deploy-prod (needs: gate)
 #
+# docs/agent-gate-caller.yml is that workflow, ready to copy into the
+# repository that holds the agents, with the settings its environments need.
 # `needs:` is the gate. Without it this reports and the deploy proceeds
 # regardless, which is a dashboard, not a gate.
+#
+# Called from another repository, `environment:`, `vars.*` and the OIDC
+# subject all belong to the CALLER: its staging environment must hold the
+# settings checked below, and the federated credential must trust
+#   repo:<owner>/<agents-repo>:environment:staging
 name: agent gate
 
 on:
@@ -96,26 +97,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      # Fail here rather than three steps in with an unhelpful SDK error.
+      # Fail here, before login, rather than at login or three steps in with an
+      # unhelpful SDK error.
       - name: Check the gate is configured
         run: |
           missing=
           [ -n "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" ] || missing="$missing AZURE_AI_PROJECT_ENDPOINT(var)"
           [ -n "${{ vars.REPLAY_SERVER_URL }}" ]         || missing="$missing REPLAY_SERVER_URL(var)"
           [ -n "${{ secrets.REPLAY_TOKEN }}" ]           || missing="$missing REPLAY_TOKEN(secret)"
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]           || missing="$missing AZURE_CLIENT_ID(var)"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]           || missing="$missing AZURE_TENANT_ID(var)"
+          [ -n "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" ] || missing="$missing LOG_ANALYTICS_WORKSPACE_ID(secret)"
           if [ -n "$missing" ]; then
-            echo "::error::not configured on the '${{ inputs.environment }}' environment:$missing"
+            echo "::error::not configured on the '${{ inputs.environment }}' environment of ${{ github.repository }}:$missing"
             exit 1
           fi
           echo "environment : ${{ inputs.environment }}"
           echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
           echo "replay      : ${{ vars.REPLAY_SERVER_URL }}"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          # The CI apps hold roles on the Foundry project and the Log
+          # Analytics workspace only, so no subscription is visible to them
+          # and a plain login fails with "No subscriptions found". Nothing
+          # here uses ARM: Foundry and Log Analytics are data-plane calls
+          # with a tenant token. No subscription-id either -- azure/login
+          # runs `az account set` on one, which fails the same way.
+          allow-no-subscriptions: true
 
       - name: Build cassettes from the committed traces
         run: make cassettes

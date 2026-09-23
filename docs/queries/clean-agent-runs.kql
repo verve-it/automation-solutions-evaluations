@@ -1,0 +1,44 @@
+// Clean runs of one agent: candidates for a known-good recording.
+//
+// Run in the Log Analytics workspace (Logs blade, or `az monitor log-analytics
+// query`). Needs Privileged Monitoring Data Reader for AppGenAIContent.
+// Returns ids and counts only -- no prompts, arguments or results -- so the
+// output is safe to paste into a chat.
+//
+// "Clean" is what the gating checks can see from the spans:
+//   - the agent alone in its operation (single-agent: the gate replays it)
+//   - every span succeeded, and no tool result carries an error
+//   - no identical call twice (no_wasted_calls)
+//   - enough tool calls to be worth replaying, not so many it is a loop
+let lookback = 14d;
+let agent = "connectwise-operations-agent";
+let spans = AppDependencies
+    | where TimeGenerated > ago(lookback)
+    | extend who = tostring(Properties["gen_ai.agent.name"]);
+let ops = spans | where who == agent | distinct OperationId;
+let content = AppGenAIContent
+    | where TimeGenerated > ago(lookback)
+    | project SpanId, ToolCallArguments, ToolCallResult;
+spans
+| where OperationId in (ops)
+| join kind=leftouter content on $left.Id == $right.SpanId
+| extend is_tool = Name startswith "execute_tool",
+         tool = tostring(Properties["gen_ai.tool.name"]),
+         args = coalesce(ToolCallArguments, tostring(Properties["gen_ai.tool.call.arguments"])),
+         result = coalesce(ToolCallResult, tostring(Properties["gen_ai.tool.call.result"]))
+| summarize started = min(TimeGenerated),
+            agents = dcountif(who, isnotempty(who)),
+            version = take_anyif(tostring(Properties["gen_ai.agent.version"]), who == agent),
+            tool_calls = countif(is_tool),
+            distinct_calls = dcountif(strcat(tool, "|", args), is_tool),
+            failed_spans = countif(Success == false),
+            error_results = countif(is_tool and (result contains "\"isError\":true"
+                                                 or result contains "\"isError\": true"
+                                                 or result startswith "{\"error\""))
+    by OperationId
+| extend repeated_calls = tool_calls - distinct_calls
+| where agents == 1 and failed_spans == 0 and error_results == 0
+        and repeated_calls == 0 and tool_calls between (3 .. 40)
+| project OperationId, started, version, tool_calls
+| order by started desc
+| take 20

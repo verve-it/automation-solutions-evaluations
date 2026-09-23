@@ -19,18 +19,23 @@ REPLAY = OPS + "-replay"
 LABEL = "ConnectWise-PSA-ForAgents"
 
 
+class NotFound(Exception):
+    status_code = 404
+
+
 class FakeProject:
     """Records every SDK call. `routes_to_clone` decides what the replay
     agent's name resolves to after the clone is created."""
 
     def __init__(self, env=None, routes_to_clone=True, replay_readable=True,
-                 others=("triage-analysis-agent",)):
+                 others=("triage-analysis-agent",), replay_exists=True):
         self.calls = []
         self.env = env or {"AZURE_AI_MODEL_DEPLOYMENT_NAME": "gpt",
                            rr.TOOLBOX_NAME_VAR: "ConnectwiseMCP",
                            rr.TOOLBOX_VERSION_VAR: "1"}
         self.routes_to_clone = routes_to_clone
         self.replay_readable = replay_readable
+        self.replay_exists = replay_exists
         self.names = [OPS, REPLAY, *others]
         self.replay_latest = "7"
         self.agents = self
@@ -56,6 +61,8 @@ class FakeProject:
                           "code_configuration": {"entry_point": "main.py"}}
             base = NS(version="29", definition=NS(as_dict=lambda: definition))
             return NS(versions=NS(latest=base), agent_endpoint=None)
+        if name == REPLAY and not self.replay_exists:
+            raise NotFound(f"no agent {name}")
         if name == REPLAY and self.replay_readable:
             return NS(versions=NS(latest=NS(version=self.replay_latest)),
                       agent_endpoint=NS(version_selector=None))
@@ -72,6 +79,7 @@ class FakeProject:
                                  description=None, metadata=None):
         self.calls.append(("create", agent_name, definition))
         self.code_name = getattr(code, "name", None)
+        self.replay_exists = True      # a first version creates the agent
         if self.routes_to_clone:
             self.replay_latest = "8"
         return NS(version="8")
@@ -84,8 +92,13 @@ class FakeProject:
     def stop_session(self, name, session_id):
         self.calls.append(("stop_session", name))
 
-    def delete_version(self, name, version):
+    def delete_version(self, name, version, force=None):
         self.calls.append(("delete_version", name, version))
+        assert force, "a hosted version with a live session needs force"
+
+    def delete(self, name, force=None):
+        self.calls.append(("delete", name))
+        assert force
 
     def _toolbox(self, name, tools, description=None, metadata=None):
         self.calls.append(("toolbox.create", name, tools))
@@ -260,3 +273,30 @@ def test_an_unlistable_project_refuses_before_anything_exists(run):
         run(project)
     assert "cannot list the project's agents" in str(exc.value)
     assert not project.named("create") and not project.named("toolbox.create")
+
+
+def test_the_replay_agent_is_made_for_the_run_and_deleted_after_it(run):
+    """Nothing to set up per agent: a first version creates <agent>-replay,
+    and a run that made it deletes the whole agent, so nothing is left for
+    anything to call by name."""
+    project = FakeProject(replay_exists=False)
+    assert run(project) == 0
+    assert project.named("create")[0][1] == REPLAY
+    assert project.named("delete") == [("delete", REPLAY)]
+    assert not project.named("delete_version")
+
+
+def test_a_replay_agent_that_already_exists_keeps_its_other_versions(run):
+    project = FakeProject(replay_exists=True)
+    assert run(project) == 0
+    assert project.named("delete_version") == [("delete_version", REPLAY, "8")]
+    assert not project.named("delete")
+
+
+def test_a_replay_agent_that_cannot_be_read_stops_before_anything_exists(run):
+    project = FakeProject(replay_readable=False)
+    with pytest.raises(SystemExit) as exc:
+        run(project)
+    assert "cannot read" in str(exc.value)
+    assert not project.named("toolbox.create")
+    assert not project.named("create")

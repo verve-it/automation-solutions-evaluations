@@ -1,0 +1,65 @@
+# The agents repository's deploy workflow, with the agent gate wired in.
+#
+# Copy to .github/workflows/deploy-agents.yml in the repository that holds the
+# agents, and put your existing deploy commands where the two `run:` steps
+# say so. Kept here, not under .github/workflows, so it never runs in the
+# evaluations repository.
+#
+# Order matters. The gate replays the LATEST version of each recorded agent
+# in the project it is pointed at, so it has to run after the change reaches
+# staging and before it reaches prod:
+#
+#   deploy-staging  ->  gate (staging)  ->  deploy-prod
+#
+# Pointed at prod, or run before the staging deploy, it would test the
+# version already there, not the change.
+#
+# This repository's `staging` environment needs, because a reusable workflow
+# reads the CALLER's environment:
+#   vars     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_AI_PROJECT_ENDPOINT,
+#            REPLAY_SERVER_URL, AZURE_JUDGE_DEPLOYMENT (optional)
+#   secrets  REPLAY_TOKEN, LOG_ANALYTICS_WORKSPACE_ID
+# and the staging app's federated credential must trust this repository:
+#   repo:<owner>/<this-repo>:environment:staging
+# The gate's first step names anything missing.
+name: deploy agents
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write           # the gate's azure/login; the called workflow
+                            # cannot have more than the caller grants
+
+# One deploy at a time. The gate also serialises itself per environment.
+concurrency:
+  group: deploy-agents
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy the agents to the staging Foundry project
+        run: echo "replace with the existing staging deploy steps" && exit 1
+
+  gate:
+    needs: deploy-staging
+    uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
+    with:
+      environment: staging
+    secrets: inherit
+
+  deploy-prod:
+    needs: gate               # <- the gate: a regression stops here
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy the agents to the prod Foundry project
+        run: echo "replace with the existing prod deploy steps" && exit 1

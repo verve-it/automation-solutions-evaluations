@@ -159,16 +159,20 @@ It reads the agent version under test, clones its definition with **only the
 tools swapped** for an MCP tool pointing at the replay server, creates that as
 a temporary version **of `<agent>-replay`** tagged `eval-replay-temp`, checks
 that name now resolves to the clone, invokes it, collects `/summary`, and
-deletes the temporary version — including on failure.
+deletes the temporary version -- or the whole replay agent, when the run
+created it -- including on failure.
 
 **Never a version of the agent under test.** A new version is what an agent's
 name resolves to while it exists (only drafts are excluded, and hosted
 versions cannot be drafts), so a clone of `connectwise-operations-agent` would
 answer that agent's production traffic from the recording for the length of
 the replay — writes silently dropped. `<agent>-replay` is called by nothing
-else. If the service will not create an agent by adding its first version,
-create `connectwise-operations-agent-replay` once from the same code; it must
-never be named by any caller, A2A included.
+else, and nothing has to be set up for it: adding its first version creates
+it (how Microsoft's hosted-agent sample creates an agent), and a run that
+created it deletes the whole agent afterwards. So any agent can be replayed
+with no per-agent setup, and between runs there is no `-replay` agent for
+anything to call by name. One that already exists is kept, minus the run's
+version.
 
 The tool is bound under the recording's `server_label`, read from the
 cassette's `ConnectWise-PSA-ForAgents___*` calls: Foundry prefixes every MCP

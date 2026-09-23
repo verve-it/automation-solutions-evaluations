@@ -154,6 +154,28 @@ def agent_references(payload, known_agents, own_name):
                   if isinstance(v, str) and v in known_agents and v != own_name)
 
 
+def replay_agent_exists(agents, replay_agent):
+    """True, False, or SystemExit when the answer cannot be had.
+
+    Asked before anything is created. The replay agent is made on first use
+    -- adding a first version creates an agent, which is how Microsoft's own
+    hosted-agent sample creates one -- and deleted after the run when this
+    run made it, so nothing has to be set up per agent and no agent is left
+    behind for anything to call by name.
+    """
+    try:
+        agents.get(replay_agent)
+        return True
+    except Exception as exc:
+        status = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None)
+        if status == 404 or type(exc).__name__ == "ResourceNotFoundError":
+            return False
+        raise SystemExit(f"cannot read {replay_agent} to learn whether it "
+                         f"exists: {type(exc).__name__}: {exc}. Nothing was "
+                         "created.")
+
+
 def routing_problem(agents, replay_agent, temp_version):
     """Why calling `replay_agent` by name might not reach the clone, or None.
 
@@ -1201,6 +1223,10 @@ def main(argv=None):
         base_version = getattr(base, "version", None) or "latest"
         print(f"binding    : kind={definition_kind(payload)} — "
               f"{binding.describe_plan(payload)}")
+        replay_existed = replay_agent_exists(agents, replay_agent)
+        print(f"replay as  : {replay_agent} "
+              + ("(exists)" if replay_existed
+                 else "(created by this run, deleted after it)"))
 
         prepare_binding(binding, client=client, server_url=server_url,
                         token=args.token, session=replay_session,
@@ -1229,10 +1255,9 @@ def main(argv=None):
                 f"{type(exc).__name__}: {exc}\n\n"
                 f"The clone is created under {replay_agent}, never under "
                 f"{args.agent}, so production traffic to {args.agent} cannot "
-                "reach it. If the service will not create an agent by adding "
-                f"its first version, create {replay_agent} once, from the "
-                f"same code as {args.agent}; nothing but a replay may ever "
-                "call it by name.")
+                "reach it. A 403 means this identity may read agents but not "
+                "create them in this project. The toolbox was deleted; "
+                "nothing else was created.")
         temp_version = getattr(temp, "version", None) or getattr(temp, "id", None)
         print(f"created {replay_agent} v{temp_version} "
               f"(clone of {args.agent} v{base_version})")
@@ -1272,8 +1297,15 @@ def main(argv=None):
                     # temporary agent version behind.
                     pass
             try:
-                agents.delete_version(replay_agent, temp_version)
-                print(f"deleted {replay_agent} v{temp_version}")
+                # force: a hosted version with a session still winding down
+                # is otherwise a 409, and the clone stays. Both are ours.
+                if replay_existed:
+                    agents.delete_version(replay_agent, temp_version,
+                                          force=True)
+                    print(f"deleted {replay_agent} v{temp_version}")
+                else:
+                    agents.delete(replay_agent, force=True)
+                    print(f"deleted {replay_agent} (made for this run)")
             except Exception as exc:
                 # Not a reason to leave the toolbox too: it carries the
                 # replay token in its headers. A clone left under the replay
