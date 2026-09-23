@@ -491,6 +491,25 @@ def test_item_schema_declares_every_column_with_its_real_type():
     assert props["run_agent"]["type"] == "string"
 
 
+def test_locked_versions_reach_the_criteria():
+    """TestingCriterionAzureAIEvaluator is a TypedDict. Setting
+    evaluator_version as an attribute raised AttributeError, after the
+    dataset had been uploaded, on every run with evaluator-versions.json --
+    the gate's and the nightly's. No test built the criteria, so it passed."""
+    pytest.importorskip("azure.ai.projects")
+    import run_cloud_eval
+
+    _, rows = _both(SETS[0])
+    lock = run_cloud_eval.load_lock(os.path.join(REPO,
+                                                 "evaluator-versions.json"))
+    assert lock, "evaluator-versions.json pins nothing"
+    criteria = run_cloud_eval.testing_criteria(rows, "gpt", lock=lock)
+    assert {c["name"]: c.get("evaluator_version") for c in criteria} == lock
+
+    unlocked = run_cloud_eval.testing_criteria(rows, "gpt", lock={})
+    assert all("evaluator_version" not in c for c in unlocked)
+
+
 def test_item_schema_has_no_type_unions():
     """A nullable column becomes a union, which the service may not take."""
     import run_cloud_eval

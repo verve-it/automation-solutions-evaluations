@@ -142,18 +142,19 @@ def testing_criteria(rows, model_deployment, judged=(), only=None, lock=None):
     for name, (_, _, _, _, threshold, _) in checks.EVALUATORS.items():
         if only and name not in only:
             continue
-        criterion = TestingCriterionAzureAIEvaluator(
+        # A TypedDict: an instance is a plain dict, so the version is a key
+        # given at construction. Assigning it as an attribute raised
+        # AttributeError on every run that had a lock.
+        version = (lock or {}).get(name)
+        criteria.append(TestingCriterionAzureAIEvaluator(
             type="azure_ai_evaluator",
             name=name,
             evaluator_name=name,
             initialization_parameters=init_params(model_deployment,
                                                   threshold),
             data_mapping=data_mapping(rows),
-        )
-        version = (lock or {}).get(name)
-        if version:
-            criterion.evaluator_version = version
-        criteria.append(criterion)
+            **({"evaluator_version": version} if version else {}),
+        ))
 
     for short in judged:
         criteria.append(TestingCriterionAzureAIEvaluator(
