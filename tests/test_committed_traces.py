@@ -126,3 +126,17 @@ def test_every_committed_scrub_used_the_one_repo_salt():
     assert len(prints) <= 1, (
         f"committed traces were scrubbed with {len(prints)} different salts: "
         f"{prints}. Re-apply the reviewed redaction lists with the repo salt.")
+
+
+def test_no_git_repository_is_committed():
+    """2996618 committed purge.git/ -- the history-purge mirror, with its
+    pack, refs and blob list -- because the runbook's clone landed in the
+    working tree. A git directory in the tree is never intended."""
+    out = subprocess.run(["git", "ls-files"], cwd=REPO,
+                         capture_output=True, text=True, check=True)
+    inside = [p for p in out.stdout.splitlines()
+              if any(part.endswith(".git") for part in p.split("/")[:-1])
+              or p.endswith("/packed-refs") or "/objects/pack/" in p]
+    assert not inside, (
+        f"{len(inside)} tracked path(s) inside a git directory, e.g. "
+        f"{inside[:3]}. Untrack them: git rm -r --cached <dir>")

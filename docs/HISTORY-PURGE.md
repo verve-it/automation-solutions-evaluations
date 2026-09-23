@@ -49,15 +49,25 @@ has only one path.
 
 ## The procedure
 
+**Work outside every clone.** The mirror, the blob list and the check clone
+all go in a scratch directory of their own. Run from inside the repository,
+`purge.git/` lands in the working tree, and the next `git add -A` commits a
+full copy of the repository into itself -- which is what `2996618` did.
+`/tmp` is no help on Windows either: Git Bash maps it somewhere else, and the
+list ended up as `purge.git/tmp/leaked-blobs.txt`.
+
 ```bash
 pip install git-filter-repo
 
+# 0. A scratch directory that is not inside any git work tree.
+cd "$(mktemp -d)"
+git rev-parse --is-inside-work-tree 2>/dev/null && { echo "inside a clone - stop"; exit 1; }
+
 # 1. A fresh mirror. Never run this on a working clone.
 git clone --mirror https://github.com/verve-it/automation-solutions-evaluations.git purge.git
-cd purge.git
 
-# 2. The blob list, full 40-character ids.
-cat > /tmp/leaked-blobs.txt <<'IDS'
+# 2. The blob list, full 40-character ids, beside the mirror, not in it.
+cat > leaked-blobs.txt <<'IDS'
 8a33f75dfbc912eb24d879c52ce2e4ab4905d7c1
 137052e18fee5b318084efc9c73b33a7a029987d
 9a2ad1d3dd353f9b02a2cfec3ce692a2be26a22d
@@ -67,7 +77,25 @@ cc63982036f33d930a4e728a17e00f7106d1a629
 IDS
 
 # 3. Rewrite.
-git filter-repo --strip-blobs-with-ids /tmp/leaked-blobs.txt --force
+cd purge.git
+git filter-repo --strip-blobs-with-ids ../leaked-blobs.txt --force
+```
+
+PowerShell, steps 0 to 2 (the rest is the same, run from `purge.git`):
+
+```powershell
+$work = New-Item -ItemType Directory (Join-Path $env:TEMP "purge-$(Get-Random)")
+Set-Location $work
+git rev-parse --is-inside-work-tree 2>$null; if ($LASTEXITCODE -eq 0) { throw "inside a clone - stop" }
+git clone --mirror https://github.com/verve-it/automation-solutions-evaluations.git purge.git
+@"
+8a33f75dfbc912eb24d879c52ce2e4ab4905d7c1
+137052e18fee5b318084efc9c73b33a7a029987d
+9a2ad1d3dd353f9b02a2cfec3ce692a2be26a22d
+cc63982036f33d930a4e728a17e00f7106d1a629
+4c2173b94203a9a770821f07b21da76668e5e204
+8cb1a3e33ebc86943ff5156e68447853d276ee6b
+"@ | Set-Content -Encoding ascii leaked-blobs.txt
 ```
 
 ## Verify before pushing
@@ -107,8 +135,10 @@ publishes it is theatre. The current fixture uses `tech@example.com`.
 Then check the repo still works:
 
 ```bash
-git clone purge.git check && cd check && python3 -m pytest -q   # 270 passed
+cd .. && git clone purge.git check && cd check && python3 -m pytest -q
 ```
+
+(from the scratch directory, beside `purge.git`; `python` on Windows)
 
 ## Push
 
@@ -155,3 +185,8 @@ technical one.
 lacks pseudonym tokens or contains a real address. It runs in CI. That is the
 check whose absence let this happen: `scrub_trace.py` worked, was tested and
 was documented — nothing ever verified it had been *run*.
+
+`test_no_git_repository_is_committed` fails if a tracked path sits inside a
+git directory (`*.git/`, `packed-refs`, `objects/pack/`), and `.gitignore`
+names `purge.git/` and `check/`, so the mirror cannot be committed again by
+running this runbook in the wrong place.
