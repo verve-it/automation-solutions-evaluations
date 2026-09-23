@@ -1086,3 +1086,94 @@ def test_a_hosted_agent_with_no_configured_toolbox_vars_says_so():
         binding.prepare(client, server_url="u", token=None, session=None,
                         models=models, label="replay-x")
     assert "eval-config.json" in str(exc.value)
+
+
+# --- what the stub advertises ----------------------------------------------
+# The contract is the production server's tools/list, nothing added, nothing
+# dropped. Recordings hold more than that (the agent's own tools) and less
+# (only what one run happened to call).
+
+CW_MANIFEST = [{"toolbox": "ConnectwiseMCP", "versions": ["*"], "tools": [
+    {"name": "cw_get_ticket", "description": "g",
+     "parameters": {"type": "object", "properties": {"ticket_number": {}}}},
+    {"name": "cw_log_time", "description": "l",
+     "parameters": {"type": "object", "properties": {"hours": {}}},
+     "annotations": {"readOnlyHint": False, "destructiveHint": False}},
+]}]
+
+
+def test_the_agents_own_tools_are_not_advertised():
+    """They were: `load_skill` went out as `<label>___load_skill`, with an
+    empty schema, beside the agent's real one."""
+    cas = rs.Cassette(_cassette([
+        _interaction(0, "load_skill", {"skill_name": "triage"}, "---"),
+        _interaction(1, "tool_search", {"q": "ticket"}, "[]"),
+        _interaction(2, "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                     {"ticket_number": 1}, "{}"),
+    ]))
+    tools, missing = rs.tool_definitions(
+        cas, CW_MANIFEST, local=["load_skill", "tool_search"])
+    names = [t["name"] for t in tools]
+    assert "load_skill" not in names and "tool_search" not in names
+    assert missing == []
+
+
+def test_a_prefixed_call_is_the_servers_even_if_its_name_is_local():
+    """A server that really has a tool of that name is the recording's
+    evidence; the configured list only decides for bare names."""
+    cas = rs.Cassette(_cassette([
+        _interaction(0, "ConnectWise-PSA-ForAgents___tool_search", {}, "[]")]))
+    tools, _ = rs.tool_definitions(cas, [], local=["tool_search"])
+    assert [t["name"] for t in tools] == ["tool_search"]
+
+
+def test_an_unknown_bare_name_still_counts_as_the_servers():
+    """Same rule as attribution: a bare name that is not a configured local
+    tool is a call that had to reach the stub."""
+    cas = rs.Cassette(_cassette([_interaction(0, "cw_resolve", {}, "x")]))
+    tools, missing = rs.tool_definitions(cas, [], local=["load_skill"])
+    assert [t["name"] for t in tools] == ["cw_resolve"] and missing == ["cw_resolve"]
+
+
+def test_the_whole_production_contract_is_advertised():
+    """An agent change that reaches for a tool the recording never called
+    must meet `not_recorded` -- a divergence the gate reports -- not a tool
+    production would have offered and the stub hid."""
+    cas = rs.Cassette(_cassette([
+        _interaction(0, "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                     {"ticket_number": 1}, "{}")]))
+    tools, _ = rs.tool_definitions(cas, CW_MANIFEST, local=[])
+    assert [t["name"] for t in tools] == ["cw_get_ticket", "cw_log_time"]
+    assert tools[1]["annotations"]["readOnlyHint"] is False
+
+
+def test_another_servers_manifest_is_not_offered():
+    cas = rs.Cassette(_cassette([
+        _interaction(0, "Confluence___search", {"q": "x"}, "[]")]))
+    tools, _ = rs.tool_definitions(cas, CW_MANIFEST, local=[])
+    assert [t["name"] for t in tools] == ["search"]
+
+
+def test_the_committed_recordings_advertise_only_the_server(tmp_path):
+    """Built from the frozen sets: every cassette advertises the manifest's
+    tools and none of the configured local ones."""
+    import evalconfig, make_cassette
+    import trace_to_eval as tte
+    with open(os.path.join(REPO, "tool_manifests", "connectwisemcp.json"),
+              encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    contract = {t["name"] for t in manifest["tools"]}
+    local = set(evalconfig.local_tools())
+    checked = 0
+    for trace in ("traces/2026-09-03-full-triage.json",
+                  "traces/2026-09-15-ops-worst-case.json",
+                  "traces/2026-09-23-triage-analysis.json"):
+        for cas in make_cassette.build(tte.load_spans(os.path.join(REPO, trace))):
+            if len(cas.get("agents") or []) != 1:
+                continue
+            tools, missing = rs.tool_definitions(rs.Cassette(cas), [manifest])
+            names = {t["name"] for t in tools}
+            assert not names & local, (trace, sorted(names & local))
+            assert names == contract and not missing, (trace, missing)
+            checked += 1
+    assert checked == 7, checked      # the single-agent cassettes

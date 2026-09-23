@@ -337,6 +337,12 @@ name the agent's recordings called unprefixed. One recording is not enough:
 would have been refused as a bypass. A bare name in neither still counts as a
 call that had to reach the stub.
 
+The stub **advertises** the production server's whole `tools/list` (the
+manifest), and never a local tool. It used to list every recorded name, so
+the agent was offered `<label>___load_skill` beside its own, with an empty
+schema, and only the tools one run happened to call. `verify.py` fails a
+deployment that still lists a local tool.
+
 `run_evals.py` gates on **regression vs baseline** by default and takes
 `--min-score` / `--min-check-score` for an absolute floor. They compose. Only
 `GATING` checks are held to the floor — a reporting check failing must not

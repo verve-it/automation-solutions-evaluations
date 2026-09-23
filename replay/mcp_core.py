@@ -34,6 +34,7 @@ if REPO_ROOT not in sys.path:
 import json, threading
 from collections import defaultdict
 
+import evalconfig
 from make_cassette import canonical_args
 from trace_to_eval import base_tool_name
 
@@ -77,10 +78,24 @@ class Cassette:
 
     # ------------------------------------------------------------ replay
 
-    def tools(self):
+    def tools(self, local=()):
+        """Bare names of the recorded calls that went to the MCP server.
+
+        A cassette also holds the agent's own tools -- `load_skill`,
+        `tool_search`, `run_skill_script` -- recorded unprefixed because they
+        never reached a server. Advertising them put
+        `ConnectWise-PSA-ForAgents___load_skill` in front of the agent beside
+        its real `load_skill`: a tool production never offered, with an
+        empty schema. A prefixed call is the server's; an unprefixed one is
+        left out when it is a configured local tool, and kept otherwise,
+        because a bare name in neither is a call that had to reach the stub.
+        """
+        local = set(local)
         names = []
         for i in self.data["interactions"]:
             bare = base_tool_name(i["tool"])
+            if "___" not in i["tool"] and bare in local:
+                continue
             if bare not in names:
                 names.append(bare)
         return names
@@ -147,27 +162,49 @@ def prefix_len(journal):
     return n
 
 
-def tool_definitions(cassette, manifests):
-    """Advertise production schemas where we have them.
+def tool_definitions(cassette, manifests, local=None):
+    """Advertise what the production server advertises.
 
-    Without a manifest the tools are advertised with an empty schema, which
-    changes what the agent is told it may send — so the replay is no longer
-    a faithful stand-in. Fill tool_manifests/ before trusting a gate built on
-    this. See tool_manifests/README.md.
+    That is the manifest's whole tool list, not only the tools this
+    recording happened to call: an agent change that reaches for
+    `cw_log_time` should get the stub's `not_recorded` -- a divergence the
+    gate reports -- not find the tool missing, which production never does.
+    A manifest is used only when the recording called at least one of its
+    tools, so one server's contract is never offered in place of another's.
+
+    Without a manifest the recorded tools are advertised with an empty
+    schema, which changes what the agent is told it may send — so the
+    replay is no longer a faithful stand-in. Fill tool_manifests/ before
+    trusting a gate built on this. See tool_manifests/README.md.
+
+    The agent's own tools are never advertised (see Cassette.tools); `local`
+    defaults to eval-config.json's local_tools, which the hosted package
+    ships beside this file.
     """
-    by_name = {}
+    local = evalconfig.local_tools() if local is None else local
+    recorded = cassette.tools(local)
+
+    by_name, contract = {}, []
     for m in manifests:
-        for t in m["tools"]:
-            if t.get("parameters"):
-                by_name[base_tool_name(t.get("name", ""))] = t
+        tools = [t for t in m["tools"] if t.get("parameters")]
+        names = [base_tool_name(t.get("name", "")) for t in tools]
+        if not set(names) & set(recorded):
+            continue
+        for bare, t in zip(names, tools):
+            if bare not in by_name:
+                by_name[bare] = t
+                contract.append(bare)
 
     out, missing = [], []
-    for bare in cassette.tools():
+    for bare in recorded + [n for n in contract if n not in recorded]:
         known = by_name.get(bare)
         if known:
-            out.append({"name": bare,
-                        "description": known.get("description", ""),
-                        "inputSchema": known["parameters"]})
+            tool = {"name": bare,
+                    "description": known.get("description", ""),
+                    "inputSchema": known["parameters"]}
+            if known.get("annotations"):
+                tool["annotations"] = known["annotations"]
+            out.append(tool)
         else:
             missing.append(bare)
             out.append({"name": bare, "description": "",

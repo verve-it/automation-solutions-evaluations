@@ -118,6 +118,23 @@ def check_schemas(tools):
     return enums
 
 
+def advertised_local_tools(tools, local=None):
+    """Tools the agent runs itself that the server lists as its own.
+
+    A server built before the fix advertised every recorded name, so the
+    agent under replay was offered `<label>___load_skill` beside its real
+    one -- a tool production never lists. That changes the trajectory the
+    gate scores, so a deployment still doing it fails verification: the
+    fix is a redeploy, and this is what says so.
+    """
+    if local is None:
+        if REPO_ROOT not in sys.path:
+            sys.path.insert(0, REPO_ROOT)
+        import evalconfig
+        local = evalconfig.local_tools()
+    return sorted({t.get("name") for t in tools} & set(local))
+
+
 def replay(client, cassette_id, recording, verbose=False):
     _info, session = client.initialize(cassette_id)
     if not session:
@@ -126,6 +143,13 @@ def replay(client, cassette_id, recording, verbose=False):
     tools = client.tools(cassette_id, session)
     problems = []
     enums = check_schemas(tools)
+    leaked = advertised_local_tools(tools)
+    if leaked:
+        problems.append(
+            f"advertises the agent's own tools as the server's: "
+            f"{', '.join(leaked)}. Production never lists them, so the agent "
+            "under replay is offered tools it does not have. The deployed "
+            "server predates the fix; redeploy it.")
 
     matched = mismatched = writes = 0
     for interaction in recording["interactions"]:

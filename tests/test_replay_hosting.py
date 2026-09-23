@@ -1514,3 +1514,28 @@ def test_state_store_picks_a_backend_from_what_it_is_given():
 def _read(path):
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def test_verify_fails_a_server_that_advertises_the_agents_own_tools():
+    """What a deployment from before the fix looks like: redeploy it."""
+    class Stale:
+        def initialize(self, cassette):
+            return {}, "s1"
+
+        def tools(self, cassette, session):
+            return [{"name": "cw_get_ticket", "inputSchema": {}},
+                    {"name": "load_skill", "inputSchema": {}}]
+
+        def call(self, *args):
+            return {"content": [{"text": "x"}]}
+
+        def summary(self, cassette, session):
+            return {"replayed_calls": 1, "diverged": 0}
+
+    recording = {"interactions": [{"seq": 0, "tool": "cw_get_ticket",
+                                   "arguments": {}, "result": "x",
+                                   "is_write": False}]}
+    _report, problems = verify.replay(Stale(), "c", recording)
+    assert any("load_skill" in p and "redeploy" in p for p in problems), problems
+    assert verify.advertised_local_tools(
+        [{"name": "cw_get_ticket"}], local=["load_skill"]) == []
