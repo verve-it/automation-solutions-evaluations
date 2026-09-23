@@ -119,6 +119,31 @@ def test_trajectory_fails_when_an_expected_step_is_out_of_order():
     assert res["passed"] is False
 
 
+def test_trajectory_ignores_the_server_label_prefix():
+    """expected.json was authored from `ConnectWise-PSA-ForAgents___` traces;
+    the prod toolbox of 2026-09-23 labels the same server
+    `CWPSA-ForAgents-prod___`. Same path, so it must still match."""
+    cfg = {"expected": {"a": ["load_skill",
+                              "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                              "ConnectWise-PSA-ForAgents___cw_query"]}}
+    r = run(traj_key="a", tool_names=["load_skill",
+                                      "CWPSA-ForAgents-prod___cw_get_ticket",
+                                      "CWPSA-ForAgents-prod___cw_query"])
+    res = e.check_trajectory(r, cfg)
+    assert res["passed"] is True
+    assert res["recall"] == 1.0 and res["precision"] == 1.0
+
+
+def test_trajectory_prefix_tolerance_does_not_match_a_different_tool():
+    cfg = {"expected": {"a": ["ConnectWise-PSA-ForAgents___cw_get_ticket",
+                              "ConnectWise-PSA-ForAgents___cw_query"]}}
+    r = run(traj_key="a", tool_names=["CWPSA-ForAgents-prod___cw_get_ticket",
+                                      "CWPSA-ForAgents-prod___cw_search"])
+    res = e.check_trajectory(r, cfg)
+    assert res["passed"] is False
+    assert "ConnectWise-PSA-ForAgents___cw_query" in res["reason"]
+
+
 def test_bare_agent_key_applies_to_every_intent():
     cfg = {"expected": {"a": ["load_skill"]}}
     r = run(intent="Enrichment", traj_key="a|Enrichment",

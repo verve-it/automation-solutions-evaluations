@@ -148,9 +148,16 @@ def check_trajectory(run, cfg):
         return _skip(f"no expected_actions for {want}")
     actual = run.get("tool_names", [])
 
+    # Bare names on both sides. Foundry prefixes an MCP tool with the server
+    # label, and the label belongs to the deployment, not the agent: the
+    # September traces say `ConnectWise-PSA-ForAgents___`, the prod toolbox
+    # of 2026-09-23 says `CWPSA-ForAgents-prod___`. An exact match fails every
+    # expectation the day a toolbox is relabelled, while the agent's path is
+    # unchanged. The prefixed name stays in `tool_names` and `trajectory`.
+    want = [base_tool_name(t) for t in expected]
     i, matched = 0, []
     for step in actual:
-        if i < len(expected) and step == expected[i]:
+        if i < len(want) and base_tool_name(step) == want[i]:
             matched.append(step)
             i += 1
     recall = len(matched) / len(expected) if expected else 0.0

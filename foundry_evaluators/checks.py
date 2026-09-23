@@ -89,7 +89,10 @@ def grade_trajectory(sample, item):
     expected = item.get("expected_actions") or []
     if not expected:
         return 1.0                       # nothing to score against
-    actual = [o["tool"] for o in outcomes(item)]
+    # Bare names, as check_trajectory: the server-label prefix is the
+    # deployment's, and a relabelled toolbox must not fail every expectation.
+    expected = [base_tool_name(t) for t in expected]
+    actual = [base_tool_name(o["tool"]) for o in outcomes(item)]
     i = matched = 0
     for step in actual:
         if i < len(expected) and step == expected[i]:

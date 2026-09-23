@@ -146,6 +146,18 @@ def test_trajectory_penalises_a_missing_step():
     assert checks.grade_trajectory({}, row) == 0.5
 
 
+def test_trajectory_ignores_the_server_label_prefix():
+    """Must agree with run_evals.check_trajectory, which matches bare names."""
+    row = {"tool_outcomes": [{"tool": t, "result": "", "success": True}
+                             for t in ["load_skill",
+                                       "CWPSA-ForAgents-prod___cw_get_ticket",
+                                       "CWPSA-ForAgents-prod___cw_search"]],
+           "expected_actions": ["load_skill",
+                                "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                                "ConnectWise-PSA-ForAgents___cw_query"]}
+    assert checks.grade_trajectory({}, row) == pytest.approx(2 / 3)
+
+
 def test_dead_end_threshold_matches_max_empty_rate():
     """0.75 here is run_evals.py's max_empty_rate of 0.25, the other way up."""
     assert checks.EVALUATORS["cw_no_dead_ends"][4] == 0.75
