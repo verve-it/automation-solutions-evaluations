@@ -28,11 +28,16 @@ What it does, in order
 1. Serves the cassette (locally with --serve, or you host it).
 2. Reads the agent version under test and clones its definition, replacing
    the ConnectWise toolbox binding with an MCP tool pointing at the replay
-   server. Everything else is copied verbatim -- change anything else and you
-   are evaluating a different agent.
-3. Creates that clone as a temporary agent version, tagged in metadata.
+   server, bound under the server_label the RECORDING used. Everything else
+   is copied verbatim -- change anything else and you are evaluating a
+   different agent.
+3. Creates that clone as a temporary version of `<agent>-replay` -- a
+   separate agent nothing else calls, so production traffic to the agent
+   under test can never reach it -- and checks that the replay agent's name
+   now resolves to the clone.
 4. Invokes it with the query from the cassette.
-5. Collects /summary: matched prefix, first divergence, writes attempted.
+5. Collects /summary: matched prefix, first divergence, writes attempted,
+   and what reached the stub per tool.
 6. Deletes the temporary version. Always, including on failure.
 
 Reachability is the one real constraint
@@ -49,7 +54,7 @@ import os, sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-import argparse, json, subprocess, time, urllib.error, urllib.request, uuid
+import argparse, collections, json, re, subprocess, time, urllib.error, urllib.request, uuid
 import datetime as _dt
 
 import evalconfig
@@ -62,11 +67,121 @@ def _utcnow():
 
 CONFIG = evalconfig.load()
 
-# What the replay binds under, and which environment variables a hosted agent
-# reads to find its toolbox. Both are facts about the project being evaluated,
-# not about replaying, so they live in eval-config.json.
+# The server_label to bind under when the recording does not say. It usually
+# does -- see recorded_server_label() -- and the recording wins, because the
+# label is not cosmetic: Foundry names every MCP tool `<server_label>___<tool>`,
+# so a different label is a different tool name, a different trajectory and a
+# different contract from the one the agent's skills describe.
 REPLAY_TOOL_LABEL = evalconfig.replay_tool_label(CONFIG)
 TEMP_MARKER = "eval-replay-temp"
+
+# The clone is a version of a SEPARATE agent, never of the agent under test.
+#
+# A new version of the production agent is what that agent's name resolves to
+# while it exists: the SDK documents that only DRAFT versions are "excluded
+# from default 'latest' resolution", and create_version_from_code -- the only
+# way to create a hosted version -- takes no draft flag. So a clone of
+# connectwise-operations-agent would receive every production call that
+# reaches that agent by name for as long as the replay ran, and answer it from
+# the recording: production writes, silently not performed. And pinning the
+# production agent with a version selector would not help, because then the
+# replay's own by-name call would reach the production version and its live
+# toolbox. Neither way is safe.
+#
+# Under its own name nothing but this script ever calls it, so "latest" IS the
+# clone -- checked before invoking, see routing_problem() -- and production
+# routing is never touched.
+REPLAY_AGENT_SUFFIX = "-replay"
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def replay_agent_name(agent):
+    """`connectwise-operations-agent` -> `connectwise-operations-agent-replay`.
+
+    Foundry agent names are 1-63 characters, alphanumeric at both ends,
+    hyphens between. A name that cannot take the suffix is refused rather
+    than truncated: two agents truncating to one replay name would share it.
+    """
+    name = f"{agent}{REPLAY_AGENT_SUFFIX}"
+    if not _AGENT_NAME_RE.match(name):
+        raise SystemExit(
+            f"{agent!r} cannot take the replay suffix: {name!r} is not a "
+            "valid agent name (1-63 characters, alphanumeric at both ends, "
+            "hyphens between). Pass --replay-agent with a name of your own.")
+    return name
+
+
+def recorded_server_label(cassette_path):
+    """The server_label the recorded run's MCP tools were bound under.
+
+    The recording names every MCP call `<server_label>___<tool>`, so the label
+    is in the cassette and does not have to be configured or guessed. A
+    replay bound under any other label shows the agent differently named
+    tools than its skills and tool_search results describe -- a changed
+    contract, so a changed trajectory, blamed on the agent.
+
+    Falls back to eval-config.json's replay_tool_label only when the
+    recording has no prefixed call at all. Refuses a recording that used more
+    than one MCP server: one stub cannot answer under two labels.
+    """
+    with open(cassette_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    labels = sorted({i["tool"].rsplit("___", 1)[0]
+                     for i in data.get("interactions") or []
+                     if "___" in (i.get("tool") or "")})
+    if len(labels) > 1:
+        raise SystemExit(
+            f"{os.path.basename(cassette_path)} records calls to "
+            f"{len(labels)} MCP servers ({', '.join(labels)}). One replay "
+            "toolbox answers under one server_label, so the others would be "
+            "renamed and every call to them would diverge.")
+    return labels[0] if labels else REPLAY_TOOL_LABEL
+
+
+def agent_references(payload, known_agents, own_name):
+    """(variable, agent) pairs where the clone's environment names another
+    agent in the project.
+
+    A hosted agent reaches another over A2A by name -- the orchestrator's
+    TRIAGE_ANALYSIS_AGENT_NAME and friends -- and a name resolves to that
+    agent's production version, bound to the live toolbox. The replay stubs
+    only the agent it clones, so a clone that can name a child would send the
+    child's calls, writes included, to ConnectWise. Refused before anything
+    is created, not discovered in the trace afterwards.
+    """
+    env = (payload or {}).get("environment_variables") or {}
+    return sorted((k, v) for k, v in env.items()
+                  if isinstance(v, str) and v in known_agents and v != own_name)
+
+
+def routing_problem(agents, replay_agent, temp_version):
+    """Why calling `replay_agent` by name might not reach the clone, or None.
+
+    Checked after the clone is created and before anything is invoked, so a
+    wrong answer costs a deleted version, not a call to the wrong agent.
+    """
+    try:
+        details = agents.get(replay_agent)
+    except Exception as exc:
+        return f"cannot read {replay_agent}: {type(exc).__name__}: {exc}"
+    endpoint = getattr(details, "agent_endpoint", None)
+    selector = getattr(endpoint, "version_selector", None) if endpoint else None
+    rules = getattr(selector, "version_selection_rules", None) if selector else None
+    if rules:
+        routed = ", ".join(
+            f"v{getattr(r, 'agent_version', '?')} "
+            f"({getattr(r, 'traffic_percentage', '?')}%)" for r in rules)
+        return (f"{replay_agent} has a version selector ({routed}), so its "
+                "name does not resolve to the newest version. Remove the "
+                "selector: nothing but a replay should ever call this agent.")
+    latest = getattr(getattr(getattr(details, "versions", None), "latest",
+                             None), "version", None)
+    if str(latest) != str(temp_version):
+        return (f"{replay_agent} resolves to v{latest}, not the clone "
+                f"v{temp_version}. Another replay may be running against the "
+                "same replay agent; the gate serialises its own runs, a local "
+                "run beside it does not.")
+    return None
 
 
 # ------------------------------------------------------------- reachability
@@ -221,7 +336,8 @@ def read_journal(base, token, session):
     return ours
 
 
-def replay_tools(server_url, models, token=None, session=None):
+def replay_tools(server_url, models, token=None, session=None,
+                 server_label=None):
     """The only difference between the agent under test and production.
 
     The token travels as a header rather than in the URL. `server_url` is
@@ -243,7 +359,7 @@ def replay_tools(server_url, models, token=None, session=None):
         headers["Mcp-Session-Id"] = session
     kwargs = {"headers": headers} if headers else {}
     return [models.MCPTool(
-        server_label=REPLAY_TOOL_LABEL,
+        server_label=server_label or REPLAY_TOOL_LABEL,
         server_url=server_url,
         server_description="Recorded ConnectWise responses. No live service.",
         require_approval="never",
@@ -302,15 +418,18 @@ class PromptBinding:
 
     kinds = ("prompt", "voice")
 
-    def rebind(self, payload, *, server_url, models, token, session):
+    def rebind(self, payload, *, server_url, models, token, session,
+               server_label=None):
         clone = dict(payload)
         clone["tools"] = [t.as_dict() if hasattr(t, "as_dict") else t
                           for t in replay_tools(server_url, models, token,
-                                                session)]
+                                                session, server_label)]
         return clone
 
     def create(self, agents, name, definition, *, description, metadata,
-               base_version):
+               base_version, source_agent=None):
+        """`name` is the replay agent; the definition already came from the
+        agent under test, so there is nothing else to fetch."""
         return agents.create_version(agent_name=name, definition=definition,
                                      description=description,
                                      metadata=metadata)
@@ -347,7 +466,8 @@ class HostedBinding:
         self.toolbox = None
         self._client = None
 
-    def prepare(self, client, *, server_url, token, session, models, label):
+    def prepare(self, client, *, server_url, token, session, models, label,
+                server_label=None):
         """Create the toolbox the clone will name. Torn down in teardown()."""
         if not (self.name_var and self.version_var):
             raise SystemExit(
@@ -362,7 +482,7 @@ class HostedBinding:
         if session:
             headers["Mcp-Session-Id"] = session
         tool = models.MCPToolboxTool(
-            server_label=REPLAY_TOOL_LABEL,
+            server_label=server_label or REPLAY_TOOL_LABEL,
             server_url=server_url,
             server_description="Recorded ConnectWise responses. No live "
                                "service.",
@@ -378,7 +498,8 @@ class HostedBinding:
               f"{server_url}")
         return self.toolbox
 
-    def rebind(self, payload, *, server_url, token, session, models=None):
+    def rebind(self, payload, *, server_url, token, session, models=None,
+               server_label=None):
         if self.toolbox is None:
             raise RuntimeError("prepare() must run before rebind(): the clone "
                                "names a toolbox that has to exist first")
@@ -402,10 +523,18 @@ class HostedBinding:
                       f"{self.toolbox[0]}: {exc}")
 
     def create(self, agents, name, definition, *, description, metadata,
-               base_version):
+               base_version, source_agent=None):
+        """Upload the code of `source_agent` v`base_version` as a version of
+        `name`, the replay agent -- byte for byte, so the clone differs only
+        in the environment variables rebind() set."""
         import io
         code = io.BytesIO(b"".join(
-            agents.download_code(name, agent_version=str(base_version))))
+            agents.download_code(source_agent or name,
+                                 agent_version=str(base_version))))
+        # The SDK documents that the stream "must expose a name attribute ...
+        # and that name must end with .zip"; unnamed, the multipart part is
+        # sent as `code`, which the service may refuse.
+        code.name = f"{source_agent or name}-v{base_version}.zip"
         code.seek(0)
         return agents.create_version_from_code(
             agent_name=name, definition=definition, code=code,
@@ -709,6 +838,79 @@ def verdict(s, allow_divergence_after=None):
     return ok, "\n".join(lines)
 
 
+def recorded_local_tools(cassette_path):
+    """Bare names the agent runs itself, which never reach the replay server.
+
+    Every other tool in a replay's trace must have reached the stub. Never
+    inferred from a missing prefix, because a write sent to ConnectWise through
+    a locally built client has no prefix either. Instead, the union of:
+
+      * eval-config.json's local_tools (load_skill, tool_search, ...);
+      * every name this recording called unprefixed;
+      * every name any other recording of the same agent, beside it, called
+        unprefixed -- so a local tool this recording happened not to use does
+        not make an unchanged agent look like a bypass.
+
+    None when the cassette cannot be read: attribution refuses a manifest
+    without the list rather than guessing.
+    """
+    def unprefixed(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return (data.get("agents") or [None])[0], {
+            i["tool"] for i in data.get("interactions") or []
+            if i.get("tool") and "___" not in i["tool"]}
+
+    try:
+        agent, names = unprefixed(cassette_path)
+    except (OSError, ValueError):
+        return None
+    names |= set(evalconfig.local_tools(CONFIG))
+    directory = os.path.dirname(os.path.abspath(cassette_path))
+    for other in sorted(os.listdir(directory)):
+        path = os.path.join(directory, other)
+        if not other.endswith(".json") or os.path.samefile(path, cassette_path):
+            continue
+        try:
+            other_agent, other_names = unprefixed(path)
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+        if other_agent == agent:
+            names |= other_names
+    return sorted(names)
+
+
+def journal_tools(journal):
+    """{bare tool name: calls} from the replay server's journal, or None when
+    the summary carried no journal to count."""
+    if journal is None:
+        return None
+    counts = collections.Counter(
+        str(e.get("tool") or "").rsplit("___", 1)[-1] for e in journal)
+    return dict(sorted(counts.items()))
+
+
+def recorded_identity(cassette_path):
+    """(orchestration_id, entry agent) of the run a cassette recorded.
+
+    A replay is a new invocation, so App Insights gives it a new operation_Id,
+    and a baseline is keyed by the id of the RECORDED run. Without this pair
+    the gate cannot say which recording a replayed row is a replay of, and
+    every row lands in "new runs, not compared" -- which is a gate that
+    cannot fail. `replay/attribute_runs.py` re-keys on it.
+
+    None for either when the cassette cannot be read: the manifest is still
+    worth writing, and attribution refuses a manifest without it.
+    """
+    try:
+        with open(cassette_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None, None
+    agents = data.get("agents") or [None]
+    return data.get("orchestration_id"), agents[0]
+
+
 def write_manifest(path, args, base_version, temp_version, s, run=None):
     """Record what was actually tested, because the agent version will not.
 
@@ -731,14 +933,17 @@ def write_manifest(path, args, base_version, temp_version, s, run=None):
     handed back. A gate exports traces afterwards and has to select THIS
     run's spans: a flat `--hours 1` also sweeps up whatever else the project
     produced in that hour, which scores unrelated traffic as if the agent
-    change had caused it. `started_utc`/`finished_utc` bound the export;
-    the ids are recorded so a span attribute carrying either can narrow it
-    further once one is confirmed to exist.
+    change had caused it. `started_utc`/`finished_utc` bound the export, and
+    `replay/attribute_runs.py` then picks the run out exactly by
+    `(agent, temp_version)` and re-keys it to `recorded_orchestration_id`.
     """
+    recorded_op, recorded_agent = recorded_identity(args.cassette)
     payload = {
         "agent": args.agent,
         "base_version": str(base_version),
         "temp_version": str(temp_version),
+        "recorded_orchestration_id": recorded_op,
+        "recorded_agent": recorded_agent,
         "temp_version_deleted": True,
         "cassette": os.path.basename(args.cassette),
         "cassette_id": s.get("cassette"),
@@ -749,6 +954,14 @@ def write_manifest(path, args, base_version, temp_version, s, run=None):
         "session_honoured": s.get("session_honoured"),
         "matched_prefix": s.get("matched_prefix"),
         "recorded_interactions": s.get("recorded_interactions"),
+        # What reached the replay server, per tool (bare names). The trace
+        # is checked against it before scoring: fewer calls there means App
+        # Insights has not ingested them yet, and MORE means calls went
+        # somewhere other than the stub. A total is not enough -- local tools
+        # such as load_skill are in the trace and never reach the server.
+        "replayed_calls": s.get("replayed_calls"),
+        "journal_tools": journal_tools(s.get("journal")),
+        "local_tools": recorded_local_tools(args.cassette),
         "writes_attempted": s.get("writes_attempted"),
         "first_divergence": s.get("first_divergence"),
         "suggested_eval_name": f"replay-{args.agent}-v{base_version}",
@@ -801,6 +1014,11 @@ def main(argv=None):
                                     "agent the cassette was recorded from.")
     ap.add_argument("--agent-version", help="base version to clone; "
                                             "default is the latest")
+    ap.add_argument("--replay-agent",
+                    help="the agent the clone is created under. Default: the "
+                         f"agent under test + {REPLAY_AGENT_SUFFIX!r}. Never "
+                         "the agent under test itself -- see "
+                         "REPLAY_AGENT_SUFFIX.")
     ap.add_argument("--server-url", help="where FOUNDRY reaches the replay "
                                          "server. Not localhost.")
     ap.add_argument("--serve", action="store_true",
@@ -844,6 +1062,14 @@ def main(argv=None):
         ap.error("--cassette is required (or use --describe)")
 
     entry, recorded = cassette_agent(args.cassette)
+    if args.agent and args.agent != entry:
+        sys.exit(
+            f"the cassette recorded {entry}; it cannot replay {args.agent}.\n\n"
+            "A cassette's calls are the recorded agent's calls. Any other agent "
+            "diverges from the first one, and an orchestrator replayed on a "
+            "single-agent cassette reaches its children by name -- their "
+            "production versions, their live toolbox, their writes. Replay the "
+            "agent the cassette recorded, or record the one you mean to test.")
     if not args.agent:
         args.agent = entry
         others = list(recorded[1:])
@@ -851,6 +1077,13 @@ def main(argv=None):
                   if others else "")
         print(f"agent      : {args.agent} — from the cassette{detail}")
     refuse_unstubbed_children(args.cassette, recorded)
+    replay_agent = args.replay_agent or replay_agent_name(args.agent)
+    if replay_agent == args.agent:
+        sys.exit(f"--replay-agent must not be the agent under test: a clone "
+                 f"under {args.agent!r} is what its own production callers "
+                 "would reach by name.")
+    server_label = recorded_server_label(args.cassette)
+    print(f"replay as  : {replay_agent} (tools bound as {server_label}___*)")
 
     # Chosen here so the journal can be read back. See replay_tools().
     replay_session = uuid.uuid4().hex
@@ -882,10 +1115,11 @@ def main(argv=None):
         if args.dry_run:
             print(json.dumps({
                 "agent": args.agent,
+                "replay_agent": replay_agent,
                 "base_version": args.agent_version or "latest",
                 "server_url": server_url,
                 "tools_replaced_with": [
-                    {"type": "mcp", "server_label": REPLAY_TOOL_LABEL,
+                    {"type": "mcp", "server_label": server_label,
                      "server_url": server_url, "require_approval": "never",
                      "headers": (["Authorization"] if args.token else [])
                                 + ["Mcp-Session-Id"]}],
@@ -942,6 +1176,21 @@ def main(argv=None):
         payload = definition_payload(base)
         binding = binding_for(payload,
                               args.replay_env_var or DEFAULT_REPLAY_VARS)
+        if definition_kind(payload) in HostedBinding.kinds:
+            try:
+                known = {a.name for a in agents.list()}
+            except Exception as exc:
+                sys.exit(f"cannot list the project's agents to check that "
+                         f"{args.agent} names none of them: {exc}")
+            refs = agent_references(payload, known, args.agent)
+            if refs:
+                named = ", ".join(f"{k}={v}" for k, v in refs)
+                sys.exit(
+                    f"{args.agent} v{getattr(base, 'version', '?')} names other "
+                    f"agents in its environment ({named}). It reaches them by "
+                    "name, at their production versions, against the live "
+                    "toolbox -- the replay can only stub the agent it clones. "
+                    "Nothing was created.")
         base_version = getattr(base, "version", None) or "latest"
         print(f"binding    : kind={definition_kind(payload)} — "
               f"{binding.describe_plan(payload)}")
@@ -949,56 +1198,86 @@ def main(argv=None):
         prepare_binding(binding, client=client, server_url=server_url,
                         token=args.token, session=replay_session,
                         models=models,
-                        label=f"replay-{replay_session[:12]}")
+                        label=f"replay-{replay_session[:12]}",
+                        server_label=server_label)
         definition = binding.rebind(payload, server_url=server_url,
                                     models=models, token=args.token,
-                                    session=replay_session)
+                                    session=replay_session,
+                                    server_label=server_label)
 
         try:
             temp = binding.create(
-                agents, args.agent, definition,
-                description="temporary: stubbed-tool replay",
+                agents, replay_agent, definition,
+                description=f"temporary: stubbed-tool replay of "
+                            f"{args.agent} v{base_version}",
                 metadata={"purpose": TEMP_MARKER,
+                          "replays_agent": args.agent,
                           "base_version": str(base_version),
                           "cassette": os.path.basename(args.cassette)},
-                base_version=base_version)
-        except Exception:
+                base_version=base_version, source_agent=args.agent)
+        except Exception as exc:
             teardown_binding(binding)
-            raise
+            sys.exit(
+                f"could not create a version of {replay_agent}: "
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"The clone is created under {replay_agent}, never under "
+                f"{args.agent}, so production traffic to {args.agent} cannot "
+                "reach it. If the service will not create an agent by adding "
+                f"its first version, create {replay_agent} once, from the "
+                f"same code as {args.agent}; nothing but a replay may ever "
+                "call it by name.")
         temp_version = getattr(temp, "version", None) or getattr(temp, "id", None)
-        print(f"created temporary version {temp_version} "
-              f"(clone of {base_version})")
+        print(f"created {replay_agent} v{temp_version} "
+              f"(clone of {args.agent} v{base_version})")
 
         session = None
         run_ids = {"agent_session_id": None, "response_id": None,
+                   "replay_agent": replay_agent,
+                   "server_label": server_label,
+                   "replay_toolbox": (list(binding.toolbox)
+                                      if getattr(binding, "toolbox", None)
+                                      else None),
                    "started_utc": _utcnow()}
         try:
+            problem = routing_problem(agents, replay_agent, temp_version)
+            if problem:
+                sys.exit(f"not invoking: {problem}")
             # VersionRefIndicator, not VersionIndicator: the latter is the
             # abstract discriminated base and takes no version at all. The
             # field is agent_version.
             session = agents.create_session(
-                agent_name=args.agent,
+                agent_name=replay_agent,
                 version_indicator=models.VersionRefIndicator(
                     agent_version=str(temp_version)))
             session_id = getattr(session, "agent_session_id", None)
             run_ids["agent_session_id"] = session_id
             print(f"session {session_id} — query: {str(query)[:70]}")
 
-            response = invoke_agent(client, args.agent, session_id, query)
+            response = invoke_agent(client, replay_agent, session_id, query)
             run_ids["response_id"] = getattr(response, "id", None)
         finally:
             if session is not None:
                 try:
-                    agents.stop_session(args.agent,
+                    agents.stop_session(replay_agent,
                                         getattr(session, "agent_session_id"))
                 except Exception:
                     # A session that will not stop is not a reason to leave a
                     # temporary agent version behind.
                     pass
-            agents.delete_version(args.agent, temp_version)
-            print(f"deleted temporary version {temp_version}")
-            # After the version, not before: a version naming a toolbox that
-            # no longer exists is a worse thing to leave behind than either.
+            try:
+                agents.delete_version(replay_agent, temp_version)
+                print(f"deleted {replay_agent} v{temp_version}")
+            except Exception as exc:
+                # Not a reason to leave the toolbox too: it carries the
+                # replay token in its headers. A clone left under the replay
+                # agent is reachable by nothing but a replay, and its toolbox
+                # is about to stop existing.
+                print(f"WARNING  could not delete {replay_agent} "
+                      f"v{temp_version}: {exc}")
+            # The toolbox goes last. On success that avoids a moment where
+            # the clone names a toolbox that no longer exists; after a failed
+            # delete the clone is left, reachable by no caller but a replay,
+            # and its toolbox -- the thing holding the token -- still goes.
             teardown_binding(binding)
             run_ids["finished_utc"] = _utcnow()
 

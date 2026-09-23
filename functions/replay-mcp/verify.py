@@ -15,6 +15,10 @@ four things the gate rests on:
      custom handler and not an mcpToolTrigger. A stub that advertises a looser
      contract than production invites divergence it then blames on the agent.
   4. Two sessions on one cassette do not consume each other's queue.
+  5. Calls sent together on one session are all answered and all journalled.
+     The ops agent fans out -- nine MCP calls in flight at once in its
+     recordings -- and a server that loses those races hands the agent errors
+     where the recording had results.
 
 Exits non-zero if any of that fails, so it can gate a deployment.
 
@@ -25,6 +29,7 @@ the URL, including a laptop with no az login.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -181,6 +186,53 @@ def check_isolation(client, cassette_id, recording):
     return []
 
 
+def check_fan_out(client, cassette_id, recording, width=9):
+    """Calls sent together on one session: all answered, all journalled.
+
+    Uses the first recorded call of each distinct key, so every answer is
+    known -- the head of its own queue -- whatever order the server takes
+    them in. The width matches the widest burst in the recordings.
+
+    What this proves on a deployment is the in-instance path: one client's
+    burst reaches one instance, where the per-session lock serialises it. The
+    cross-instance retry is proven by tests/test_replay_hosting.py, where
+    another instance really advances the cursor between a load and a save.
+    """
+    heads, seen = [], set()
+    for interaction in recording["interactions"]:
+        if interaction["key"] not in seen:
+            seen.add(interaction["key"])
+            heads.append(interaction)
+    heads = heads[:width]
+    if len(heads) < 2:
+        return []
+    _info, session = client.initialize(cassette_id)
+
+    def one(i):
+        try:
+            got = client.call(cassette_id, session, i["tool"], i["arguments"],
+                              1000 + i["seq"])["content"][0]["text"]
+            return None if got == i["result"] else f"seq {i['seq']} differed"
+        except urllib.error.HTTPError as exc:
+            return f"seq {i['seq']} got HTTP {exc.code}"
+
+    with concurrent.futures.ThreadPoolExecutor(len(heads)) as pool:
+        wrong = [w for w in pool.map(one, heads) if w]
+    problems = []
+    if wrong:
+        problems.append(f"{len(wrong)} of {len(heads)} concurrent calls on one "
+                        f"session failed ({'; '.join(wrong[:3])}). The agent "
+                        "fans out; a server that loses those races answers "
+                        "with errors the recording never had.")
+    journalled = client.summary(cassette_id, session).get("replayed_calls")
+    if journalled != len(heads):
+        problems.append(f"{journalled} of {len(heads)} concurrent calls were "
+                        "journalled. The gate compares the trace with the "
+                        "journal, so a dropped entry reads as a call that "
+                        "never reached the stub.")
+    return problems
+
+
 def wait_for_health(client, seconds):
     """Poll until the server answers, or until it is fair to call it broken.
 
@@ -299,6 +351,7 @@ def main(argv=None):
             continue
 
         problems += check_isolation(client, cassette_id, recording)
+        problems += check_fan_out(client, cassette_id, recording)
         checked += 1
 
         total = len(recording["interactions"])

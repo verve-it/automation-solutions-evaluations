@@ -145,7 +145,7 @@ none performed" about a run that attempted several.
 - **Gates compare DELTA, not absolute pass rates.** Known failures stay failing
   without blocking unrelated work.
 - **A replay's eval belongs to the BASE version, not the ephemeral clone.**
-  `run_replay.py` creates a temp agent version and deletes it; the trace keeps
+  `run_replay.py` creates a temp version of the *replay agent* and deletes it; the trace keeps
   its id, so `artifacts/replay-run.json` records what it was cloned from.
 - **`evaluate()` reads `**kwargs` as a required column named `kw`.** Evaluators
   need explicit keyword parameters.
@@ -197,6 +197,26 @@ server, names it in the clone's environment, and deletes it afterwards. No
 code change. The bearer token and session ride on the *toolbox's* headers,
 because Foundry is what calls the replay server, not the agent.
 
+## The clone is never a version of the agent under test
+
+It is a version of **`<agent>-replay`**, a separate agent that nothing but
+`run_replay.py` calls. A new version of `connectwise-operations-agent` itself
+would be what that name resolves to while it existed — the SDK says only
+*draft* versions are excluded from "latest", and `create_version_from_code`,
+the only way to make a hosted version, takes no draft flag — so production
+calls reaching the agent by name would be answered from the recording and
+their writes silently not performed. Pinning production with a version
+selector does not fix it either: then the replay's own by-name call reaches
+the production version and its live toolbox. Under its own name, "latest" is
+the clone; `routing_problem()` checks that before anything is invoked, and the
+gate serialises its runs (`concurrency:`) because every replay shares the name.
+
+The replay tool is bound under the **recording's** `server_label`
+(`ConnectWise-PSA-ForAgents`), read from the cassette. Foundry names MCP tools
+`<server_label>___<tool>`, so any other label is a renamed tool, a changed
+trajectory and a changed contract — it once made an unchanged agent fail
+`trajectory`. `replay_tool_label` in `eval-config.json` is only a fallback.
+
 ## An orchestration cannot be fully stubbed, and is refused
 
 The orchestrator reaches its children over A2A **by name**
@@ -221,8 +241,28 @@ baseline, writes the table into `$GITHUB_STEP_SUMMARY`, and creates the run in
 Foundry → Evaluation. `needs:` in the calling workflow is what makes it a gate
 rather than a dashboard.
 
-Two things the gate must not do, both of which look like they work:
+Four things the gate must not do, all of which look like they work:
 
+- **Compare by operation_Id.** A baseline is keyed by the *recorded* run's
+  `operation_Id`; a replay is a new invocation with a new one. Scored as
+  exported, every replayed row is "not in baseline, not compared" and the gate
+  passes whatever the agent did — it passed the two worst recorded runs (0 of
+  2 runs, 4 of 8 gating verdicts), exit 0. `replay/attribute_runs.py` picks
+  each replay's row out by `(replay_agent, temp_version)`, **proves it ran
+  against the stub and only the stub** — no A2A, no other agent in its
+  operation, no toolbox but the replay's own, the agent the cassette recorded,
+  and per tool no more calls in the trace than the replay server journalled —
+  "local" tools taken from the recording, never inferred from a missing
+  prefix, because a write through a client the agent built itself has none —
+  then presents it under the
+  recording's agent, `traj_key`, toolbox and tool definitions and pulls that
+  recording's committed baseline row. `run_evals.py --strict-baseline` then
+  fails if any replayed run went uncompared. Nightly drift must **not** use
+  strict: new orchestrations arrive every day.
+- **Fail on a reporting check.** Only a regression on a `GATING` check fails
+  the build; the others are shown and marked as not failing it. A replay's
+  `not_recorded` divergence is a tool error, so `no_tool_errors` flips on
+  exactly the agent changes the gate should let through.
 - **Export by the clock.** The project also serves real traffic, so a flat
   `--hours 1` scores whatever else ran in that hour as part of this agent
   change's verdict. `run_replay.py` records `started_utc`/`finished_utc` in
@@ -233,7 +273,39 @@ Two things the gate must not do, both of which look like they work:
   apply, so it cannot be dropped into CI. Neither `agent-gate.yml` nor the
   nightly drift job uploads raw spans or the Foundry dataset. Verdicts,
   journals (which replay the already-scrubbed cassettes) and the Foundry run
-  are the record.
+  are the record. Raw exports live under `out/`, which is never uploaded;
+  `artifacts/replay-*.json` once matched the raw spans file, so the test
+  matches every upload glob against every path an export step writes.
+
+Attribution retries while App Insights catches up (exit 3 = not ingested, or
+only partly: for some tool, fewer calls in the trace than the replay server
+journalled). A half-ingested run scores as a regression, so it is never scored
+early. The comparison is per tool because local tools (`load_skill`,
+`tool_search`) are in the trace and never reach the server.
+
+What is refused **before** anything is created, because a check in the trace
+comes after the writes: another agent than the cassette recorded (an
+orchestrator on a single-agent cassette reaches its children by name, live),
+and a hosted agent whose environment names another agent in the project.
+The gate has no `agent:` input for the same reason.
+
+## The stub answers calls that arrive together
+
+The ops agent fans out: its recordings have nine MCP calls in flight at once.
+The hosted server used to load a session's state, answer, and save it
+conditionally on the ETag, so every call in a burst but one lost the race, got
+a 409 and was never journalled — the agent saw errors where the recording had
+results. It now serialises a session's calls within an instance and, when
+another instance wins, reloads and re-applies the call. `verify.py` sends a
+concurrent fan-out on every deployment and fails a server that drops one --
+that exercises the in-instance lock; the cross-instance retry is covered by a
+test in which another instance really consumes the queue head mid-call.
+
+Local tools are the union of `eval-config.json`'s `local_tools` and every
+name the agent's recordings called unprefixed. One recording is not enough:
+`73d29f4c3a13` never called `tool_search`, and an unchanged agent that did
+would have been refused as a bypass. A bare name in neither still counts as a
+call that had to reach the stub.
 
 `run_evals.py` gates on **regression vs baseline** by default and takes
 `--min-score` / `--min-check-score` for an absolute floor. They compose. Only

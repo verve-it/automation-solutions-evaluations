@@ -47,3 +47,12 @@ that means nothing.
 The current pair is `full-triage-2026-09-18.json` and
 `ops-worst-case-2026-09-18.json` — what the Makefile, `tasks.ps1` and
 `evals.yml` all name.
+
+## The agent gate reads all of them
+
+`agent-gate.yml` names no baseline file. `replay/attribute_runs.py` finds the
+row for each replayed recording across **every** file here, and refuses a
+recording that appears in two — so "one baseline per trace set" is now load
+bearing, not tidiness. A replayed cassette with no baseline row fails the gate
+rather than going uncompared: freeze one from the trace the cassette came
+from.

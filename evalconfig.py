@@ -46,9 +46,19 @@ DEFAULTS = {
     # the environment variables its code reads to find one.
     "toolbox_env": {"name": "", "version": ""},
 
-    # The server_label a replay binds under. Cosmetic, but it appears in
-    # traces, so it should say something true about this project.
+    # The server_label a replay binds under when the recording does not say.
+    # NOT cosmetic: Foundry names MCP tools `<server_label>___<tool>`, so this
+    # is part of every tool name the agent sees. run_replay.py takes the label
+    # from the cassette's recorded calls and uses this only for a recording
+    # with no MCP call in it, where there is nothing to rename.
     "replay_tool_label": "replay",
+
+    # Tools the agent runs itself, which never reach an MCP server: a replay's
+    # trace may call them without the stub having journalled anything. The
+    # replay also takes every unprefixed name from the agent's recordings;
+    # this covers one the agent has but a given recording never used. A bare
+    # name in neither is treated as a call that had to reach the stub.
+    "local_tools": [],
 }
 
 
@@ -119,6 +129,11 @@ def toolbox_env(config=None):
     config = config if config is not None else load()
     env = config.get("toolbox_env") or {}
     return env.get("name") or "", env.get("version") or ""
+
+
+def local_tools(config=None):
+    config = config if config is not None else load()
+    return sorted(set(config.get("local_tools") or DEFAULTS["local_tools"]))
 
 
 def replay_tool_label(config=None):

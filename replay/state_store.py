@@ -13,20 +13,22 @@ go, so the queue cursor *is* the fidelity of the replay. Held in a process,
 that cursor is correct exactly as long as every call of a run reaches the
 same process.
 
-Azure Functions does not promise that. Flex Consumption will not scale out a
-single sequential client in practice, but "in practice" is not what a gate
-rests on — and the floor for `maximumInstanceCount` on that plan is 40, so
+Azure Functions does not promise that. Flex Consumption is unlikely to
+scale out for one replay, but "unlikely" is not what a gate rests on -- and a
+replay is not a sequential client: the ops agent sends up to nine calls at
+once. The floor for `maximumInstanceCount` on that plan is 40, so
 pinning the app to one instance is not available either. Keeping state
 outside the process makes the question moot and survives an instance recycle
 mid-run as a bonus, which is what makes `/summary` trustworthy afterwards.
 
 Concurrency
 -----------
-Calls within one MCP session are sequential, so the ETag check is not there
-to arbitrate a race between two agent turns. It is there to make a lost
-update *loud*: two instances both answering one session means the replay is
-already wrong, and returning a conflict says so instead of silently
-double-advancing the cursor.
+Calls within one MCP session are NOT sequential. The ops agent fans out, and
+its recordings show up to nine MCP calls in flight at once. The ETag check
+makes a lost update loud rather than silent; the hosted server
+(functions/replay-mcp/server.py) serialises a session's calls within an
+instance and, when another instance wins the race, reloads and re-applies the
+call. Only a race lost on every retry reaches the agent as a 409.
 """
 
 from __future__ import annotations

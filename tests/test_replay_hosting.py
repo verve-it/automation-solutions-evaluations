@@ -527,6 +527,135 @@ def test_sas_store_keeps_every_call_of_a_replay(blob_stub):
     assert len(final["journal"]) == 50
 
 
+def _fan_out(base, n, session):
+    """n concurrent tools/call on one session, as the ops agent sends them."""
+    import concurrent.futures as cf
+
+    call = {"jsonrpc": "2.0", "method": "tools/call",
+            "params": {"name": "cw_get_ticket",
+                       "arguments": {"ticket_number": 1}}}
+
+    def one(i):
+        try:
+            body, _ = _post(base, "/mcp/fixture", dict(call, id=i),
+                            session=session)
+            return 200, body
+        except urllib.error.HTTPError as exc:
+            return exc.code, None
+
+    with cf.ThreadPoolExecutor(n) as pool:
+        return list(pool.map(one, range(n)))
+
+
+def test_a_fan_out_in_one_session_is_answered_and_journalled(hosted, blob_stub):
+    """The recordings show up to nine MCP calls in flight at once. Against a
+    store that saves conditionally on the ETag -- the real one -- every call
+    but one used to lose the race, get a 409 and go unjournalled: the agent
+    saw errors where the recording saw results."""
+    from state_store import SasBlobStore
+    server.Handler.store = SasBlobStore(blob_stub)
+    results = _fan_out(hosted, 9, "fan-out")
+    assert [code for code, _ in results] == [200] * 9
+    summary = _get(hosted, "/summary/fixture", session="fan-out")
+    assert summary["replayed_calls"] == 9
+    texts = sorted(b["result"]["content"][0]["text"] for _, b in results)
+    assert texts.count("first") == 1        # each recorded answer used once
+
+
+class _LosesFirstRaces(MemoryStore):
+    """Another instance wins the first `n` saves of each call."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.to_lose = n
+
+    def save(self, key, state, version):
+        if self.to_lose:
+            self.to_lose -= 1
+            # the winner's write lands first: bump the stored version
+            current, v = self.load(key)
+            super().save(key, current, v)
+            raise Conflict(key)
+        return super().save(key, state, version)
+
+
+class _AnotherInstanceWins(MemoryStore):
+    """Before our first save, another instance answers the same call -- a
+    real Cassette consumes the head of the queue and its state is saved.
+
+    The first version of this fake re-saved unchanged state, so a retry that
+    overwrote the winner, or kept its first answer, passed. A reviewer
+    mutated both into the server and the suite stayed green.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.raced = False
+
+    def save(self, key, state, version):
+        if not self.raced:
+            self.raced = True
+            from mcp_core import Cassette
+            winner = Cassette(_cassette_fixture())
+            current, v = self.load(key)
+            winner.load_state(current)
+            winner.call("cw_get_ticket", {"ticket_number": 1})
+            super().save(key, winner.dump_state(), v)
+            raise Conflict(key)
+        return super().save(key, state, version)
+
+
+def test_a_lost_race_is_answered_again_from_the_winners_state(hosted):
+    server.Handler.store = _AnotherInstanceWins()
+    body, _ = _post(hosted, "/mcp/fixture", {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "cw_get_ticket", "arguments": {"ticket_number": 1}}},
+        session="race")
+    # the winner took "first"; re-applied on its state, ours is "second"
+    assert body["result"]["content"][0]["text"] == "second"
+    summary = _get(hosted, "/summary/fixture", session="race")
+    assert summary["replayed_calls"] == 2       # the winner's call survived
+
+
+class _CountsConflicts(MemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.conflicts = 0
+
+    def save(self, key, state, version):
+        import time as _t
+        _t.sleep(0.01)                          # a blob round trip, roughly
+        try:
+            return super().save(key, state, version)
+        except Conflict:
+            self.conflicts += 1
+            raise
+
+
+def test_one_instance_serialises_a_session_rather_than_racing_itself(hosted):
+    """The retry is for another instance. Within one, the per-session lock
+    means a fan-out never conflicts at all -- without it, every call in the
+    burst would race the others and the retry would be doing the lock's job,
+    one lost blob round trip at a time."""
+    store = _CountsConflicts()
+    server.Handler.store = store
+    results = _fan_out(hosted, 9, "one-instance")
+    assert [code for code, _ in results] == [200] * 9
+    assert store.conflicts == 0
+
+
+def test_a_race_lost_every_time_is_a_409(hosted, monkeypatch):
+    monkeypatch.setattr(server, "SAVE_ATTEMPTS", 3)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    server.Handler.store = _LosesFirstRaces(10_000)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(hosted, "/mcp/fixture", {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "cw_get_ticket",
+                       "arguments": {"ticket_number": 1}}}, session="x")
+    assert exc.value.code == 409
+
+
 def test_a_sas_that_does_not_answer_degrades_rather_than_kills(capsys):
     from state_store import open_store
     store = open_store(sas_url="http://127.0.0.1:1/x?sig=nope")
@@ -588,6 +717,51 @@ def test_verifier_fails_when_a_result_differs(hosted, recordings, capsys):
     assert verify.main([hosted, "--token", "s3cret",
                         "--cassette-dir", recordings]) == 1
     assert "came back different" in capsys.readouterr().out
+
+
+def _fan_out_cassette():
+    def interaction(seq, n):
+        return {"seq": seq, "agent": "a", "tool": "cw_get_ticket",
+                "key": f'cw_get_ticket|{{"ticket_number":{n}}}',
+                "arguments": {"ticket_number": n}, "result": f"ticket {n}",
+                "success": True, "is_write": False, "truncated": False,
+                "error_kind": "", "duration_ms": 1}
+    data = _cassette_fixture()
+    data["orchestration_id"] = "op-fan"
+    data["interactions"] = [interaction(i, 100 + i) for i in range(9)]
+    return data
+
+
+def _serve_fan_out(tmp_path, recordings):
+    for d in (tmp_path / "cassettes", recordings):
+        (d if hasattr(d, "joinpath") else __import__("pathlib").Path(d)) \
+            .joinpath("fan.json").write_text(json.dumps(_fan_out_cassette()))
+
+
+def test_verifier_checks_a_concurrent_fan_out(hosted, recordings, blob_stub,
+                                              tmp_path, capsys):
+    from state_store import SasBlobStore
+    server.Handler.store = SasBlobStore(blob_stub)
+    _serve_fan_out(tmp_path, recordings)
+    assert verify.main([hosted, "--token", "s3cret", "--cassette-dir",
+                        recordings, "--cassette", "fan"]) == 0
+
+
+def test_verifier_fails_a_server_that_loses_fan_out_races(
+        hosted, recordings, blob_stub, tmp_path, monkeypatch, capsys):
+    """A check that cannot fail is not a check: with the per-session lock and
+    the retry taken away, the server is the one that used to answer 8 of 9
+    concurrent calls with a 409."""
+    import contextlib
+    from state_store import SasBlobStore
+    server.Handler.store = SasBlobStore(blob_stub)
+    monkeypatch.setattr(server, "_session_lock",
+                        lambda key: contextlib.nullcontext())
+    monkeypatch.setattr(server, "SAVE_ATTEMPTS", 1)
+    _serve_fan_out(tmp_path, recordings)
+    assert verify.main([hosted, "--token", "s3cret", "--cassette-dir",
+                        recordings, "--cassette", "fan"]) == 1
+    assert "concurrent calls" in capsys.readouterr().out
 
 
 def test_verifier_fails_on_a_bad_token(hosted, recordings, capsys):

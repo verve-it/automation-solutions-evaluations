@@ -23,5 +23,9 @@
     "version": "CONNECTWISE_TOOLBOX_VERSION"
   },
 
+  "_local_tools": "Foundry-side tools a hosted agent runs itself (skills, tool search). A recording that happens not to call one must not make a replay that does look like a stub bypass.",
+  "local_tools": ["load_skill", "run_skill_script", "tool_search"],
+
+  "_replay_tool_label": "Fallback only. A replay binds under the server_label its recording used (ConnectWise-PSA-ForAgents___*), read from the cassette, because the label is part of every tool name the agent sees.",
   "replay_tool_label": "connectwise_replay"
 }

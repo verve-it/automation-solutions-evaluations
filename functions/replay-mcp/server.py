@@ -55,7 +55,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
+import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -406,29 +409,60 @@ class Handler(BaseHTTPRequestHandler):
                                "cassette": cassette_id}, 404)
 
         key = _state_key(cassette_id, session)
-        state, version = self.store.load(key)
-        cassette.load_state(state)
-
-        payload = handle_rpc(req, cassette, tools)
 
         # Only a tools/call advances anything. Writing state for every
         # initialize and tools/list would multiply blob writes for no gain.
-        if req.get("method") == "tools/call":
-            try:
-                self.store.save(key, cassette.dump_state(), version)
-            except Conflict:
-                # Two instances answering one replay means the ordering this
-                # gate depends on is already broken. Say so rather than
-                # returning an answer that looks fine.
-                return self._send(
-                    {"jsonrpc": "2.0", "id": req.get("id"),
-                     "error": {"code": -32002, "message":
-                               "replay state conflict: another instance "
-                               "advanced this session. The replay is not "
-                               "ordered and its result cannot be trusted."}},
-                    409, session)
+        if req.get("method") != "tools/call":
+            state, _version = self.store.load(key)
+            cassette.load_state(state)
+            return self._send(handle_rpc(req, cassette, tools),
+                              session=session)
 
-        self._send(payload, session=session)
+        with _session_lock(key):
+            for attempt in range(SAVE_ATTEMPTS):
+                cassette, tools = self.library.cassette(cassette_id)
+                state, version = self.store.load(key)
+                cassette.load_state(state)
+                payload = handle_rpc(req, cassette, tools)
+                try:
+                    self.store.save(key, cassette.dump_state(), version)
+                    return self._send(payload, session=session)
+                except Conflict:
+                    # Another instance advanced this session between our load
+                    # and save. Reload and answer again from its state.
+                    time.sleep(random.uniform(0.005, 0.05) * (attempt + 1))
+
+        # Still losing after every retry: something is contending far harder
+        # than a fan-out can. Say so rather than answer from stale state.
+        return self._send(
+            {"jsonrpc": "2.0", "id": req.get("id"),
+             "error": {"code": -32002, "message":
+                       f"replay state conflict: lost {SAVE_ATTEMPTS} races "
+                       "to save this session's state. The replay is not "
+                       "ordered and its result cannot be trusted."}},
+            409, session)
+
+
+# Concurrent calls in one session are normal, not a fault: the ops agent fans
+# out, and its recordings show up to nine MCP calls in flight at once (nine
+# cw_resolve calls starting within 5 ms, each ~1.8 s). The state is loaded,
+# advanced and saved conditionally on its ETag, so without this every call
+# but one in a burst lost the race, got a 409 and was never journalled -- the
+# agent saw errors where the recording saw results, and attribution saw calls
+# the stub "never received".
+#
+# Within an instance a per-session lock serialises them. Across instances the
+# save stays conditional and a lost race reloads and re-applies the call: calls
+# with different keys commute, and same-key calls in one burst had no order in
+# the recording either. Only a race still lost after every retry is a 409.
+_SESSION_LOCKS = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
+SAVE_ATTEMPTS = 25
+
+
+def _session_lock(key):
+    with _SESSION_LOCKS_GUARD:
+        return _SESSION_LOCKS.setdefault(key, threading.Lock())
 
 
 def _state_key(cassette_id, session):

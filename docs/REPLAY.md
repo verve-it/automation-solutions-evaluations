@@ -156,8 +156,22 @@ python3 replay/run_replay.py \
 
 It reads the agent version under test, clones its definition with **only the
 tools swapped** for an MCP tool pointing at the replay server, creates that as
-a temporary version tagged `eval-replay-temp`, invokes it, collects
-`/summary`, and deletes the temporary version — including on failure.
+a temporary version **of `<agent>-replay`** tagged `eval-replay-temp`, checks
+that name now resolves to the clone, invokes it, collects `/summary`, and
+deletes the temporary version — including on failure.
+
+**Never a version of the agent under test.** A new version is what an agent's
+name resolves to while it exists (only drafts are excluded, and hosted
+versions cannot be drafts), so a clone of `connectwise-operations-agent` would
+answer that agent's production traffic from the recording for the length of
+the replay — writes silently dropped. `<agent>-replay` is called by nothing
+else. If the service will not create an agent by adding its first version,
+create `connectwise-operations-agent-replay` once from the same code; it must
+never be named by any caller, A2A included.
+
+The tool is bound under the recording's `server_label`, read from the
+cassette's `ConnectWise-PSA-ForAgents___*` calls: Foundry prefixes every MCP
+tool with it, so another label renames every tool the agent's skills mention.
 
 Everything else in the definition is copied verbatim. A replayed agent
 already differs from production by its tool binding; letting the model,
@@ -349,15 +363,19 @@ times in one run with different responses, and position is how the right one
 comes back. Two independent cursors return a plausible score that means
 nothing.
 
-Flex Consumption will not scale out a single sequential client in practice,
-but a gate does not rest on "in practice", and the floor for
+Flex Consumption is unlikely to scale out for one replay, but a gate does
+not rest on "unlikely" -- and one replay is not a sequential client: the ops
+agent sends up to nine calls at once. The floor for
 `maximumInstanceCount` on that plan is **40** — pinning to one instance is not
 on offer. So the cursor and journal live in blob storage, guarded by an ETag
 (`replay/state_store.py`), keyed by the MCP session id that `initialize`
 issues. One session is one replay, which is the lifetime the cursor should
-have. A lost update returns a 409 saying the replay is unordered rather than
-an answer that looks fine, and the journal survives an instance recycle, which
-is what makes `/summary` worth reading afterwards.
+have. Calls that arrive together on one session -- the agent's fan-outs --
+are serialised within an instance, and a save lost to another instance is
+reloaded and re-applied; only a race lost on every retry returns a 409 saying
+the replay is unordered, rather than an answer that looks fine. The journal
+survives an instance recycle, which is what makes `/summary` worth reading
+afterwards.
 
 Whatever hosts it, use `--token` and pass the bearer to Foundry. `/summary`
 is the journal — tool names, canonicalised arguments carrying ticket and
@@ -487,8 +505,41 @@ goes ahead regardless — a dashboard, not a gate.
 
 What it does, in order: verifies the replay server still serves what was
 recorded, replays each **single-agent** cassette against stubbed tools,
-exports the traces that produced, scores them against the baseline, writes the
-scores into the job summary, and creates the run in Foundry.
+exports the window those replays ran in, **attributes each replayed run to the
+recording it replays**, scores it against that recording's baseline row,
+writes the scores into the job summary, and creates the run in Foundry.
+
+### Why attribution, and what happened without it
+
+A baseline row is keyed by `(orchestration_id, run_agent)`, where
+`orchestration_id` is the **recorded** run's App Insights `operation_Id`. A
+replay is a new invocation with a new one. The first version of this gate
+scored the export as-is and diffed it against a baseline file named in the
+workflow, so every replayed row was "new, not in baseline, not compared".
+Scored that way, the two worst recorded runs — 0 of 2 passing, 4 of 8 gating
+verdicts — left the gate at **exit 0**. It could not fail.
+
+`replay/attribute_runs.py` fixes it without guessing:
+
+| Step | How |
+|---|---|
+| Find the replay's row | `(run_agent, agent_version) == (replay_agent, temp_version)` from the manifest. Only a replay calls the replay agent, so other traffic in the window — the agent under test included — is never scored. |
+| Prove it used the stub | Refuse an A2A call, another agent in the operation, any toolbox but the replay's own, a session the server did not see, another agent than the cassette recorded, and — per tool — more calls than the server journalled, counting every tool the recording did not run locally (bare names included: a write through a locally built client has no prefix). Each of those is a call that reached something real. |
+| Present it as the recording | `run_agent`, `traj_key`, `mcp_toolboxes` and tool definitions become the recording's, so an unchanged agent matches its baseline. What was observed stays under the row's `replay` key. The replayed spans for the Foundry dataset are renamed the same way. |
+| Re-key it | to `(recorded_orchestration_id, recorded_agent)`, which `run_replay.py` now writes into the manifest from the cassette. |
+| Pick the baseline | the committed row for that recording, from **every** file in `baselines/`. None, or two, is a failure. |
+| Wait for ingestion | exit 3 while the row is absent or, for some tool, shows fewer calls than the replay server journalled; the workflow re-exports up to ten times, a minute apart. A half-ingested run would score as a regression. |
+
+Then `run_evals.py --strict-baseline` fails if any replayed run is not in the
+baseline, any baseline row was not scored, or nothing was compared. Drift must
+not use `--strict-baseline`: new orchestrations arrive there every day and are
+supposed to be reported, not gated.
+
+What that buys on today's fixtures: of the 8 gating verdicts across the two
+ops cassettes, 4 passed in the recording and can therefore regress. The other
+4 already fail and can only be fixed. There is no known-good single-agent
+cassette yet, so the gate currently guards against making the worst runs
+worse; a clean ops-agent recording would let it guard a good one.
 
 ### What a builder sees when it is red
 
@@ -500,9 +551,12 @@ The job summary, not an artifact zip:
 | `valid_tool_args` | yes | 83% ⚠ | 1 | 1 |
 | `no_tool_errors` | no | 57% | 3 | 0 |
 
-…followed by the runs that failed and which check each failed on, and a link
-into **Foundry → Evaluation** for the same runs scored by the registered
-evaluators. `run_cloud_eval.py` runs even when scoring failed, because a
+…followed by **what regressed against the baseline** — agent, recording,
+check, whether it gates, reason — then the runs that failed and which check
+each failed on, and a link into **Foundry → Evaluation** for the same runs
+scored by the registered evaluators. The failing-runs list includes known
+failures the baseline accepts; the regression table is what actually turned
+it red, and only a regression on a gating check can. `run_cloud_eval.py` runs even when scoring failed, because a
 failed gate is exactly when someone wants to open the run and look at it.
 
 Checks marked *no* report but never fail the build — only `GATING`
