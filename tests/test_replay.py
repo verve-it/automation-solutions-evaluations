@@ -380,7 +380,8 @@ def test_a_cassette_without_a_query_says_so_rather_than_inventing_one():
     # ask produces a divergence the gate blames on the agent.
     message = str(exc.value)
     assert "no query" in message
-    assert "make cassettes" in message
+    # The rebuild command for this platform: make, or tasks.ps1 on Windows.
+    assert rr._runner() in message
 
 
 def test_divergence_alone_is_not_failure():
@@ -562,7 +563,7 @@ def test_a_stale_cassette_says_to_rebuild(tmp_path):
                                 "interactions": [1, 2], "recorded": "x"}))
     with pytest.raises(SystemExit) as exc:
         run_replay.cassette_query(str(path))
-    assert "make cassettes" in str(exc.value)
+    assert run_replay._runner() in str(exc.value)
 
 
 def test_a_rebuilt_cassette_with_no_input_says_something_else(tmp_path):
@@ -575,7 +576,7 @@ def test_a_rebuilt_cassette_with_no_input_says_something_else(tmp_path):
     with pytest.raises(SystemExit) as exc:
         run_replay.cassette_query(str(path))
     message = str(exc.value)
-    assert "make cassettes" not in message
+    assert run_replay._runner() not in message
     assert "--query" in message
 
 

@@ -297,6 +297,11 @@ def _run_attribute_step(steps, tmp_path, rcs, export_from=1):
     import re
     import stat
     import subprocess
+    if os.name == "nt":
+        # The step runs on the Linux runner, under its bash. On Windows a
+        # symlink needs Developer Mode, and `bash` may be the WSL launcher,
+        # which takes neither this PATH nor these variables.
+        pytest.skip("runs the Linux runner's bash")
     script = re.sub(r"\$\{\{[^}]*\}\}", "X", _step(steps, "attribute"))
     work, state, bin_ = tmp_path / "w", tmp_path / "s", tmp_path / "bin"
     for d in (work, state, bin_):

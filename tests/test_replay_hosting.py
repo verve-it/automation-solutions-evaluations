@@ -1129,6 +1129,10 @@ def test_the_built_package_starts_on_its_own(tmp_path):
         port = sock.getsockname()[1]
     env = {"PATH": os.environ.get("PATH", ""), "REPLAY_TOKEN": "s3cret",
            "FUNCTIONS_CUSTOMHANDLER_PORT": str(port)}
+    # Windows cannot open a socket without SYSTEMROOT (WinError 10106). It
+    # says nothing about the package, so it is not part of what is stripped.
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     proc = subprocess.Popen([sys.executable, "-E", "-s", "server.py"],
                             cwd=package, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
