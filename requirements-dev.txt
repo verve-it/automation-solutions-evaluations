@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0
+# tests/test_agent_gate_workflow.py parses the workflow; without it the
+# whole module skips, gate guards included.
+pyyaml>=6.0

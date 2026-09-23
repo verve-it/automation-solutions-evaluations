@@ -256,9 +256,10 @@ child's calls, **writes included**, to the live service. The journal would
 never show it.
 
 `run_replay.py` refuses a multi-agent cassette, with **no override** — the
-refusal is the only thing between such a cassette and a live write. The two
-single-agent cassettes (`connectwise-operations-agent`) replay fully stubbed
-today. Fixing it for orchestrations needs the children addressable by version,
+refusal is the only thing between such a cassette and a live write. The
+single-agent cassettes -- two `connectwise-operations-agent`, five
+`triage-analysis-agent` -- replay fully stubbed today. Fixing it for
+orchestrations needs the children addressable by version,
 which is the agent code's decision, not this script's.
 
 ## Gating a deployment

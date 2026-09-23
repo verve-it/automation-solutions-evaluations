@@ -1,7 +1,7 @@
 """The checks, ported to Foundry code-based evaluators.
 
 The port is only worth having if it agrees with run_evals.py. These tests
-score both frozen trace sets with each and assert every comparable verdict
+score every frozen trace set with each and assert every comparable verdict
 matches — that is the guarantee, not the unit tests below it.
 """
 import json
@@ -23,7 +23,8 @@ import trace_to_eval                                   # noqa: E402
 from conftest import REPO                              # noqa: E402
 
 SETS = ["traces/2026-09-03-full-triage.json",
-        "traces/2026-09-15-ops-worst-case.json"]
+        "traces/2026-09-15-ops-worst-case.json",
+        "traces/2026-09-23-triage-analysis.json"]
 
 # registered evaluator -> the run_evals check it reproduces
 PAIRS = [

@@ -465,6 +465,22 @@ def main(argv=None):
     wanted = args.cassette or remote
     missing_locally, failures, checked = [], [], 0
 
+    # The gate replays every cassette built here, against this server. One
+    # the server does not have 404s only after the agent under test has been
+    # invoked, and reads as the agent's failure. Checking only what the server
+    # lists would pass exactly that: a server deployed before a trace was
+    # committed.
+    if not args.cassette and os.path.isdir(args.cassette_dir):
+        built = sorted(f[:-len(".json")] for f in os.listdir(args.cassette_dir)
+                       if f.endswith(".json"))
+        for cassette_id in built:
+            if cassette_id not in remote:
+                failures.append(
+                    f"{cassette_id}: built from the committed traces but not "
+                    "deployed; the server predates it. Redeploy: "
+                    + (".\\tasks.ps1 replay-deploy -ResourceGroup <rg>"
+                       if os.name == "nt" else "make replay-deploy RG=<rg>"))
+
     for cassette_id in wanted:
         if cassette_id not in remote:
             failures.append(f"{cassette_id}: not deployed")

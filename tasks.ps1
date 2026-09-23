@@ -50,8 +50,10 @@ try {
 $PY = 'python'
 $FULL_TRIAGE = 'traces/2026-09-03-full-triage.json'
 $OPS_WORST = 'traces/2026-09-15-ops-worst-case.json'
+$TRIAGE = 'traces/2026-09-23-triage-analysis.json'
 $FT_BASELINE = 'baselines/full-triage-2026-09-18.json'
 $OW_BASELINE = 'baselines/ops-worst-case-2026-09-18.json'
+$TA_BASELINE = 'baselines/triage-analysis-2026-09-23.json'
 
 function Run {
     param([string[]] $Arguments, [switch] $AllowFailure)
@@ -68,7 +70,8 @@ switch ($Target) {
         Write-Host '  test                unit tests + frozen-set replay (no Azure, no network)'
         Write-Host '  evals               score the known-good set against its baseline'
         Write-Host '  evals-ops           score the known-bad set against its baseline'
-        Write-Host '  baselines           re-freeze both baselines from the committed traces'
+        Write-Host '  evals-triage        score the standalone triage-analysis set against its baseline'
+        Write-Host '  baselines           re-freeze every baseline from the committed traces'
         Write-Host '  cassettes           build replay cassettes from the committed traces'
         Write-Host '  replay              serve a cassette as an MCP toolbox  -Cassette <path>'
         Write-Host '  replay-package      assemble the Azure Function deployment package'
@@ -97,6 +100,13 @@ switch ($Target) {
               '--baseline', $OW_BASELINE, '--json', 'artifacts/ops-worst-case.json')
     }
 
+    'evals-triage' {
+        Run @('trace_to_eval.py', $TRIAGE, '-o', 'out-triage', '--tool-defs',
+              'tool_manifests/')
+        Run @('run_evals.py', 'out-triage/eval_runs.jsonl', '--expected', 'expected.json',
+              '--baseline', $TA_BASELINE, '--json', 'artifacts/triage-analysis.json')
+    }
+
     'baselines' {
         # Must use the same --tool-defs as evals/evals-ops, or every run reports
         # evaluator_ready as a fix and valid_tool_args as newly scored.
@@ -108,11 +118,16 @@ switch ($Target) {
               'tool_manifests/')
         Run -AllowFailure @('run_evals.py', 'out-ops/eval_runs.jsonl', '--expected',
                             'expected.json', '--json', $OW_BASELINE)
+        Run @('trace_to_eval.py', $TRIAGE, '-o', 'out-triage', '--tool-defs',
+              'tool_manifests/')
+        Run -AllowFailure @('run_evals.py', 'out-triage/eval_runs.jsonl', '--expected',
+                            'expected.json', '--json', $TA_BASELINE)
     }
 
     'cassettes' {
         Run @('replay/make_cassette.py', $FULL_TRIAGE, '-o', 'cassettes')
         Run @('replay/make_cassette.py', $OPS_WORST, '-o', 'cassettes')
+        Run @('replay/make_cassette.py', $TRIAGE, '-o', 'cassettes')
     }
 
     'replay' {
@@ -166,7 +181,7 @@ switch ($Target) {
     }
 
     'clean' {
-        foreach ($path in 'out', 'out-ops', 'artifacts', 'skills', 'cassettes',
+        foreach ($path in 'out', 'out-ops', 'out-triage', 'artifacts', 'skills', 'cassettes',
                  '.pytest_cache') {
             if (Test-Path $path) { Remove-Item -Recurse -Force $path }
         }

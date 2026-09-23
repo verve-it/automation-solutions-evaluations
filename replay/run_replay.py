@@ -720,7 +720,7 @@ def refuse_unstubbed_children(cassette_path, agents_in_cassette):
     would not be visible in the result: the journal would show the
     orchestrator's calls matching, and say nothing about the rest.
 
-    The two single-agent cassettes replay safely today. Fixing this for
+    The single-agent cassettes replay safely today. Fixing this for
     orchestrations needs the children addressable by version, which the agent
     code decides, not this script.
 

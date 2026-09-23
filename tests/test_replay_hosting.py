@@ -1377,6 +1377,27 @@ def test_verifier_fails_a_server_that_loses_fan_out_races(
     assert "concurrent calls" in capsys.readouterr().out
 
 
+def test_verifier_fails_on_a_cassette_the_server_was_never_given(
+        hosted, recordings, blob_stub, capsys):
+    """The gate replays every cassette built from the committed traces. One
+    the server lacks 404s after the agent has been invoked, and reads as the
+    agent's failure. Otherwise this server passes (see the faithful-server
+    test above); the only difference is one extra local cassette."""
+    from state_store import open_store
+    server.Handler.store = open_store(sas_url=blob_stub)
+    with open(os.path.join(recordings, "fixture.json"), encoding="utf-8") as fh:
+        body = fh.read()
+    with open(os.path.join(recordings, "2026-09-23-newtrace.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write(body)
+    assert verify.main([hosted, "--token", "s3cret",
+                        "--cassette-dir", recordings]) == 1
+    out = capsys.readouterr().out
+    assert ("2026-09-23-newtrace: built from the committed traces but not "
+            "deployed") in out
+    assert "replay-deploy" in out
+
+
 def test_verifier_fails_on_a_bad_token(hosted, recordings, capsys):
     assert verify.main([hosted, "--token", "wrong",
                         "--cassette-dir", recordings]) == 1

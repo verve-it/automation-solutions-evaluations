@@ -19,6 +19,8 @@ SETS = [
      "baselines/full-triage-2026-09-18.json", 7, 5),
     ("traces/2026-09-15-ops-worst-case.json",
      "baselines/ops-worst-case-2026-09-18.json", 2, 0),
+    ("traces/2026-09-23-triage-analysis.json",
+     "baselines/triage-analysis-2026-09-23.json", 5, 2),
 ]
 
 
