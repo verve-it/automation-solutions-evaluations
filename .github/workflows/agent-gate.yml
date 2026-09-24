@@ -5,19 +5,20 @@
 # what it does — which is how you decide whether an agent change is safe to
 # deploy. No ConnectWise request is made, for reads or writes.
 #
-# Called from the repository that holds the agents, before it deploys:
+# It replays the LATEST version of each recorded agent in the named project,
+# so it runs after the agent reaches staging and before it reaches prod:
 #
-#   jobs:
-#     evals:
-#       uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
-#       with:
-#         environment: staging
-#       secrets: inherit
-#     deploy:
-#       needs: evals          # <- the gate
+#   deploy-staging -> gate (environment: staging) -> deploy-prod (needs: gate)
 #
+# docs/agent-gate-caller.yml is that workflow, ready to copy into the
+# repository that holds the agents, with the settings its environments need.
 # `needs:` is the gate. Without it this reports and the deploy proceeds
 # regardless, which is a dashboard, not a gate.
+#
+# Called from another repository, `environment:`, `vars.*` and the OIDC
+# subject all belong to the CALLER: its staging environment must hold the
+# settings checked below, and the federated credential must trust
+#   repo:<owner>/<agents-repo>:environment:staging
 name: agent gate
 
 on:
@@ -27,10 +28,6 @@ on:
         description: "Which Foundry project to evaluate against."
         type: string
         required: true
-      agent:
-        description: "Agent under test. Default: the agent each cassette was recorded from."
-        type: string
-        default: ""
       min-score:
         description: >-
           Fraction of runs that must pass every gating check. Leave at 0 to
@@ -74,6 +71,19 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.environment }}
+    # One replay at a time per environment. Each clone is a version of a
+    # shared replay agent (`<agent>-replay`), invoked by name, and a name
+    # resolves to the newest version -- so two gates at once would each
+    # invoke whichever clone was created last. run_replay.py checks the name
+    # still resolves to its own clone before invoking, and attribution fails
+    # a run the stub did not journal, but serialising is what prevents it.
+    # The group is scoped to the calling repository.
+    concurrency:
+      group: agent-gate-${{ inputs.environment }}
+      cancel-in-progress: false
+    # Replays, then up to ten one-minute waits for ingestion. A hang past
+    # this is not a slow gate; it is a broken one.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,26 +97,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      # Fail here rather than three steps in with an unhelpful SDK error.
+      # Fail here, before login, rather than at login or three steps in with an
+      # unhelpful SDK error.
       - name: Check the gate is configured
         run: |
           missing=
           [ -n "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" ] || missing="$missing AZURE_AI_PROJECT_ENDPOINT(var)"
           [ -n "${{ vars.REPLAY_SERVER_URL }}" ]         || missing="$missing REPLAY_SERVER_URL(var)"
           [ -n "${{ secrets.REPLAY_TOKEN }}" ]           || missing="$missing REPLAY_TOKEN(secret)"
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]           || missing="$missing AZURE_CLIENT_ID(var)"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]           || missing="$missing AZURE_TENANT_ID(var)"
+          [ -n "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" ] || missing="$missing LOG_ANALYTICS_WORKSPACE_ID(secret)"
           if [ -n "$missing" ]; then
-            echo "::error::not configured on the '${{ inputs.environment }}' environment:$missing"
+            echo "::error::not configured on the '${{ inputs.environment }}' environment of ${{ github.repository }}:$missing"
             exit 1
           fi
           echo "environment : ${{ inputs.environment }}"
           echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
           echo "replay      : ${{ vars.REPLAY_SERVER_URL }}"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          # The CI apps hold roles on the Foundry project and the Log
+          # Analytics workspace only, so no subscription is visible to them
+          # and a plain login fails with "No subscriptions found". Nothing
+          # here uses ARM: Foundry and Log Analytics are data-plane calls
+          # with a tenant token. No subscription-id either -- azure/login
+          # runs `az account set` on one, which fails the same way.
+          allow-no-subscriptions: true
 
       - name: Build cassettes from the committed traces
         run: make cassettes
@@ -146,9 +166,8 @@ jobs:
                 --cassette "$cassette" \
                 --server-url "${{ vars.REPLAY_SERVER_URL }}/mcp/$id" \
                 --token "$REPLAY_TOKEN" \
-                ${{ inputs.agent && format('--agent {0}', inputs.agent) || '' }} \
                 --journal "artifacts/journal-$id.json" \
-                --manifest "artifacts/replay-$id.json" \
+                --manifest "artifacts/manifest-$id.json" \
                 | tee "artifacts/replay-$id.log"
             echo "::endgroup::"
             ran=$((ran + 1))
@@ -174,37 +193,87 @@ jobs:
           python - <<'EOF'
           import datetime as dt, glob, json, os, sys
           PAD = dt.timedelta(minutes=5)
-          starts, ends = [], []
-          for path in sorted(glob.glob("artifacts/replay-*.json")):
+          starts, ends, agents = [], [], set()
+          for path in sorted(glob.glob("artifacts/manifest-*.json")):
               m = json.load(open(path, encoding="utf-8"))
               if m.get("started_utc"):
                   starts.append(dt.datetime.fromisoformat(m["started_utc"]))
               if m.get("finished_utc"):
                   ends.append(dt.datetime.fromisoformat(m["finished_utc"]))
+              # The clone runs under the replay agent's name, so that is the
+              # name its spans carry and the one discovery has to ask for.
+              if m.get("replay_agent") or m.get("agent"):
+                  agents.add(m.get("replay_agent") or m["agent"])
           if not starts or not ends:
               sys.exit("::error::no replay manifest carried a window. Refusing "
                        "to export an hour of the project instead: that scores "
                        "traffic this gate did not cause.")
           since, until = min(starts) - PAD, max(ends) + PAD
           print(f"window {since.isoformat()} .. {until.isoformat()} "
-                f"({len(starts)} replay(s))")
+                f"({len(starts)} replay(s)); agents {sorted(agents)}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"since={since.isoformat()}\n")
               fh.write(f"until={until.isoformat()}\n")
+              fh.write(f"agents={','.join(sorted(agents))}\n")
           EOF
 
-      - name: Export and score what the replay produced
+      # A replay is a NEW invocation with a new operation_Id, and a baseline
+      # is keyed by the RECORDED run's. Scored as exported, every replayed row
+      # is "not in baseline, not compared" and the gate passes whatever the
+      # agent did -- it did exactly that, on the two worst recorded runs.
+      # attribute_runs.py picks each replay's row out by (replay agent,
+      # temporary version), proves it ran against the stub and only the stub
+      # (no A2A, no other toolbox, every MCP call journalled by the replay
+      # server), presents it under the recording's agent, toolbox and tool
+      # definitions, and pulls that recording's committed baseline row.
+      #
+      # It exits 3 while a replay is not ingested yet, or only partly: App
+      # Insights ingests with a lag of minutes, and a half-ingested run scores
+      # as a regression. Anything else is a hard failure.
+      #
+      # Raw exports go under out/raw/, which is never uploaded -- see the
+      # upload step. Only the replay's own spans go on to the Foundry dataset.
+      - name: Export the window and attribute each replay to its recording
+        id: attribute
         env:
           AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
         run: |
-          python export_traces.py \
-              --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
-              --since "${{ steps.window.outputs.since }}" \
-              --until "${{ steps.window.outputs.until }}" \
-              --min-tool-calls 1 \
-              -o artifacts/replay-spans.json
-          python trace_to_eval.py artifacts/replay-spans.json -o out \
-              --tool-defs tool_manifests/
+          attempts=10
+          for i in $(seq 1 "$attempts"); do
+            rm -rf out/raw/window-spans.json out/window
+            mkdir -p out/raw
+            python export_traces.py \
+                --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
+                --since "${{ steps.window.outputs.since }}" \
+                --until "${{ steps.window.outputs.until }}" \
+                --agents "${{ steps.window.outputs.agents }}" \
+                --max-orchestrations 500 \
+                --min-tool-calls 1 \
+                -o out/raw/window-spans.json
+            # An empty window exports nothing and writes no file.
+            [ -f out/raw/window-spans.json ] || echo '[]' > out/raw/window-spans.json
+            python trace_to_eval.py out/raw/window-spans.json -o out/window \
+                --tool-defs tool_manifests/
+            final=
+            [ "$i" = "$attempts" ] && final=--final
+            rc=0
+            python replay/attribute_runs.py "artifacts/manifest-*.json" \
+                --runs out/window/eval_runs.jsonl \
+                --tool-defs tool_manifests/ \
+                --spans out/raw/window-spans.json \
+                --out-spans out/raw/replay-spans.json \
+                --out-runs out/replay/eval_runs.jsonl \
+                --out-baseline artifacts/replay-baseline.json \
+                --summary "$GITHUB_STEP_SUMMARY" $final || rc=$?
+            if [ "$rc" = "0" ]; then exit 0; fi
+            if [ "$rc" != "3" ]; then exit "$rc"; fi
+            if [ "$i" != "$attempts" ]; then
+              echo "not fully ingested yet (attempt $i/$attempts); waiting 60s"
+              sleep 60
+            fi
+          done
+          echo "::error::the replayed runs were still not fully ingested after $attempts attempts"
+          exit 1
 
       # --summary is the point of the red build: the scores land in the job
       # summary, so a builder sees which check failed on which run without
@@ -212,9 +281,10 @@ jobs:
       - name: Score, and write the summary a red build needs
         id: score
         run: |
-          python run_evals.py out/eval_runs.jsonl \
+          python run_evals.py out/replay/eval_runs.jsonl \
               --expected expected.json \
-              --baseline baselines/full-triage-2026-09-18.json \
+              --baseline artifacts/replay-baseline.json \
+              --strict-baseline \
               --json artifacts/gate.json \
               --summary "$GITHUB_STEP_SUMMARY" \
               ${{ inputs.min-score != 0 && format('--min-score {0}', inputs.min-score) || '' }} \
@@ -227,10 +297,10 @@ jobs:
       - name: Score it in Foundry, for the detail view
         if: always() && steps.score.outcome != 'skipped'
         run: |
-          python foundry/to_foundry_dataset.py artifacts/replay-spans.json \
+          python foundry/to_foundry_dataset.py out/raw/replay-spans.json \
               --expected expected.json --tool-defs tool_manifests/ \
-              --no-messages -o artifacts/foundry-dataset.jsonl
-          python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl \
+              --no-messages -o out/raw/foundry-dataset.jsonl
+          python foundry/run_cloud_eval.py out/raw/foundry-dataset.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --name "gate-${{ inputs.environment }}" \
@@ -242,23 +312,30 @@ jobs:
             echo "[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Verdicts, journals and provenance — not the raw export.
+      # Verdicts, journals and provenance — never the raw export.
       #
       # A workflow artifact in a PUBLIC repository is downloadable by anyone,
-      # and `replay-spans.json` and the Foundry dataset are a live export of a
-      # project that also serves real traffic. Scrubbing is deliberately not
-      # automatable here (scrub_trace.py is propose -> human review -> apply),
-      # so the export does not leave the runner. The journals are safe: they
-      # replay the committed, already-scrubbed cassettes. The detail view for
-      # a failed gate is the Foundry run linked from the summary.
+      # and the exported window and the Foundry dataset are a live export of
+      # a project that also serves real traffic. Scrubbing is deliberately not
+      # automatable (scrub_trace.py is propose -> human review -> apply), so
+      # raw exports live under out/raw/ and nothing under out/ is uploaded.
+      #
+      # Every path is named exactly or by a glob that cannot match an export.
+      # `artifacts/replay-*.json` looked safe and matched the raw spans file;
+      # tests/test_agent_gate_workflow.py now checks each glob against every
+      # path an export step writes.
+      #
+      # The journals are safe: they replay the committed, already-scrubbed
+      # cassettes. replay-baseline.json is rows of the committed baselines.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: agent-gate-${{ inputs.environment }}
           path: |
             artifacts/gate.json
+            artifacts/replay-baseline.json
             artifacts/journal-*.json
-            artifacts/replay-*.json
+            artifacts/manifest-*.json
             artifacts/replay-*.log
             artifacts/foundry-run.log
           retention-days: 90

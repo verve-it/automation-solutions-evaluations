@@ -19,8 +19,9 @@ covers the other two.
 
 `.github/workflows/evals.yml` is already wired for this. It sets
 `id-token: write` and uses `azure/login@v2` with
-`vars.AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`. Those
-variables are simply unset. No secret is involved: the workflow exchanges a
+`vars.AZURE_CLIENT_ID` / `AZURE_TENANT_ID` and `allow-no-subscriptions: true`
+-- the apps hold roles on the project and the workspace only, so they see no
+subscription, and nothing CI does needs one. No secret is involved: the workflow exchanges a
 GitHub OIDC token for an Azure one.
 
 ### The one thing that is easy to get wrong
@@ -203,7 +204,7 @@ Environment variables:
 |---|---|
 | `AZURE_CLIENT_ID` | that environment's app id |
 | `AZURE_TENANT_ID` | your tenant id |
-| `AZURE_SUBSCRIPTION_ID` | the subscription holding the project |
+| `AZURE_SUBSCRIPTION_ID` | not read by CI any more (login uses `allow-no-subscriptions`); harmless if set |
 | `AZURE_AI_PROJECT_ENDPOINT` | `https://<resource>.services.ai.azure.com/api/projects/<project>` |
 | `AZURE_JUDGE_DEPLOYMENT` | the judge model deployment name (weekly job only) |
 

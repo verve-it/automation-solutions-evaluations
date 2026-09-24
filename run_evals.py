@@ -148,9 +148,16 @@ def check_trajectory(run, cfg):
         return _skip(f"no expected_actions for {want}")
     actual = run.get("tool_names", [])
 
+    # Bare names on both sides. Foundry prefixes an MCP tool with the server
+    # label, and the label belongs to the deployment, not the agent: the
+    # September traces say `ConnectWise-PSA-ForAgents___`, the prod toolbox
+    # of 2026-09-23 says `CWPSA-ForAgents-prod___`. An exact match fails every
+    # expectation the day a toolbox is relabelled, while the agent's path is
+    # unchanged. The prefixed name stays in `tool_names` and `trajectory`.
+    want = [base_tool_name(t) for t in expected]
     i, matched = 0, []
     for step in actual:
-        if i < len(expected) and step == expected[i]:
+        if i < len(want) and base_tool_name(step) == want[i]:
             matched.append(step)
             i += 1
     recall = len(matched) / len(expected) if expected else 0.0
@@ -535,6 +542,45 @@ def diff_baseline(rows, baseline):
     return regressions, fixes, lost, new_runs, missing
 
 
+def strict_failures(rows, new_runs, missing):
+    """Why a strict comparison failed, or [] when every run was compared.
+
+    The default diff treats a run absent from the baseline as "new, not
+    compared". That is right for nightly drift, where new orchestrations
+    arrive every day. It is wrong for a deployment gate: the gate replayed
+    exactly these runs, so a replayed run the baseline does not know is a run
+    that was never judged, and a gate that compares nothing passes.
+    """
+    out = []
+    if not rows:
+        out.append("no run was scored")
+    if new_runs:
+        out.append(f"{len(new_runs)} scored run(s) have no baseline row: "
+                   + ", ".join(f"{a} [{op[:12]}]" for op, a in new_runs))
+    if missing:
+        out.append(f"{len(missing)} baseline row(s) were not scored: "
+                   + ", ".join(f"{a} [{op[:12]}]" for op, a in missing))
+    if rows and len(new_runs) == len(rows):
+        out.append("nothing was compared against the baseline")
+    return out
+
+
+def gating_only(entries):
+    """The diff entries on a GATING check -- the only ones that fail a build.
+
+    A reporting check that flips is shown, and is worth reading, but it must
+    not block a deploy: the summary says those checks never fail the build,
+    and a builder told otherwise by the exit code stops trusting either.
+    Frozen-set tests still see every flip -- they assert "no change against
+    baseline" outright, whatever the exit code.
+    """
+    return [e for e in entries if e[1] in GATING]
+
+
+def _tag(name):
+    return "" if name in GATING else "  (reporting check — does not fail the build)"
+
+
 def print_diff(regressions, fixes, lost, new_runs, missing):
     print("\n" + "=" * 60)
     print("BASELINE DIFF")
@@ -543,12 +589,12 @@ def print_diff(regressions, fixes, lost, new_runs, missing):
         print(f"\nREGRESSED ({len(regressions)})")
         for (op, agent), name, reason in regressions:
             print(f"  {agent} [{op[:12]}]")
-            print(f"    {name}: {reason}")
+            print(f"    {name}: {reason}{_tag(name)}")
     if lost:
         print(f"\nLOST COVERAGE ({len(lost)}) — scored in baseline, skipped now")
         for (op, agent), name, reason in lost:
             print(f"  {agent} [{op[:12]}]")
-            print(f"    {name}: {reason}")
+            print(f"    {name}: {reason}{_tag(name)}")
     if fixes:
         print(f"\nFIXED ({len(fixes)})")
         for (op, agent), name, reason in fixes:
@@ -626,7 +672,8 @@ def print_thresholds(rows, min_score, min_check_score):
     return failed
 
 
-def write_summary(path, rows, baseline_path, min_score, min_check_score):
+def write_summary(path, rows, baseline_path, min_score, min_check_score,
+                  diff=None, strict=None):
     """A table a builder can read when the build is red.
 
     An exit code says a gate failed; it does not say which check, on how many
@@ -660,6 +707,30 @@ def write_summary(path, rows, baseline_path, min_score, min_check_score):
         lines.append(f"| `{name}` | {'yes' if c['gating'] else 'no'} | "
                      f"{rate} | {failing} | {c['skipped']} |")
 
+    if diff is not None:
+        regressions, fixes, lost, new_runs, missing = diff
+        compared = len(rows) - len(new_runs)
+        lines += ["", "### Against the baseline", "",
+                  f"Compared **{compared} of {len(rows)}** run(s). "
+                  f"Regressed {len(regressions)}, lost coverage {len(lost)}, "
+                  f"fixed {len(fixes)}, not in baseline {len(new_runs)}, "
+                  f"in baseline but not scored {len(missing)}."]
+        if regressions or lost:
+            lines += ["", "| Agent | Recording | Check | Gates? | Now | Reason |",
+                      "|---|---|---|---|---|---|"]
+            for (op, agent), name, reason in regressions:
+                lines.append(f"| {agent} | `{op[:12]}` | `{name}` | "
+                             f"{'yes' if name in GATING else 'no'} | "
+                             f"**regressed** | {reason} |")
+            for (op, agent), name, reason in lost:
+                lines.append(f"| {agent} | `{op[:12]}` | `{name}` | "
+                             f"{'yes' if name in GATING else 'no'} | "
+                             f"stopped scoring | {reason} |")
+        if strict:
+            lines += ["", "**Strict comparison failed** — every replayed run "
+                          "must be compared against its baseline:", ""]
+            lines += [f"- {s}" for s in strict]
+
     failing_rows = [r for r in rows if not r["passed"]]
     if failing_rows:
         lines += ["", "### Runs that failed a gating check", "",
@@ -685,7 +756,7 @@ def write_summary(path, rows, baseline_path, min_score, min_check_score):
     return "\n".join(lines)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("jsonl", help="eval_runs.jsonl from trace_to_eval.py")
     ap.add_argument("--expected", help="JSON map of traj_key -> expected tools")
@@ -709,10 +780,17 @@ def main():
                     help="write a markdown summary here — point it at "
                          "$GITHUB_STEP_SUMMARY so a red build shows the "
                          "scores instead of only the exit code.")
+    ap.add_argument("--strict-baseline", action="store_true",
+                    help="with --baseline, also fail when a scored run has "
+                         "no baseline row, a baseline row was not scored, or "
+                         "nothing was compared. For a gate that replayed "
+                         "known runs; nightly drift must not use it.")
     ap.add_argument("--allow-lost-coverage", action="store_true",
                     help="do not fail when a check that used to score now "
                          "skips (use when intentionally retiring a check)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.strict_baseline and not args.baseline:
+        ap.error("--strict-baseline needs --baseline")
 
     runs = [json.loads(l) for l in open(args.jsonl, encoding="utf-8") if l.strip()]
     cfg = {"max_empty_rate": args.max_empty_rate, "expected": {},
@@ -728,13 +806,21 @@ def main():
     rows = score(runs, cfg)
     print_report(rows)
 
-    failed_diff = False
+    failed_diff, diff, strict = False, None, None
     if args.baseline:
         baseline = json.load(open(args.baseline, encoding="utf-8"))
-        regressions, fixes, lost, new_runs, missing = diff_baseline(rows, baseline)
+        diff = diff_baseline(rows, baseline)
+        regressions, fixes, lost, new_runs, missing = diff
         print_diff(regressions, fixes, lost, new_runs, missing)
-        failed_diff = bool(regressions) or bool(lost and
-                                                not args.allow_lost_coverage)
+        failed_diff = bool(gating_only(regressions)) or bool(
+            gating_only(lost) and not args.allow_lost_coverage)
+        if args.strict_baseline:
+            strict = strict_failures(rows, new_runs, missing)
+            if strict:
+                print("\nSTRICT BASELINE FAILED")
+                for s in strict:
+                    print(f"  {s}")
+                failed_diff = True
 
     failed_threshold = False
     if args.min_score is not None or args.min_check_score is not None:
@@ -743,7 +829,7 @@ def main():
 
     if args.summary:
         write_summary(args.summary, rows, args.baseline, args.min_score,
-                      args.min_check_score)
+                      args.min_check_score, diff=diff, strict=strict)
 
     if args.json:
         parent = os.path.dirname(os.path.abspath(args.json))

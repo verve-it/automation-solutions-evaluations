@@ -236,7 +236,7 @@ def test_manifest_is_injected_for_the_toolbox_version_the_run_used(tmp_path):
         "toolbox": "ConnectwiseMCP", "version": "5",
         "tools": [{"name": "cw_resolve", "description": "",
                    "inputSchema": {"type": "object", "properties": {}}}],
-    }))
+    }), encoding="utf-8")
     manifests = t.load_tool_manifests([str(man)])
     spans = [
         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/5/mcp", "a"),
@@ -278,13 +278,13 @@ def test_wildcard_manifest_covers_every_binding_revision():
 
 def test_manifest_without_a_versions_field_defaults_to_wildcard(tmp_path):
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}))
+    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}), encoding="utf-8")
     assert t.load_tool_manifests([str(man)])[0]["versions"] == ["*"]
 
 
 def test_single_version_key_is_still_accepted(tmp_path):
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}))
+    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}), encoding="utf-8")
     assert t.load_tool_manifests([str(man)])[0]["versions"] == ["3"]
 
 
@@ -352,7 +352,7 @@ def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
     assert (added, total) == (1, 1)
     # idempotent: a second pass adds nothing
     assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
-    index = json.loads((tmp_path / "index.json").read_text())
+    index = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
     assert [v["skill_name"] for v in index.values()] == ["ok"]
 
 

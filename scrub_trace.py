@@ -42,6 +42,9 @@ SENSITIVE_KEYS = {
     "addressline1", "addressline2", "city", "state", "zip", "country",
     "summary", "description", "initialdescription", "text", "notes", "note",
     "auditnote", "title", "query",
+    # Who touched a record: ConnectWise member identifiers are usernames.
+    "identifier", "companyidentifier", "username", "membername",
+    "enteredby", "updatedby", "createdby", "closedby",
 }
 
 # Never proposed: the vocabulary the checks and trajectories are made of.
@@ -53,8 +56,17 @@ NEVER_PROPOSE = {
 }
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-# 10+ digits, and not an ISO date — `2026-07-06` is not a phone number.
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]?){9,}\d(?!\d)")
+# A phone number: optional country code, a three-digit area code bare or in
+# parentheses -- `\(` too, since a model escapes them in markdown -- then
+# 3 + 4 digits. The old `(?:\+?\d[\s().-]?){9,}\d` missed "(209) 456-1688"
+# (it had to start on a digit) and matched the fraction of a float, so a
+# `search_score` of 0.8234567891 became `0.PHONE_...` and 40 nested JSON
+# results stopped parsing. Not after a word character or a decimal point,
+# not before one, and never an ISO date.
+PHONE_RE = re.compile(
+    r"(?<![\w.])(?:\+?\d{1,3}[\s-]?)?"
+    r"(?:\\?\(\d{3}\\?\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}"
+    r"(?!\w|\.\d)")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 # Foundry tool identifiers: `<server>___<tool>`, or a bare cw_* / snake_case
 # tool name. Never customer data.
@@ -62,10 +74,32 @@ TOOL_NAME_RE = re.compile(r"^[\w.-]*___[\w.-]+$|^(cw_|load_skill|run_skill|tool_
 
 # Person and company names live in prose, not in structured fields — this
 # corpus has exactly two `name` values and 67 e-mail addresses, but contact
-# and company names appear throughout audit notes and write plans. A
-# capitalised multi-word phrase is the usual shape; the reviewer decides.
-CAPPHRASE_RE = re.compile(
-    r"\b[A-Z][a-z'`-]+(?:\.?\s+[A-Z][A-Za-z'`.-]+){1,3}\b")
+# and company names appear throughout audit notes and write plans. A run of
+# two to four capitalised words is the usual shape; the reviewer decides.
+# Words, not an ASCII pattern: `[A-Z][a-z]` never saw "Muñoz" or "Zoë".
+WORD_RE = re.compile(r"[^\W\d_]+(?:['`.-][^\W\d_]+)*\.?")
+# A single capitalised word is proposed only where prose names someone.
+NAME_CUE_RE = re.compile(
+    r"(?:\b(?:hi|hello|hey|dear|thanks|thank you|regards|cheers|contact|"
+    r"caller|user|requester|from|by|for|with|cc)[,:]?)\s*$", re.I)
+# A DOMAIN\user login, and an organisation's own domain or hostname.
+LOGIN_RE = re.compile(r"\b[A-Z][A-Z0-9-]{1,14}\\{1,2}[A-Za-z][\w.-]{1,30}")
+DOMAIN_RE = re.compile(
+    r"(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:com|net|org|local|lan|corp|internal|io|us|gov|edu|biz|info|co|ca)"
+    r"(?![\w-])", re.I)
+# Proposed, never swept unreviewed: each is also the shape of something
+# harmless (a version, a count range, a date-less serial).
+IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+LOCAL_PHONE_RE = re.compile(r"(?<![\w.-])\d{3}-\d{4}(?![\w-])")
+ZIP4_RE = re.compile(r"(?<![\w.-])\d{5}-\d{4}(?![\w-])")
+HOST_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[A-Z]*\d+[A-Z0-9]*\b")
+# Vendors' domains are not a customer's.
+DOMAIN_STOP = ("microsoft.com", "microsoftonline.com", "azure.com", "windows.net", "office.com",
+               "office365.com", "outlook.com", "live.com", "azure.net",
+               "connectwise.com", "myconnectwise.net", "github.com",
+               "google.com", "apple.com", "adobe.com", "openai.com",
+               "anthropic.com", "example.com", "w3.org", "json-schema.org")
 
 # Capitalised phrases that are ConnectWise or product vocabulary, never a
 # person. Keeps the review list short enough to actually read.
@@ -88,7 +122,112 @@ CONTENT_COLUMNS = ("c_input", "c_output", "c_system", "c_tool_args",
                    "c_tool_result", "c_tool_defs")
 
 MIN_LEN = 4          # shorter literals are ordinary English
+MIN_NAME_LEN = 3     # ...but a first name is often three letters ("Eli")
 MAX_LEN = 120        # longer ones are prose, not an identity
+# A redact-file key starting with `_` is a comment -- unless its value is a
+# KIND, which makes it a literal (`_svc_backup`: USER). They used to be
+# dropped either way, and a dropped literal is never reported as residual.
+KIND_RE = re.compile(r"^[A-Z][A-Z_]*\??$")
+
+
+def json_container(text):
+    """The parsed value if `text` is a JSON object or array, else None.
+
+    Tool results arrive as JSON strings inside JSON: an MCP `content[].text`
+    is itself a serialised object. Seen as a string, its escapes hide what
+    it holds -- "Mu\\u00f1oz" is not "Muñoz" to a regex, and "\\nJohn" has
+    no word boundary before "John" -- so the sweep, the residual check and
+    the proposer all decode it first.
+    """
+    if not isinstance(text, str) or text.lstrip()[:1] not in ("{", "["):
+        return None
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+_ESCAPE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|([nrtbf\\/\"]))")
+_SIMPLE = {"n": "\n", "r": "\r", "t": "\t", "b": " ", "f": " ",
+           "\\": "\\", "/": "/", '"': '"'}
+
+
+def unescape(text):
+    """JSON escapes decoded where the string itself would not parse -- a
+    payload truncated mid-object is still full of `\\u00f1` and `\\n`."""
+    return _ESCAPE_RE.sub(
+        lambda m: chr(int(m.group(1), 16)) if m.group(1)
+        else _SIMPLE[m.group(2)], text)
+
+
+def decoded_texts(obj):
+    """Every string in `obj`, nested JSON decoded, escapes resolved."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from decoded_texts(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from decoded_texts(v)
+    elif isinstance(obj, str):
+        inner = json_container(obj)
+        if inner is not None:
+            yield from decoded_texts(inner)
+        else:
+            yield obj
+            if "\\" in obj:
+                yield unescape(obj)
+
+
+GREETINGS = {"hi", "hello", "hey", "dear", "thanks", "regards", "cheers",
+             "thank", "you"}
+# Lower-case words inside a name: "Council of Governments", "Maria de Souza".
+CONNECTORS = {"of", "de", "del", "da", "la", "le", "van", "von", "der", "and",
+              "&"}
+
+
+def cap_phrases(text):
+    """(phrase, words) for each run of capitalised words, and for a single
+    capitalised word where a cue says a person is named.
+
+    A run is never cut at a fixed length: cutting "SAN JOAQUIN COUNCIL OF
+    GOVERNMENTS" after four words proposes a literal that strands the tail.
+    A leading greeting is dropped -- "Hi Zoë" is Zoë.
+    """
+    words = list(re.finditer(r"&|" + WORD_RE.pattern, text))
+    i = 0
+    while i < len(words):
+        if not words[i].group(0)[0].isupper():
+            i += 1
+            continue
+        run = [words[i]]
+        j = i + 1
+        while j < len(words):
+            gap = text[run[-1].end():words[j].start()]
+            if not gap.isspace() or "\n" in gap:
+                break
+            w = words[j].group(0)
+            if w[0].isupper():
+                run.append(words[j])
+            elif (w.lower() in CONNECTORS and j + 1 < len(words)
+                  and words[j + 1].group(0)[0].isupper()
+                  and text[words[j].end():words[j + 1].start()].isspace()):
+                run += [words[j], words[j + 1]]
+                j += 1
+            else:
+                break
+            j += 1
+        i = j
+        cue = False
+        while run and run[0].group(0).rstrip(".,").lower() in GREETINGS:
+            run.pop(0)
+            cue = True
+        if not run:
+            continue
+        start, end = run[0].start(), run[-1].end()
+        if len(run) > 1 or cue or NAME_CUE_RE.search(
+                text[max(0, start - 24):start]):
+            yield text[start:end].rstrip("."), len(run)
 
 
 def protected_vocabulary():
@@ -210,9 +349,9 @@ def propose(rows):
     found = {}
     skills = skill_corpus(rows)
 
-    def note(value, kind):
+    def note(value, kind, min_len=MIN_LEN):
         v = (value or "").strip()
-        if not (MIN_LEN <= len(v) <= MAX_LEN):
+        if not (min_len <= len(v) <= MAX_LEN):
             return
         if kind == "PHONE" and (ISO_DATE_RE.match(v)
                                 or sum(c.isdigit() for c in v) < 10):
@@ -239,13 +378,24 @@ def propose(rows):
             note(m.group(0), "EMAIL")
         for m in PHONE_RE.finditer(text):
             note(m.group(0), "PHONE")
-        for m in (CAPPHRASE_RE.finditer(text) if names else ()):
-            phrase = m.group(0)
+        for rx, kind in ((IPV4_RE, "IP?"), (LOCAL_PHONE_RE, "PHONE?"),
+                         (ZIP4_RE, "PLACE?")):
+            for m in rx.finditer(text):
+                note(m.group(0), kind)
+        for m in LOGIN_RE.finditer(text):
+            note(m.group(0), "USER?")
+        for m in DOMAIN_RE.finditer(text):
+            d = m.group(0).lower()
+            if not any(d == s or d.endswith("." + s) for s in DOMAIN_STOP):
+                note(m.group(0), "DOMAIN?")
+        for m in (HOST_RE.finditer(text) if names else ()):
+            note(m.group(0), "HOST?")
+        for phrase, n in (cap_phrases(text) if names else ()):
             words = [w.strip(".'`-").lower() for w in phrase.split()]
             # Every word vocabulary -> not a name. Any word not in the
             # stoplist -> propose it and let the reviewer decide.
             if any(w and w not in PHRASE_STOPWORDS for w in words):
-                note(phrase, "NAME?")
+                note(phrase, "NAME?", MIN_LEN if n > 1 else MIN_NAME_LEN)
 
     def walk(obj, parent_key=None, in_schema=False, names=True):
         if isinstance(obj, dict):
@@ -262,7 +412,13 @@ def propose(rows):
         elif isinstance(obj, str):
             if in_schema:
                 return
+            inner = json_container(obj)
+            if inner is not None:
+                walk(inner, parent_key, in_schema, names)
+                return
             scan_text(obj, parent_key, names)
+            if "\\" in obj:
+                scan_text(unescape(obj), parent_key, names)
 
     for row in rows:
         for attr, raw in payloads_of(row):
@@ -279,10 +435,23 @@ def propose(rows):
                 # exactly where customer data is. Scan the raw text with the
                 # same heuristics rather than only for e-mails.
                 scan_text(raw, names=names)
+                if isinstance(raw, str) and "\\" in raw:
+                    scan_text(unescape(raw), names=names)
     return found
 
 
 # -------------------------------------------------------------------- apply
+
+WORD_START = r"(?:(?<=\\[nrtbf])|(?<=\\u[0-9a-fA-F]{4})|\b)"
+
+
+def _word_initial(literal):
+    return literal[:1].isalnum() or literal[:1] == "_"
+
+
+def _tail(literal):
+    return r"\b" if literal[-1:].isalnum() or literal[-1:] == "_" else ""
+
 
 def bounded(literal):
     r"""`re.escape` plus word boundaries where they apply.
@@ -293,10 +462,14 @@ def bounded(literal):
     a word character — an e-mail address ends in a letter but a phone number
     may end in punctuation, and `\b` next to a non-word character would never
     match.
+
+    A literal also starts right after a JSON escape: in `\\nJohn` the `n`
+    and the `J` are both word characters, so `\b` alone never matched and
+    every name at the start of a line in a still-escaped string survived.
     """
     escaped = re.escape(literal)
-    prefix = r"\b" if literal[:1].isalnum() or literal[:1] == "_" else ""
-    suffix = r"\b" if literal[-1:].isalnum() or literal[-1:] == "_" else ""
+    prefix = WORD_START if _word_initial(literal) else ""
+    suffix = _tail(literal)
     return f"{prefix}{escaped}{suffix}"
 
 
@@ -305,16 +478,41 @@ def build_sweeper(redactions, pseudo):
     first so a longer name is replaced before a substring of it."""
     if not redactions:
         return None
-    ordered = sorted(redactions, key=len, reverse=True)
-    pattern = re.compile("|".join(bounded(v) for v in ordered), re.I)
-    tokens = {v.lower(): pseudo.token(v, redactions[v]) for v in ordered}
+    tokens = {v.lower(): pseudo.token(v, redactions[v]) for v in redactions}
+    # A non-ASCII literal also appears JSON-escaped wherever a string could
+    # not be decoded: "Muñoz" as "Mu\\u00f1oz". Both spellings, one token.
+    for v in list(redactions):
+        escaped = json.dumps(v)[1:-1]
+        if escaped != v:
+            tokens.setdefault(escaped.lower(), tokens[v.lower()])
+    # The word-start test is shared, not repeated per literal: at most
+    # positions it fails once instead of once for each of 800 literals,
+    # which made the sweep three times slower than without it. A literal
+    # starting with a word character and one starting with punctuation can
+    # never match at the same position, so splitting them keeps
+    # longest-first where it matters.
+    ordered = sorted(tokens, key=len, reverse=True)
+    words = [re.escape(v) + _tail(v) for v in ordered if _word_initial(v)]
+    other = [re.escape(v) + _tail(v) for v in ordered if not _word_initial(v)]
+    parts = ([WORD_START + "(?:" + "|".join(words) + ")"] if words else []) \
+        + other
+    pattern = re.compile("|".join(parts), re.I)
     return pattern, tokens
 
 
-def still_present(literal, haystack):
+def still_present(literal, haystack, lowered=None):
     """Residual check, with the same boundaries the sweep used — otherwise
     "Process" reads as residual inside "Processing", which the sweep
-    deliberately left alone."""
+    deliberately left alone.
+
+    A plain substring test first: a bounded pattern opens with a lookbehind,
+    which rules out the regex engine's literal scan, and 860 of them over a
+    decoded 20 MB export took fifteen minutes. Pass `lowered` (the haystack,
+    lower-cased once) when checking many literals.
+    """
+    lowered = haystack.lower() if lowered is None else lowered
+    if literal.lower() not in lowered:
+        return False
     return re.search(bounded(literal), haystack, re.I) is not None
 
 
@@ -335,7 +533,17 @@ def sweep_obj(obj, pseudo, sweeper):
         return {k: sweep_obj(v, pseudo, sweeper) for k, v in obj.items()}
     if isinstance(obj, list):
         return [sweep_obj(v, pseudo, sweeper) for v in obj]
-    return sweep(obj, pseudo, sweeper)
+    return sweep_value(obj, pseudo, sweeper)
+
+
+def sweep_value(value, pseudo, sweeper):
+    """A string that is itself JSON is swept as JSON, and re-serialised only
+    if something in it changed, so an untouched result keeps its bytes."""
+    inner = json_container(value)
+    if inner is None:
+        return sweep(value, pseudo, sweeper)
+    swept = sweep_obj(inner, pseudo, sweeper)
+    return value if swept == inner else json.dumps(swept, ensure_ascii=False)
 
 
 def sweep_payload(raw, pseudo, sweeper):
@@ -360,7 +568,7 @@ def scrub_row(row, pseudo, sweeper):
             dims = None
     if isinstance(dims, dict):
         dims = {k: (sweep_payload(v, pseudo, sweeper) if k in PAYLOAD_ATTRS
-                    else sweep(v, pseudo, sweeper))
+                    else sweep_value(v, pseudo, sweeper))
                 for k, v in dims.items()}
         out[dims_key] = json.dumps(dims, ensure_ascii=False)
     for column in CONTENT_COLUMNS:
@@ -444,7 +652,13 @@ def main():
 
     with open(args.redact_file, encoding="utf-8") as fh:
         redactions = json.load(fh)
-    redactions = {k: v for k, v in redactions.items() if not k.startswith("_")}
+    comments = [k for k, v in redactions.items()
+                if k.startswith("_") and not (isinstance(v, str)
+                                              and KIND_RE.match(v))]
+    redactions = {k: v for k, v in redactions.items() if k not in comments}
+    if comments:
+        print(f"{len(comments)} comment key(s) ignored: "
+              + ", ".join(repr(k) for k in comments[:5]))
 
     # Refuse before writing anything. This failure is silent otherwise.
     protected = protected_vocabulary()
@@ -485,9 +699,13 @@ def main():
     print(f"salt fingerprint {pseudo.fingerprint} -> {sidecar}")
 
     # A scrubber is never provably complete; prove at least that everything
-    # declared is gone.
+    # declared is gone -- in the file as written and in every string it
+    # holds once nested JSON and escapes are decoded, where a regex over the
+    # raw file cannot see "Mu\\u00f1oz" or a name after "\\n".
     written = open(args.out, encoding="utf-8").read()
-    residual = [v for v in redactions if still_present(v, written)]
+    haystack = "\n".join([written, *decoded_texts(scrubbed)])
+    lowered = haystack.lower()
+    residual = [v for v in redactions if still_present(v, haystack, lowered)]
     if residual:
         print(f"\nRESIDUAL: {len(residual)} declared literal(s) still present")
         for v in residual[:10]:

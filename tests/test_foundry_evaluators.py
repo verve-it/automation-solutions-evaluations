@@ -1,7 +1,7 @@
 """The checks, ported to Foundry code-based evaluators.
 
 The port is only worth having if it agrees with run_evals.py. These tests
-score both frozen trace sets with each and assert every comparable verdict
+score every frozen trace set with each and assert every comparable verdict
 matches — that is the guarantee, not the unit tests below it.
 """
 import json
@@ -23,7 +23,8 @@ import trace_to_eval                                   # noqa: E402
 from conftest import REPO                              # noqa: E402
 
 SETS = ["traces/2026-09-03-full-triage.json",
-        "traces/2026-09-15-ops-worst-case.json"]
+        "traces/2026-09-15-ops-worst-case.json",
+        "traces/2026-09-23-triage-analysis.json"]
 
 # registered evaluator -> the run_evals check it reproduces
 PAIRS = [
@@ -146,6 +147,18 @@ def test_trajectory_penalises_a_missing_step():
     assert checks.grade_trajectory({}, row) == 0.5
 
 
+def test_trajectory_ignores_the_server_label_prefix():
+    """Must agree with run_evals.check_trajectory, which matches bare names."""
+    row = {"tool_outcomes": [{"tool": t, "result": "", "success": True}
+                             for t in ["load_skill",
+                                       "CWPSA-ForAgents-prod___cw_get_ticket",
+                                       "CWPSA-ForAgents-prod___cw_search"]],
+           "expected_actions": ["load_skill",
+                                "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                                "ConnectWise-PSA-ForAgents___cw_query"]}
+    assert checks.grade_trajectory({}, row) == pytest.approx(2 / 3)
+
+
 def test_dead_end_threshold_matches_max_empty_rate():
     """0.75 here is run_evals.py's max_empty_rate of 0.25, the other way up."""
     assert checks.EVALUATORS["cw_no_dead_ends"][4] == 0.75
@@ -256,7 +269,7 @@ def test_register_dry_run_calls_nothing(tmp_path):
          "--out", str(out)],
         cwd=REPO, check=True, capture_output=True, text=True)
     assert "nothing was called" in result.stdout
-    assert len(json.loads(out.read_text())) == len(checks.EVALUATORS)
+    assert len(json.loads(out.read_text(encoding="utf-8"))) == len(checks.EVALUATORS)
 
 
 # --- registration payload shape ---------------------------------------------
@@ -478,6 +491,25 @@ def test_item_schema_declares_every_column_with_its_real_type():
     assert props["run_agent"]["type"] == "string"
 
 
+def test_locked_versions_reach_the_criteria():
+    """TestingCriterionAzureAIEvaluator is a TypedDict. Setting
+    evaluator_version as an attribute raised AttributeError, after the
+    dataset had been uploaded, on every run with evaluator-versions.json --
+    the gate's and the nightly's. No test built the criteria, so it passed."""
+    pytest.importorskip("azure.ai.projects")
+    import run_cloud_eval
+
+    _, rows = _both(SETS[0])
+    lock = run_cloud_eval.load_lock(os.path.join(REPO,
+                                                 "evaluator-versions.json"))
+    assert lock, "evaluator-versions.json pins nothing"
+    criteria = run_cloud_eval.testing_criteria(rows, "gpt", lock=lock)
+    assert {c["name"]: c.get("evaluator_version") for c in criteria} == lock
+
+    unlocked = run_cloud_eval.testing_criteria(rows, "gpt", lock={})
+    assert all("evaluator_version" not in c for c in unlocked)
+
+
 def test_item_schema_has_no_type_unions():
     """A nullable column becomes a union, which the service may not take."""
     import run_cloud_eval
@@ -595,7 +627,7 @@ def test_lock_file_is_read_and_versions_coerced_to_strings(tmp_path):
     import run_cloud_eval
 
     lock = tmp_path / "v.json"
-    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}))
+    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}), encoding="utf-8")
     assert run_cloud_eval.load_lock(str(lock)) == {"cw_trajectory": "4",
                                                    "cw_no_dead_ends": "2"}
 

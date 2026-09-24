@@ -234,9 +234,9 @@ a sandbox with no network. `run_evals.py` returns a verdict *and* a reason —
 say why. So `run_evals.py` stays as the local gate that explains itself and as
 the baseline-diff regression gate, which Foundry has no equivalent for.
 
-Fidelity is tested: both frozen trace sets are scored with `run_evals.py` and
-with the ported functions and every comparable verdict must match — **56
-verdicts, 0 mismatches**.
+Fidelity is tested: every frozen trace set is scored with `run_evals.py` and
+with the ported functions and every comparable verdict must match, with **0
+mismatches**.
 
 Full detail, including the eight payload rejections it took to get a run
 through, in [`docs/FOUNDRY.md`](docs/FOUNDRY.md).

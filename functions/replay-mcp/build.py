@@ -35,6 +35,12 @@ SHARED = [
     os.path.join(ROOT, "replay", "state_store.py"),
     os.path.join(ROOT, "replay", "make_cassette.py"),
     os.path.join(ROOT, "trace_to_eval.py"),
+    # trace_to_eval and make_cassette import evalconfig at module level, so
+    # a package without it dies on import -- every request a 502. It did,
+    # from the commit that added evalconfig until this line. The config file
+    # rides along so the hosted import reads what a checkout reads.
+    os.path.join(ROOT, "evalconfig.py"),
+    os.path.join(ROOT, "eval-config.json"),
 ]
 
 OWN = ["server.py", "host.json", "requirements.txt"]
@@ -49,6 +55,15 @@ OWN = ["server.py", "host.json", "requirements.txt"]
 PAYLOAD_NAME = "replay_payload.json"
 PAYLOAD_SCHEMA = "verve/replay-payload@1"
 
+# The same list as the `cassettes` target in the Makefile and tasks.ps1. A
+# trace missing here is a cassette the gate replays and the server cannot
+# serve: every call on it diverges and the gate blames the agent.
+COMMITTED_TRACES = (
+    "2026-09-03-full-triage.json",
+    "2026-09-15-ops-worst-case.json",
+    "2026-09-23-triage-analysis.json",
+)
+
 
 def build_cassettes():
     """Cassettes are derived from the committed traces, not committed.
@@ -61,16 +76,11 @@ def build_cassettes():
     deriving them is cheap and removes the question.
     """
     print("building cassettes from the committed traces")
-    subprocess.run([sys.executable, os.path.join(ROOT, "replay",
-                                                 "make_cassette.py"),
-                    os.path.join(ROOT, "traces",
-                                 "2026-09-03-full-triage.json"),
-                    "-o", os.path.join(ROOT, "cassettes")], check=True)
-    subprocess.run([sys.executable, os.path.join(ROOT, "replay",
-                                                 "make_cassette.py"),
-                    os.path.join(ROOT, "traces",
-                                 "2026-09-15-ops-worst-case.json"),
-                    "-o", os.path.join(ROOT, "cassettes")], check=True)
+    for trace in COMMITTED_TRACES:
+        subprocess.run([sys.executable, os.path.join(ROOT, "replay",
+                                                     "make_cassette.py"),
+                        os.path.join(ROOT, "traces", trace),
+                        "-o", os.path.join(ROOT, "cassettes")], check=True)
 
 
 def refuse_lossy(cassettes):

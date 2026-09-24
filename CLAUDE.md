@@ -145,7 +145,7 @@ none performed" about a run that attempted several.
 - **Gates compare DELTA, not absolute pass rates.** Known failures stay failing
   without blocking unrelated work.
 - **A replay's eval belongs to the BASE version, not the ephemeral clone.**
-  `run_replay.py` creates a temp agent version and deletes it; the trace keeps
+  `run_replay.py` creates a temp version of the *replay agent* and deletes it; the trace keeps
   its id, so `artifacts/replay-run.json` records what it was cloned from.
 - **`evaluate()` reads `**kwargs` as a required column named `kw`.** Evaluators
   need explicit keyword parameters.
@@ -170,9 +170,36 @@ that setup. The app logged `ModuleNotFoundError: No module named 'azure'` with
 the package plainly deployed, and that is why a 50-call replay journalled 3 —
 the store degraded to in-process and each instance kept its own cursor.
 
-Replay state now goes over the blob REST API with a container SAS minted by
-`infra/main.bicep`. `requirements.txt` is empty, the deployment asks for no
-remote build, and the whole server is stdlib.
+Replay state goes over the blob REST API, stdlib only, two ways:
+
+- **`storageAuth=identity` (the default):** a token from the platform's
+  managed-identity endpoint (`IDENTITY_ENDPOINT` / `IDENTITY_HEADER`, api
+  2019-08-01, `client_id` = the user-assigned identity) as a bearer header.
+  Nothing to leak, nothing to expire. This mode used to reach an SDK-based
+  store that could not import, and fell back to in-process state *silently* —
+  the default deployment was the broken one. That store is deleted.
+- **`storageAuth=connectionString`:** a container SAS minted by
+  `infra/main.bicep`. It expires (`stateSasExpiry`, a year); `/` reports when,
+  and `verify.py` warns 30 days out and fails once it has.
+
+**`verify.py` fails any backend but those two.** It used to print a NOTE on
+in-process state and pass. It reads `GET /?resolve=1`, so the answer is about
+a store the instance has actually reached, and the gate runs verify first.
+
+**A configured store is durable or an error, never in-process.** A store that
+cannot be reached is not swapped for a MemoryStore: the server still starts
+(a handler that will not start is a 502 that says nothing), answers every MCP
+call with `replay state unavailable: <cause>`, and tries the store again a few
+seconds later. The fallback it replaced was kept for the instance's life, so
+one failed token request on one instance of a scaled-out app gave it its own
+cursor and the agent answers from the wrong place in the recording.
+
+A role assigned directly to the identity takes up to ~10 minutes (the ~24
+hours in Microsoft's managed-identity docs is for group membership, which
+this does not use). `requirements.txt` is empty, the deployment asks for no
+remote build, and the whole server is stdlib. `build.py` ships `evalconfig.py`:
+without it the package could not import, and
+`test_the_built_package_starts_on_its_own` now starts it in isolation.
 
 ## Binding is per agent kind, and every triage agent is HOSTED
 
@@ -197,6 +224,28 @@ server, names it in the clone's environment, and deletes it afterwards. No
 code change. The bearer token and session ride on the *toolbox's* headers,
 because Foundry is what calls the replay server, not the agent.
 
+## The clone is never a version of the agent under test
+
+It is a version of **`<agent>-replay`**, a separate agent that nothing but
+`run_replay.py` calls. It is **made on demand and deleted after the run**: a
+first version creates it, so any agent replays with no per-agent setup, and
+nothing named `-replay` lingers between runs for anything to call. A new version of `connectwise-operations-agent` itself
+would be what that name resolves to while it existed — the SDK says only
+*draft* versions are excluded from "latest", and `create_version_from_code`,
+the only way to make a hosted version, takes no draft flag — so production
+calls reaching the agent by name would be answered from the recording and
+their writes silently not performed. Pinning production with a version
+selector does not fix it either: then the replay's own by-name call reaches
+the production version and its live toolbox. Under its own name, "latest" is
+the clone; `routing_problem()` checks that before anything is invoked, and the
+gate serialises its runs (`concurrency:`) because every replay shares the name.
+
+The replay tool is bound under the **recording's** `server_label`
+(`ConnectWise-PSA-ForAgents`), read from the cassette. Foundry names MCP tools
+`<server_label>___<tool>`, so any other label is a renamed tool, a changed
+trajectory and a changed contract — it once made an unchanged agent fail
+`trajectory`. `replay_tool_label` in `eval-config.json` is only a fallback.
+
 ## An orchestration cannot be fully stubbed, and is refused
 
 The orchestrator reaches its children over A2A **by name**
@@ -207,9 +256,10 @@ child's calls, **writes included**, to the live service. The journal would
 never show it.
 
 `run_replay.py` refuses a multi-agent cassette, with **no override** — the
-refusal is the only thing between such a cassette and a live write. The two
-single-agent cassettes (`connectwise-operations-agent`) replay fully stubbed
-today. Fixing it for orchestrations needs the children addressable by version,
+refusal is the only thing between such a cassette and a live write. The
+single-agent cassettes -- two `connectwise-operations-agent`, five
+`triage-analysis-agent` -- replay fully stubbed today. Fixing it for
+orchestrations needs the children addressable by version,
 which is the agent code's decision, not this script's.
 
 ## Gating a deployment
@@ -221,8 +271,28 @@ baseline, writes the table into `$GITHUB_STEP_SUMMARY`, and creates the run in
 Foundry → Evaluation. `needs:` in the calling workflow is what makes it a gate
 rather than a dashboard.
 
-Two things the gate must not do, both of which look like they work:
+Four things the gate must not do, all of which look like they work:
 
+- **Compare by operation_Id.** A baseline is keyed by the *recorded* run's
+  `operation_Id`; a replay is a new invocation with a new one. Scored as
+  exported, every replayed row is "not in baseline, not compared" and the gate
+  passes whatever the agent did — it passed the two worst recorded runs (0 of
+  2 runs, 4 of 8 gating verdicts), exit 0. `replay/attribute_runs.py` picks
+  each replay's row out by `(replay_agent, temp_version)`, **proves it ran
+  against the stub and only the stub** — no A2A, no other agent in its
+  operation, no toolbox but the replay's own, the agent the cassette recorded,
+  and per tool no more calls in the trace than the replay server journalled —
+  "local" tools taken from the recording, never inferred from a missing
+  prefix, because a write through a client the agent built itself has none —
+  then presents it under the
+  recording's agent, `traj_key`, toolbox and tool definitions and pulls that
+  recording's committed baseline row. `run_evals.py --strict-baseline` then
+  fails if any replayed run went uncompared. Nightly drift must **not** use
+  strict: new orchestrations arrive every day.
+- **Fail on a reporting check.** Only a regression on a `GATING` check fails
+  the build; the others are shown and marked as not failing it. A replay's
+  `not_recorded` divergence is a tool error, so `no_tool_errors` flips on
+  exactly the agent changes the gate should let through.
 - **Export by the clock.** The project also serves real traffic, so a flat
   `--hours 1` scores whatever else ran in that hour as part of this agent
   change's verdict. `run_replay.py` records `started_utc`/`finished_utc` in
@@ -233,7 +303,45 @@ Two things the gate must not do, both of which look like they work:
   apply, so it cannot be dropped into CI. Neither `agent-gate.yml` nor the
   nightly drift job uploads raw spans or the Foundry dataset. Verdicts,
   journals (which replay the already-scrubbed cassettes) and the Foundry run
-  are the record.
+  are the record. Raw exports live under `out/`, which is never uploaded;
+  `artifacts/replay-*.json` once matched the raw spans file, so the test
+  matches every upload glob against every path an export step writes.
+
+Attribution retries while App Insights catches up (exit 3 = not ingested, or
+only partly: for some tool, fewer calls in the trace than the replay server
+journalled). A half-ingested run scores as a regression, so it is never scored
+early. The comparison is per tool because local tools (`load_skill`,
+`tool_search`) are in the trace and never reach the server.
+
+What is refused **before** anything is created, because a check in the trace
+comes after the writes: another agent than the cassette recorded (an
+orchestrator on a single-agent cassette reaches its children by name, live),
+and a hosted agent whose environment names another agent in the project.
+The gate has no `agent:` input for the same reason.
+
+## The stub answers calls that arrive together
+
+The ops agent fans out: its recordings have nine MCP calls in flight at once.
+The hosted server used to load a session's state, answer, and save it
+conditionally on the ETag, so every call in a burst but one lost the race, got
+a 409 and was never journalled — the agent saw errors where the recording had
+results. It now serialises a session's calls within an instance and, when
+another instance wins, reloads and re-applies the call. `verify.py` sends a
+concurrent fan-out on every deployment and fails a server that drops one --
+that exercises the in-instance lock; the cross-instance retry is covered by a
+test in which another instance really consumes the queue head mid-call.
+
+Local tools are the union of `eval-config.json`'s `local_tools` and every
+name the agent's recordings called unprefixed. One recording is not enough:
+`73d29f4c3a13` never called `tool_search`, and an unchanged agent that did
+would have been refused as a bypass. A bare name in neither still counts as a
+call that had to reach the stub.
+
+The stub **advertises** the production server's whole `tools/list` (the
+manifest), and never a local tool. It used to list every recorded name, so
+the agent was offered `<label>___load_skill` beside its own, with an empty
+schema, and only the tools one run happened to call. `verify.py` fails a
+deployment that still lists a local tool.
 
 `run_evals.py` gates on **regression vs baseline** by default and takes
 `--min-score` / `--min-check-score` for an absolute floor. They compose. Only
