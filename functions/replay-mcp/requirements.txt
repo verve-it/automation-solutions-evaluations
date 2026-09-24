@@ -1,0 +1,15 @@
+# Deliberately empty. The replay server is stdlib only.
+#
+# It used to list azure-identity and azure-storage-blob for the replay state
+# store. Those are not importable in a custom handler: Oryx installs them into
+# .python_packages/lib/site-packages, which the Functions *Python worker* adds
+# to sys.path, and a custom handler is `python server.py` with none of that
+# setup. The app logged `ModuleNotFoundError: No module named 'azure'` with the
+# package plainly deployed.
+#
+# Replay state now goes over the blob REST API, urllib and json, as the app's
+# managed identity (a token from the platform's identity endpoint) or with a
+# container SAS minted at deploy time. See replay/state_store.py.
+#
+# Because there is nothing to install, the deployment asks for no remote build.
+# One fewer step that can half-succeed.

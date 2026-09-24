@@ -236,7 +236,7 @@ def test_manifest_is_injected_for_the_toolbox_version_the_run_used(tmp_path):
         "toolbox": "ConnectwiseMCP", "version": "5",
         "tools": [{"name": "cw_resolve", "description": "",
                    "inputSchema": {"type": "object", "properties": {}}}],
-    }))
+    }), encoding="utf-8")
     manifests = t.load_tool_manifests([str(man)])
     spans = [
         span("POST /api/projects/p/toolboxes/ConnectwiseMCP/versions/5/mcp", "a"),
@@ -278,13 +278,13 @@ def test_wildcard_manifest_covers_every_binding_revision():
 
 def test_manifest_without_a_versions_field_defaults_to_wildcard(tmp_path):
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}))
+    man.write_text(json.dumps({"toolbox": "ConnectwiseMCP", "tools": []}), encoding="utf-8")
     assert t.load_tool_manifests([str(man)])[0]["versions"] == ["*"]
 
 
 def test_single_version_key_is_still_accepted(tmp_path):
     man = tmp_path / "m.json"
-    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}))
+    man.write_text(json.dumps({"toolbox": "X", "version": 3, "tools": []}), encoding="utf-8")
     assert t.load_tool_manifests([str(man)])[0]["versions"] == ["3"]
 
 
@@ -352,7 +352,7 @@ def test_registry_stores_each_body_once_and_never_a_truncated_one(tmp_path):
     assert (added, total) == (1, 1)
     # idempotent: a second pass adds nothing
     assert t.write_skill_registry(bodies, str(tmp_path)) == (0, 1)
-    index = json.loads((tmp_path / "index.json").read_text())
+    index = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
     assert [v["skill_name"] for v in index.values()] == ["ok"]
 
 
@@ -468,3 +468,39 @@ def test_inbound_and_delegated_are_constrained_too():
     assert t.extract_intent({}, steps) == (None, "unknown")
     steps = [{"is_a2a": True, "tool": "x", "arguments": "intent=Full Triage"}]
     assert t.extract_intent({}, steps) == ("Full Triage", "delegated")
+
+
+def test_an_agent_only_the_trace_knows_about_is_still_a_boundary():
+    """The silent failure this replaces.
+
+    An agent missing from the configured set had its A2A hand-off scored as
+    an ordinary tool call, so its run collapsed into its caller's and the
+    trajectory it was supposed to cover simply vanished. Nothing said so.
+
+    The trace names every agent that ran, so it is the source of truth and
+    the config is only a supplement.
+    """
+    spans = tool_call("brand-new-agent", "triage-orchestrator")
+    spans += [span("invoke_agent", "brand-new-agent",
+                   gen_ai__operation__name="invoke_agent")]
+
+    assert "brand-new-agent" not in t.AGENT_NAMES, \
+        "pick a name that is not configured, or the test proves nothing"
+
+    agents = t.learn_agents(spans)
+    assert "brand-new-agent" in agents
+
+    step = t.tool_step(spans[0], agents)
+    assert step["is_a2a"] is True
+
+    # Without it, the old behaviour -- scored as a tool call.
+    assert t.tool_step(spans[0])["is_a2a"] is False
+
+
+def test_learning_agents_does_not_mutate_the_configured_set():
+    """A global rewritten by conversion makes every later read depend on
+    which trace was converted first. scrub_trace reads this set to decide
+    what must never be redacted; it should not matter what ran before it."""
+    before = set(t.AGENT_NAMES)
+    t.learn_agents(tool_call("some-other-agent", "triage-orchestrator"))
+    assert set(t.AGENT_NAMES) == before

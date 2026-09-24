@@ -119,6 +119,31 @@ def test_trajectory_fails_when_an_expected_step_is_out_of_order():
     assert res["passed"] is False
 
 
+def test_trajectory_ignores_the_server_label_prefix():
+    """expected.json was authored from `ConnectWise-PSA-ForAgents___` traces;
+    the prod toolbox of 2026-09-23 labels the same server
+    `CWPSA-ForAgents-prod___`. Same path, so it must still match."""
+    cfg = {"expected": {"a": ["load_skill",
+                              "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                              "ConnectWise-PSA-ForAgents___cw_query"]}}
+    r = run(traj_key="a", tool_names=["load_skill",
+                                      "CWPSA-ForAgents-prod___cw_get_ticket",
+                                      "CWPSA-ForAgents-prod___cw_query"])
+    res = e.check_trajectory(r, cfg)
+    assert res["passed"] is True
+    assert res["recall"] == 1.0 and res["precision"] == 1.0
+
+
+def test_trajectory_prefix_tolerance_does_not_match_a_different_tool():
+    cfg = {"expected": {"a": ["ConnectWise-PSA-ForAgents___cw_get_ticket",
+                              "ConnectWise-PSA-ForAgents___cw_query"]}}
+    r = run(traj_key="a", tool_names=["CWPSA-ForAgents-prod___cw_get_ticket",
+                                      "CWPSA-ForAgents-prod___cw_search"])
+    res = e.check_trajectory(r, cfg)
+    assert res["passed"] is False
+    assert "ConnectWise-PSA-ForAgents___cw_query" in res["reason"]
+
+
 def test_bare_agent_key_applies_to_every_intent():
     cfg = {"expected": {"a": ["load_skill"]}}
     r = run(intent="Enrichment", traj_key="a|Enrichment",
@@ -283,3 +308,91 @@ def test_skill_drift_is_reported_independently_of_usage(capsys):
     e.print_skill_drift(rows)
     out = capsys.readouterr().out
     assert "SKILL DRIFT" in out and "normalization" in out
+
+
+# ------------------------------------------------------- thresholds and summary
+
+def _row(agent, gating_verdicts, extra=None):
+    """A scored row shaped like run_evals writes them."""
+    checks = {name: {"passed": verdict, "reason": ""}
+              for name, verdict in {**(extra or {}), **gating_verdicts}.items()}
+    failed = [n for n in e.GATING if checks.get(n, {}).get("passed") is False]
+    return {"run_agent": agent, "intent": "Full Triage", "checks": checks,
+            "failed_gating": failed, "passed": not failed}
+
+
+def test_a_failing_check_lowers_its_rate():
+    """The bug this replaces would have reported 100% for ever.
+
+    A check is `{"passed": bool|None, "reason": str}`. Testing the dict for
+    truthiness makes every check pass, always -- a check that cannot fail is
+    not a check, and this one would have sat in a deployment gate.
+    """
+    rows = [_row("a", {"no_wasted_calls": True}),
+            _row("b", {"no_wasted_calls": False}),
+            _row("c", {"no_wasted_calls": True}),
+            _row("d", {"no_wasted_calls": True})]
+    overall, per_check = e.score_rates(rows)
+    assert per_check["no_wasted_calls"]["rate"] == 0.75
+    assert overall == 0.75
+
+
+def test_a_check_that_did_not_apply_is_not_counted_either_way():
+    """None means "no schema for this tool" or "no threshold set".
+
+    Counting it as a pass inflates the score; as a failure, it fails a
+    deployment for a check that never ran.
+    """
+    rows = [_row("a", {"valid_tool_args": True}),
+            _row("b", {"valid_tool_args": None}),
+            _row("c", {"valid_tool_args": False})]
+    _overall, per_check = e.score_rates(rows)
+    assert per_check["valid_tool_args"]["rate"] == 0.5     # 1 of 2 applicable
+    assert per_check["valid_tool_args"]["applied"] == 2
+    assert per_check["valid_tool_args"]["skipped"] == 1
+
+
+def test_only_gating_checks_are_held_to_the_threshold(capsys):
+    """A reporting check failing must not block a deploy.
+
+    GATING decides whether a run passed. Holding a check outside it to the
+    same floor would fail a deployment for something the gate itself does not
+    treat as a failure.
+    """
+    rows = [_row("a", {"no_wasted_calls": True},
+                 extra={"no_tool_errors": False}),
+            _row("b", {"no_wasted_calls": True},
+                 extra={"no_tool_errors": False})]
+    _overall, per_check = e.score_rates(rows)
+    assert per_check["no_tool_errors"]["rate"] == 0.0
+    assert per_check["no_tool_errors"]["gating"] is False
+
+    assert e.print_thresholds(rows, None, 0.9) is False
+    assert "ok" in capsys.readouterr().out
+
+
+def test_the_threshold_fails_when_a_gating_check_is_short(capsys):
+    rows = [_row("a", {"trajectory": True}),
+            _row("b", {"trajectory": False})]
+    assert e.print_thresholds(rows, None, 0.9) is True
+    assert "trajectory" in capsys.readouterr().out
+
+
+def test_the_summary_names_what_failed(tmp_path):
+    """A red build has to say which check, on which run.
+
+    An exit code is the difference between a build someone fixes and a build
+    someone reruns.
+    """
+    rows = [_row("triage-analysis-agent", {"no_wasted_calls": False}),
+            _row("connectwise-operations-agent", {"trajectory": True})]
+    path = tmp_path / "summary.md"
+    text = e.write_summary(str(path), rows, "baselines/x.json", 0.9, 0.9)
+
+    assert "1 of 2 runs passed" in text
+    assert "**FAIL**" in text
+    assert "triage-analysis-agent" in text
+    assert "`no_wasted_calls`" in text
+    # Appends: $GITHUB_STEP_SUMMARY accumulates across steps.
+    e.write_summary(str(path), rows, None, None, None)
+    assert path.read_text(encoding="utf-8").count("## Agent evaluation") == 2

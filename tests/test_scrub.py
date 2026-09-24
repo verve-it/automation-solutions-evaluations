@@ -62,9 +62,9 @@ def test_longest_literal_wins(pseudo):
 
 
 def test_emails_and_phones_go_without_being_declared(pseudo):
-    out = s.sweep("contact tech@example.com or 555-0100-999 today", pseudo, None)
+    out = s.sweep("contact tech@example.com or (555) 010-0199 today", pseudo, None)
     assert "tech@example.com" not in out and "EMAIL_" in out
-    assert "555-0100-999" not in out and "PHONE_" in out
+    assert "(555) 010-0199" not in out and "PHONE_" in out
 
 
 def test_sweeping_preserves_json_structure(pseudo):
@@ -236,7 +236,7 @@ def test_a_non_json_payload_is_scanned_for_names_and_phones():
     passed and the data shipped.
     """
     found = s.propose([_nonjson(
-        "Contacted Jeff Gilbert at 555-0100-999 "
+        "Contacted Jeff Gilbert at (555) 010-0199 "
         "(jeff.gilbert@example.com) about the laptop. Not valid JSON {")])
     assert "jeff.gilbert@example.com" in found
     # CAPPHRASE takes the whole capitalised run, sentence-initial word
@@ -279,16 +279,16 @@ def test_learn_withholds_protected_vocabulary(tmp_path, monkeypatch, capsys):
     payload = {"gen_ai.tool.call.result":
                json.dumps({key: term.title(), "note": "Contact Grant Johnson"})}
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([{"customDimensions": json.dumps(payload)}]))
+    trace.write_text(json.dumps([{"customDimensions": json.dumps(payload)}]), encoding="utf-8")
 
-    assert term.title() in s.propose(json.loads(trace.read_text())), \
+    assert term.title() in s.propose(json.loads(trace.read_text(encoding="utf-8"))), \
         "the term is not proposed at all -- the test proves nothing"
 
     out = tmp_path / "candidates.json"
     monkeypatch.setattr("sys.argv",
                         ["scrub_trace.py", str(trace), "--learn", str(out)])
     assert s.main() == 0
-    proposed = list(json.loads(out.read_text()))
+    proposed = list(json.loads(out.read_text(encoding="utf-8")))
     assert term not in {k.strip().lower() for k in proposed}, proposed
     assert "withheld" in capsys.readouterr().out
     # and the real name beside it is still proposed
@@ -339,9 +339,9 @@ def test_a_short_salt_is_refused(tmp_path, monkeypatch, capsys):
     """A short salt is brute-forceable against a known name list, which is
     the attack the pseudonyms exist to stop."""
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([_nonjson("hello")]))
+    trace.write_text(json.dumps([_nonjson("hello")]), encoding="utf-8")
     redact = tmp_path / "r.json"
-    redact.write_text(json.dumps({"hello": "VALUE"}))
+    redact.write_text(json.dumps({"hello": "VALUE"}), encoding="utf-8")
     out = tmp_path / "o.json"
     monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
                                      "--redact-file", str(redact),
@@ -354,16 +354,145 @@ def test_a_short_salt_is_refused(tmp_path, monkeypatch, capsys):
 
 def test_a_scrub_writes_a_sidecar_naming_its_salt(tmp_path, monkeypatch):
     trace = tmp_path / "t.json"
-    trace.write_text(json.dumps([_nonjson("contact Jeff Gilbert")]))
+    trace.write_text(json.dumps([_nonjson("contact Jeff Gilbert")]), encoding="utf-8")
     redact = tmp_path / "r.json"
-    redact.write_text(json.dumps({"Jeff Gilbert": "PERSON"}))
+    redact.write_text(json.dumps({"Jeff Gilbert": "PERSON"}), encoding="utf-8")
     out = tmp_path / "o.json"
     salt = "z" * 32
     monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
                                      "--redact-file", str(redact),
                                      "--salt", salt, "-o", str(out)])
     assert s.main() == 0
-    side = json.loads((tmp_path / "o.json.scrub.json").read_text())
+    side = json.loads((tmp_path / "o.json.scrub.json").read_text(encoding="utf-8"))
     assert side["salt_fingerprint"] == s.salt_fingerprint(salt)
     assert side["literals"] == 1
     assert salt not in json.dumps(side), "the sidecar must never carry the salt"
+
+
+# --- what the sweep could not see ------------------------------------------
+# Found scrubbing the 2026-09-23 triage export: each of these left a declared
+# literal in place while the residual check, reading the raw file, said none.
+
+def test_a_name_inside_nested_json_is_swept(pseudo):
+    """An MCP result is a JSON string inside JSON. Undecoded, "Muñoz" is
+    `Mu\\u00f1oz` and a name after a newline follows `\\n`."""
+    sweeper = s.build_sweeper({"José Muñoz": "PERSON", "Zoë Hart": "PERSON"},
+                              pseudo)
+    inner = json.dumps({"notes": "Call from José Muñoz\nZoë Hart cc"})
+    raw = json.dumps({"content": [{"type": "text", "text": inner}]})
+    out = s.sweep_payload(raw, pseudo, sweeper)
+    decoded = "\n".join(s.decoded_texts(json.loads(out)))
+    assert "Muñoz" not in decoded and "Zoë" not in decoded
+    assert json.loads(json.loads(out)["content"][0]["text"])["notes"] \
+        .startswith("Call from PERSON_")
+
+
+def test_an_untouched_nested_result_keeps_its_bytes(pseudo):
+    sweeper = s.build_sweeper({"Nobody Here": "PERSON"}, pseudo)
+    inner = '{"a":1,   "b":[2,3]}'
+    out = json.loads(s.sweep_payload(json.dumps({"text": inner}), pseudo,
+                                     sweeper))
+    assert out["text"] == inner
+
+
+def test_a_truncated_escaped_payload_is_still_swept(pseudo):
+    """A result cut off mid-object never parses; its escapes stay escapes."""
+    sweeper = s.build_sweeper({"José Muñoz": "PERSON", "Eli Seale": "PERSON"},
+                              pseudo)
+    raw = r'{"text": "{\"notes\": \"José Muñoz called\\nEli Seale'
+    out = s.sweep(raw, pseudo, sweeper)
+    assert "Mu\\u00f1oz" not in out and "Eli Seale" not in out, out
+    assert not s.still_present("Eli Seale", s.unescape(out))
+
+
+def test_the_residual_check_reads_decoded_text():
+    """The raw file hides an escaped literal from a plain search."""
+    rows = [{"customDimensions": json.dumps(
+        {"gen_ai.tool.call.result": json.dumps({"t": "Muñoz"})})}]
+    raw = json.dumps(rows)                 # ensure_ascii: `Mu\\u00f1oz`
+    assert not s.still_present("Muñoz", raw)
+    assert s.still_present("Muñoz", "\n".join(s.decoded_texts(rows)))
+
+
+@pytest.mark.parametrize("text", [
+    "(209) 456-1688", r"\(209\) 456-1688", "209-456-1688", "209.456.1688",
+    "+1 209 456 1688", "2094561688"])
+def test_phone_shapes_are_swept(pseudo, text):
+    out = s.sweep(f"call {text} today", pseudo, None)
+    assert "456" not in out and "PHONE_" in out, out
+
+
+@pytest.mark.parametrize("text", [
+    '{"search_score": "0.8234567891"}', "2026-07-06T10:00:00Z",
+    "ticket 805545", "v1.209.456.1688"])
+def test_things_that_are_not_phones_are_left_alone(pseudo, text):
+    assert s.sweep(text, pseudo, None) == text
+
+
+def test_a_float_in_a_nested_result_still_parses(pseudo):
+    """PHONE_RE ate the digits of a score and 40 nested results broke."""
+    inner = json.dumps({"results": [{"search_score": 0.8234567891,
+                                     "label": "0.123456789012"}]})
+    out = s.sweep_payload(json.dumps({"text": inner}), pseudo, None)
+    assert json.loads(json.loads(out)["text"]) == json.loads(inner)
+
+
+def test_an_underscore_literal_is_a_literal_and_a_comment_is_not(
+        tmp_path, monkeypatch, capsys):
+    trace = tmp_path / "t.json"
+    trace.write_text(json.dumps([row(**{
+        "gen_ai.tool.call.result": "ran as _svc_backup for Eli Seale"})]), encoding="utf-8")
+    redact = tmp_path / "r.json"
+    redact.write_text(json.dumps({"_comment": "reviewed 2026-09-23",
+                                  "_svc_backup": "USER?",
+                                  "Eli Seale": "PERSON"}), encoding="utf-8")
+    out = tmp_path / "o.json"
+    monkeypatch.setattr("sys.argv", ["scrub_trace.py", str(trace),
+                                     "--redact-file", str(redact),
+                                     "-o", str(out), "--salt", "x" * 16])
+    assert s.main() == 0
+    text = out.read_text(encoding="utf-8")
+    assert "_svc_backup" not in text and "Eli Seale" not in text
+    assert "1 comment key(s) ignored: '_comment'" in capsys.readouterr().out
+
+
+def test_names_outside_ascii_are_proposed():
+    found = s.propose([_nonjson("Hi Zoë, José Muñoz called {")])
+    assert "José Muñoz" in found and "Zoë" in found, sorted(found)
+
+
+def test_a_long_company_name_is_proposed_whole():
+    """Cut at four words, the tail "GOVERNMENTS" was stranded."""
+    found = s.propose([_nonjson(
+        "SAN JOAQUIN COUNCIL OF GOVERNMENTS and the San Joaquin Council of "
+        "Governments {")])
+    assert "SAN JOAQUIN COUNCIL OF GOVERNMENTS" in found, sorted(found)
+    assert "San Joaquin Council of Governments" in found, sorted(found)
+
+
+def test_a_single_name_is_proposed_only_where_a_cue_names_someone():
+    found = s.propose([_nonjson("Thanks,\nEli\nRestart the Server {")])
+    assert "Eli" in found, sorted(found)
+    assert "Restart" not in found and "Server" not in found, sorted(found)
+
+
+def test_logins_domains_hosts_and_member_ids_are_proposed():
+    found = s.propose([row(**{"gen_ai.tool.call.result": json.dumps({
+        "text": r"SJCOG\eseale on SJCOG-DC01, mail at sjcog.org, "
+                "see login.microsoftonline.com",
+        "_info": {"updatedBy": "eseale"},
+        "company": {"identifier": "SJCOG"}})})])
+    assert found.get("SJCOG\\eseale") == "USER?", sorted(found)
+    assert found.get("SJCOG-DC01") == "HOST?", sorted(found)
+    assert found.get("sjcog.org") == "DOMAIN?", sorted(found)
+    assert "login.microsoftonline.com" not in found
+    assert "eseale" in found and "SJCOG" in found, sorted(found)
+
+
+def test_addresses_local_numbers_and_zip4_are_proposed_not_swept(pseudo):
+    text = "host 10.20.3.44, call 456-1688, Stockton CA 95202-1234 {"
+    found = s.propose([_nonjson(text)])
+    assert found.get("10.20.3.44") == "IP?", sorted(found.items())
+    assert found.get("456-1688") == "PHONE?", sorted(found.items())
+    assert found.get("95202-1234") == "PLACE?", sorted(found.items())
+    assert s.sweep(text, pseudo, None) == text     # only once reviewed

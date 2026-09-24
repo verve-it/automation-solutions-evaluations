@@ -58,12 +58,13 @@ reproducible without Azure access.
 |---|---|---|
 | `2026-09-03-full-triage.json` | 2026-09-03 | Two complete Full Triage orchestrations, 7 agent runs, 715 spans. The known-good set. Exported with the `AppGenAIContent` join, so tool results are untruncated. |
 | `2026-09-15-ops-worst-case.json` | 2026-09-15 | The two worst observed `connectwise-operations-agent` runs, unlinked (single-agent traces). The known-bad set. |
+| `2026-09-23-triage-analysis.json` | 2026-09-23 | Five standalone `triage-analysis-agent` runs (`Automated flow: triage ticket N`, agent v98 and v99), 663 spans. Every ConnectWise call in them is a read, so each replays fully stubbed with no write to guard: the agent gate's first cassettes for this agent. Exported with the `AppGenAIContent` join; no truncated results. A sixth run from the same hour is deliberately absent: it carries a third party's legal and identity details, which pseudonyms do not de-identify. |
 
-Both are JSON. The `.csv` forms were the original portal exports and are gone:
+All are JSON. The `.csv` forms were the original portal exports and are gone:
 they were never scrubbed, and `scrub_trace.py` writes JSON whatever it reads,
 so scrubbing one renames it anyway. `load_spans` has always read both.
 
-> **Both sets predate `cwpsa-mcp` `cbf4e2b`** (see
+> **The 2026-09-03 and 2026-09-15 sets predate `cwpsa-mcp` `cbf4e2b`** (see
 > `docs/MCP-SERVER-FINDINGS.md`). Several failures in the known-bad set —
 > the empty `type`/`subtype`/`item` resolves, the four-deep `cw_resolve`
 > cascade they caused — are server bugs that no longer exist. That does
@@ -181,8 +182,15 @@ read across them.
 
 > **Current state:** `2026-09-03-full-triage.json` and
 > `2026-09-15-ops-worst-case.json` were scrubbed with **different** salts, and
-> neither predates the sidecar, so neither carries a fingerprint. Nothing joins
-> across traces today so no check is affected. Before the next export, settle
-> on the repo salt and re-run both reviewed redaction lists with it — the
-> scrub is deterministic, so the result is byte-stable and the sidecars will
-> then agree.
+> both predate the sidecar, so neither carries a fingerprint.
+> `2026-09-23-triage-analysis.json` is committed with its sidecar, scrubbed
+> with the repo salt. `test_every_committed_scrub_used_the_one_repo_salt`
+> fails the day a sidecar with a second fingerprint is committed. Nothing joins
+> across traces today so no check is affected. The two older traces still
+> want re-scrubbing with the repo salt from their reviewed redaction lists;
+> the scrub is deterministic, so the result is byte-stable and their sidecars
+> will then agree with this one.
+>
+> **A new trace also needs a replay-server redeploy** before it reaches
+> `main`: the gate replays every cassette `make cassettes` builds, and
+> `verify.py` fails, naming the cassette, if the server was never given it.

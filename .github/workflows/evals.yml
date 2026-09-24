@@ -7,9 +7,11 @@
 # `prod`. The Foundry project keeps its own name, automation-solutions-test.
 #
 # Both jobs below score RECORDED traces and upload evaluation results. Neither
-# ever invokes an agent, which is why main can safely target production. The
-# one workflow that does invoke agents, staging-replay.yml, is pinned to
-# staging and to the test project with no production counterpart.
+# ever invokes an agent, which is why main can safely target production.
+#
+# NOTHING in this repo invokes an agent against real tools. staging-replay.yml
+# did, against the dev instance, and is removed. The agent-change gate is
+# agent-gate.yml, which replays against STUBBED tools.
 #
 # Three triggers, per §5 of docs/HANDOFF.md.
 #
@@ -110,6 +112,15 @@ jobs:
               --baseline baselines/ops-worst-case-2026-09-18.json \
               --json artifacts/ops-worst-case.json
 
+      - name: Score the standalone triage-analysis set
+        run: |
+          python trace_to_eval.py traces/2026-09-23-triage-analysis.json \
+              -o out-triage --tool-defs tool_manifests/
+          python run_evals.py out-triage/eval_runs.jsonl \
+              --expected expected.json \
+              --baseline baselines/triage-analysis-2026-09-23.json \
+              --json artifacts/triage-analysis.json
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -177,7 +188,13 @@ jobs:
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # The CI apps hold roles on the Foundry project and the Log
+          # Analytics workspace only, so no subscription is visible to them
+          # and a plain login fails with "No subscriptions found". Nothing
+          # here uses ARM: Foundry and Log Analytics are data-plane calls
+          # with a tenant token. No subscription-id either -- azure/login
+          # runs `az account set` on one, which fails the same way.
+          allow-no-subscriptions: true
 
       - name: Show target
         run: |
@@ -251,9 +268,16 @@ jobs:
               --name "triage-evals-${{ matrix.environment }}-$(date -u +%Y%m%d)" \
               --out artifacts/foundry-input.jsonl
 
+      # Verdicts, not the raw export. `spans.json` and the Foundry dataset
+      # are a live export of a production project, and a workflow artifact in
+      # a PUBLIC repository is downloadable by anyone. Scrubbing is
+      # deliberately not automatable (scrub_trace.py is propose -> human
+      # review -> apply), so the export stays on the runner; the run this job
+      # creates in Foundry is where a drift finding is investigated.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: drift-${{ matrix.environment }}
-          path: artifacts/
+          path: |
+            artifacts/drift-*.json
           retention-days: 90     # matches Foundry trace retention

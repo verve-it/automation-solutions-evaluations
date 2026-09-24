@@ -93,7 +93,7 @@ def test_watermark_advances_to_the_newest_span(tmp_path):
     window = (datetime(2026, 9, 10, tzinfo=timezone.utc),
               datetime(2026, 9, 11, tzinfo=timezone.utc))
     x.save_state(str(state_file), rows, window)
-    assert json.loads(state_file.read_text())["last_timestamp"] == \
+    assert json.loads(state_file.read_text(encoding="utf-8"))["last_timestamp"] == \
         "2026-09-10T03:00:00Z"
 
 
@@ -103,7 +103,7 @@ def test_empty_export_still_advances_the_watermark(tmp_path):
     state_file = tmp_path / "s.json"
     end = datetime(2026, 9, 11, tzinfo=timezone.utc)
     x.save_state(str(state_file), [], (end - timedelta(days=1), end))
-    assert json.loads(state_file.read_text())["last_timestamp"] == \
+    assert json.loads(state_file.read_text(encoding="utf-8"))["last_timestamp"] == \
         end.isoformat()
 
 

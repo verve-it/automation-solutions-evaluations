@@ -18,6 +18,10 @@ candidates*.json
 scrub-*.json
 *.redactions.json
 
+# Assembled Azure Function deployment package. Every file in it is a copy of
+# something that lives elsewhere; `functions/replay-mcp/build.sh` rebuilds it.
+functions/replay-mcp/.build/
+
 # Replay cassettes, rebuilt from the traces by `make cassettes`. Commit one
 # only when it backs a gate and the trace it came from is not committed.
 cassettes/
@@ -37,7 +41,7 @@ venv/
 .ruff_cache/
 
 # Editors / OS
-.vscode/
+
 .idea/
 .DS_Store
 Thumbs.db
@@ -46,3 +50,8 @@ Thumbs.db
 # secret in them -- name, issuer, subject, audience -- but they are scratch
 # and belong in the temp directory. See docs/CREDENTIALS.md.
 fed-*.json
+
+# docs/HISTORY-PURGE.md's working copies. They belong outside the clone; if
+# the runbook is run from inside one, they must still never be committed.
+purge.git/
+check/

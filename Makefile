@@ -1,12 +1,14 @@
-# Shortcuts for the two frozen sets and the pieces around them.
+# Shortcuts for the frozen sets and the pieces around them.
 # `python` not `python3` on Windows.
 PY ?= python3
 FULL_TRIAGE := traces/2026-09-03-full-triage.json
 OPS_WORST   := traces/2026-09-15-ops-worst-case.json
+TRIAGE      := traces/2026-09-23-triage-analysis.json
 FT_BASELINE := baselines/full-triage-2026-09-18.json
 OW_BASELINE := baselines/ops-worst-case-2026-09-18.json
+TA_BASELINE := baselines/triage-analysis-2026-09-23.json
 
-.PHONY: help test evals evals-ops baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay clean
+.PHONY: help test evals evals-ops evals-triage baselines manifest-skeleton foundry foundry-dataset foundry-register cassettes replay replay-package replay-deploy replay-verify clean
 
 help:
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | \
@@ -26,7 +28,12 @@ evals-ops:  ## score the known-bad set against its baseline
 	$(PY) run_evals.py out-ops/eval_runs.jsonl --expected expected.json \
 	    --baseline $(OW_BASELINE) --json artifacts/ops-worst-case.json
 
-baselines:  ## re-freeze both baselines from the committed traces
+evals-triage:  ## score the standalone triage-analysis set against its baseline
+	$(PY) trace_to_eval.py $(TRIAGE) -o out-triage --tool-defs tool_manifests/
+	$(PY) run_evals.py out-triage/eval_runs.jsonl --expected expected.json \
+	    --baseline $(TA_BASELINE) --json artifacts/triage-analysis.json
+
+baselines:  ## re-freeze every baseline from the committed traces
 # Must use the same --tool-defs as `evals`/`evals-ops`, or every run reports
 # evaluator_ready as a fix and valid_tool_args as newly scored.
 	$(PY) trace_to_eval.py $(FULL_TRIAGE) -o out --tool-defs tool_manifests/ \
@@ -36,15 +43,33 @@ baselines:  ## re-freeze both baselines from the committed traces
 	$(PY) trace_to_eval.py $(OPS_WORST) -o out-ops --tool-defs tool_manifests/
 	-$(PY) run_evals.py out-ops/eval_runs.jsonl --expected expected.json \
 	    --json $(OW_BASELINE)
+	$(PY) trace_to_eval.py $(TRIAGE) -o out-triage --tool-defs tool_manifests/
+	-$(PY) run_evals.py out-triage/eval_runs.jsonl --expected expected.json \
+	    --json $(TA_BASELINE)
 
 cassettes:  ## build replay cassettes from the committed traces
 	$(PY) replay/make_cassette.py $(FULL_TRIAGE) -o cassettes
 	$(PY) replay/make_cassette.py $(OPS_WORST) -o cassettes
+	$(PY) replay/make_cassette.py $(TRIAGE) -o cassettes
 
 replay:  ## serve a cassette as an MCP toolbox (no ConnectWise, no writes)
 	@test -n "$(CASSETTE)" || { echo "usage: make replay CASSETTE=cassettes/<file>.json"; exit 2; }
 	$(PY) replay/replay_server.py $(CASSETTE) --tool-defs tool_manifests/ \
 	    --journal artifacts/replay-journal.json
+
+replay-package:  ## assemble the Azure Function deployment package
+	functions/replay-mcp/build.sh
+
+replay-deploy:  ## provision and publish the hosted replay server
+# REPLAY_TOKEN is required and deliberately not defaulted: the cassettes carry
+# ticket and company identifiers and this is the only thing in front of them.
+	@test -n "$(RG)" || { echo "usage: REPLAY_TOKEN=... make replay-deploy RG=<resource-group>"; exit 2; }
+	functions/replay-mcp/deploy.sh $(RG) $(or $(LOCATION),eastus2)
+
+replay-verify:  ## replay every cassette against the hosted server and compare
+# Deploying it is not the same as it being right.
+	@test -n "$(URL)" || { echo "usage: REPLAY_TOKEN=... make replay-verify URL=https://<app>.azurewebsites.net"; exit 2; }
+	$(PY) functions/replay-mcp/verify.py $(URL)
 
 foundry-dataset:  ## build the Foundry evaluation dataset from the frozen set
 	$(PY) foundry/to_foundry_dataset.py $(FULL_TRIAGE) --expected expected.json \
@@ -64,5 +89,5 @@ manifest-skeleton:  ## skeleton manifest from the traces (no schemas)
 	    -o artifacts/connectwisemcp-skeleton.json
 
 clean:
-	rm -rf out out-ops artifacts skills cassettes .pytest_cache
+	rm -rf out out-ops out-triage artifacts skills cassettes .pytest_cache
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

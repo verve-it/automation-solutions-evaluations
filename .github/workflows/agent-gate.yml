@@ -1,0 +1,341 @@
+# The agent-change gate, callable from wherever agents are merged.
+#
+# The other workflow scores RECORDED traces, which gates changes to the eval
+# code. This one runs the agent under test against STUBBED tools and scores
+# what it does — which is how you decide whether an agent change is safe to
+# deploy. No ConnectWise request is made, for reads or writes.
+#
+# It replays the LATEST version of each recorded agent in the named project,
+# so it runs after the agent reaches staging and before it reaches prod:
+#
+#   deploy-staging -> gate (environment: staging) -> deploy-prod (needs: gate)
+#
+# docs/agent-gate-caller.yml is that workflow, ready to copy into the
+# repository that holds the agents, with the settings its environments need.
+# `needs:` is the gate. Without it this reports and the deploy proceeds
+# regardless, which is a dashboard, not a gate.
+#
+# Called from another repository, `environment:`, `vars.*` and the OIDC
+# subject all belong to the CALLER: its staging environment must hold the
+# settings checked below, and the federated credential must trust
+#   repo:<owner>/<agents-repo>:environment:staging
+name: agent gate
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Which Foundry project to evaluate against."
+        type: string
+        required: true
+      min-score:
+        description: >-
+          Fraction of runs that must pass every gating check. Leave at 0 to
+          gate on regression against the baseline only, which is what the
+          frozen sets do — an absolute floor fails a build for failures that
+          were already known and accepted.
+        type: number
+        default: 0
+      min-check-score:
+        description: "Fraction of runs each GATING check must pass. 0 disables."
+        type: number
+        default: 0
+      ref:
+        description: "Ref of this repository to run the gate from."
+        type: string
+        default: main
+    secrets:
+      REPLAY_TOKEN:
+        description: "Bearer token the hosted replay server requires."
+        required: true
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, prod]
+        default: staging
+      min-score:
+        type: string
+        default: "0"
+
+permissions:
+  contents: read
+  id-token: write          # workload identity for az login. The job declares
+                           # `environment:`, so the OIDC subject is
+                           #   repo:<owner>/<repo>:environment:<name>
+                           # not the ref form. See docs/CREDENTIALS.md.
+
+jobs:
+  replay:
+    name: replay (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    # One replay at a time per environment. Each clone is a version of a
+    # shared replay agent (`<agent>-replay`), invoked by name, and a name
+    # resolves to the newest version -- so two gates at once would each
+    # invoke whichever clone was created last. run_replay.py checks the name
+    # still resolves to its own clone before invoking, and attribution fails
+    # a run the stub did not journal, but serialising is what prevents it.
+    # The group is scoped to the calling repository.
+    concurrency:
+      group: agent-gate-${{ inputs.environment }}
+      cancel-in-progress: false
+    # Replays, then up to ten one-minute waits for ingestion. A hang past
+    # this is not a slow gate; it is a broken one.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: verve-it/automation-solutions-evaluations
+          ref: ${{ inputs.ref || 'main' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Fail here, before login, rather than at login or three steps in with an
+      # unhelpful SDK error.
+      - name: Check the gate is configured
+        run: |
+          missing=
+          [ -n "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" ] || missing="$missing AZURE_AI_PROJECT_ENDPOINT(var)"
+          [ -n "${{ vars.REPLAY_SERVER_URL }}" ]         || missing="$missing REPLAY_SERVER_URL(var)"
+          [ -n "${{ secrets.REPLAY_TOKEN }}" ]           || missing="$missing REPLAY_TOKEN(secret)"
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]           || missing="$missing AZURE_CLIENT_ID(var)"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]           || missing="$missing AZURE_TENANT_ID(var)"
+          [ -n "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" ] || missing="$missing LOG_ANALYTICS_WORKSPACE_ID(secret)"
+          if [ -n "$missing" ]; then
+            echo "::error::not configured on the '${{ inputs.environment }}' environment of ${{ github.repository }}:$missing"
+            exit 1
+          fi
+          echo "environment : ${{ inputs.environment }}"
+          echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
+          echo "replay      : ${{ vars.REPLAY_SERVER_URL }}"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          # The CI apps hold roles on the Foundry project and the Log
+          # Analytics workspace only, so no subscription is visible to them
+          # and a plain login fails with "No subscriptions found". Nothing
+          # here uses ARM: Foundry and Log Analytics are data-plane calls
+          # with a tenant token. No subscription-id either -- azure/login
+          # runs `az account set` on one, which fails the same way.
+          allow-no-subscriptions: true
+
+      - name: Build cassettes from the committed traces
+        run: make cassettes
+
+      # The replay server has to be answering before an agent is pointed at
+      # it, or every call diverges and the gate blames the agent.
+      - name: Verify the replay server serves what we recorded
+        env:
+          REPLAY_TOKEN: ${{ secrets.REPLAY_TOKEN }}
+        run: |
+          python functions/replay-mcp/verify.py "${{ vars.REPLAY_SERVER_URL }}" \
+              --token "$REPLAY_TOKEN"
+
+      # Only single-agent cassettes. An orchestration reaches its children by
+      # NAME, which resolves to their production versions — still pointed at
+      # the real ConnectWise toolbox — so replaying one would send their
+      # calls, writes included, to the live service. run_replay.py refuses;
+      # this skips them rather than relying on that refusal.
+      - name: Replay each single-agent cassette against stubbed tools
+        env:
+          REPLAY_TOKEN: ${{ secrets.REPLAY_TOKEN }}
+          AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          shopt -s nullglob
+          ran=0
+          for cassette in cassettes/*.json; do
+            agents=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))['agents']))" "$cassette")
+            if [ "$agents" != "1" ]; then
+              echo "skip  $(basename "$cassette")  $agents agents — children would reach live ConnectWise"
+              continue
+            fi
+            id=$(basename "$cassette" .json)
+            echo "::group::replay $id"
+            python replay/run_replay.py \
+                --cassette "$cassette" \
+                --server-url "${{ vars.REPLAY_SERVER_URL }}/mcp/$id" \
+                --token "$REPLAY_TOKEN" \
+                --journal "artifacts/journal-$id.json" \
+                --manifest "artifacts/manifest-$id.json" \
+                | tee "artifacts/replay-$id.log"
+            echo "::endgroup::"
+            ran=$((ran + 1))
+          done
+          if [ "$ran" = "0" ]; then
+            echo "::error::no single-agent cassette to replay, so nothing was gated"
+            exit 1
+          fi
+          echo "replayed $ran cassette(s)"
+
+      # The replay produced traces in the project. Score them the same way
+      # the nightly does, so the verdict means the same thing.
+      #
+      # The window comes from the manifests each replay wrote, NOT from a flat
+      # --hours: the project serves real traffic, and an hour-wide export
+      # scores whatever else ran in it as though this agent change had caused
+      # it. A gate that can go red for someone else's run is not a gate. The
+      # pad covers App Insights ingestion lag at the end and clock skew at the
+      # start; it is the smallest window that still reliably contains the run.
+      - name: Window the export to this replay
+        id: window
+        run: |
+          python - <<'EOF'
+          import datetime as dt, glob, json, os, sys
+          PAD = dt.timedelta(minutes=5)
+          starts, ends, agents = [], [], set()
+          for path in sorted(glob.glob("artifacts/manifest-*.json")):
+              m = json.load(open(path, encoding="utf-8"))
+              if m.get("started_utc"):
+                  starts.append(dt.datetime.fromisoformat(m["started_utc"]))
+              if m.get("finished_utc"):
+                  ends.append(dt.datetime.fromisoformat(m["finished_utc"]))
+              # The clone runs under the replay agent's name, so that is the
+              # name its spans carry and the one discovery has to ask for.
+              if m.get("replay_agent") or m.get("agent"):
+                  agents.add(m.get("replay_agent") or m["agent"])
+          if not starts or not ends:
+              sys.exit("::error::no replay manifest carried a window. Refusing "
+                       "to export an hour of the project instead: that scores "
+                       "traffic this gate did not cause.")
+          since, until = min(starts) - PAD, max(ends) + PAD
+          print(f"window {since.isoformat()} .. {until.isoformat()} "
+                f"({len(starts)} replay(s)); agents {sorted(agents)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"since={since.isoformat()}\n")
+              fh.write(f"until={until.isoformat()}\n")
+              fh.write(f"agents={','.join(sorted(agents))}\n")
+          EOF
+
+      # A replay is a NEW invocation with a new operation_Id, and a baseline
+      # is keyed by the RECORDED run's. Scored as exported, every replayed row
+      # is "not in baseline, not compared" and the gate passes whatever the
+      # agent did -- it did exactly that, on the two worst recorded runs.
+      # attribute_runs.py picks each replay's row out by (replay agent,
+      # temporary version), proves it ran against the stub and only the stub
+      # (no A2A, no other toolbox, every MCP call journalled by the replay
+      # server), presents it under the recording's agent, toolbox and tool
+      # definitions, and pulls that recording's committed baseline row.
+      #
+      # It exits 3 while a replay is not ingested yet, or only partly: App
+      # Insights ingests with a lag of minutes, and a half-ingested run scores
+      # as a regression. Anything else is a hard failure.
+      #
+      # Raw exports go under out/raw/, which is never uploaded -- see the
+      # upload step. Only the replay's own spans go on to the Foundry dataset.
+      - name: Export the window and attribute each replay to its recording
+        id: attribute
+        env:
+          AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
+        run: |
+          attempts=10
+          for i in $(seq 1 "$attempts"); do
+            rm -rf out/raw/window-spans.json out/window
+            mkdir -p out/raw
+            python export_traces.py \
+                --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
+                --since "${{ steps.window.outputs.since }}" \
+                --until "${{ steps.window.outputs.until }}" \
+                --agents "${{ steps.window.outputs.agents }}" \
+                --max-orchestrations 500 \
+                --min-tool-calls 1 \
+                -o out/raw/window-spans.json
+            # An empty window exports nothing and writes no file.
+            [ -f out/raw/window-spans.json ] || echo '[]' > out/raw/window-spans.json
+            python trace_to_eval.py out/raw/window-spans.json -o out/window \
+                --tool-defs tool_manifests/
+            final=
+            [ "$i" = "$attempts" ] && final=--final
+            rc=0
+            python replay/attribute_runs.py "artifacts/manifest-*.json" \
+                --runs out/window/eval_runs.jsonl \
+                --tool-defs tool_manifests/ \
+                --spans out/raw/window-spans.json \
+                --out-spans out/raw/replay-spans.json \
+                --out-runs out/replay/eval_runs.jsonl \
+                --out-baseline artifacts/replay-baseline.json \
+                --summary "$GITHUB_STEP_SUMMARY" $final || rc=$?
+            if [ "$rc" = "0" ]; then exit 0; fi
+            if [ "$rc" != "3" ]; then exit "$rc"; fi
+            if [ "$i" != "$attempts" ]; then
+              echo "not fully ingested yet (attempt $i/$attempts); waiting 60s"
+              sleep 60
+            fi
+          done
+          echo "::error::the replayed runs were still not fully ingested after $attempts attempts"
+          exit 1
+
+      # --summary is the point of the red build: the scores land in the job
+      # summary, so a builder sees which check failed on which run without
+      # opening an artifact zip.
+      - name: Score, and write the summary a red build needs
+        id: score
+        run: |
+          python run_evals.py out/replay/eval_runs.jsonl \
+              --expected expected.json \
+              --baseline artifacts/replay-baseline.json \
+              --strict-baseline \
+              --json artifacts/gate.json \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              ${{ inputs.min-score != 0 && format('--min-score {0}', inputs.min-score) || '' }} \
+              ${{ inputs.min-check-score != 0 && format('--min-check-score {0}', inputs.min-check-score) || '' }}
+
+      # The same runs, scored by the registered evaluators in the project, so
+      # the detail is in Foundry -> Evaluation rather than only in this log.
+      # Runs even when scoring failed: a failed gate is exactly when someone
+      # wants to open the run and look at it.
+      - name: Score it in Foundry, for the detail view
+        if: always() && steps.score.outcome != 'skipped'
+        run: |
+          python foundry/to_foundry_dataset.py out/raw/replay-spans.json \
+              --expected expected.json --tool-defs tool_manifests/ \
+              --no-messages -o out/raw/foundry-dataset.jsonl
+          python foundry/run_cloud_eval.py out/raw/foundry-dataset.jsonl \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --name "gate-${{ inputs.environment }}" \
+              --dataset-version "$(date -u +%Y%m%dT%H%M%SZ)" \
+              | tee artifacts/foundry-run.log
+          url=$(grep -o 'https://[^ ]*' artifacts/foundry-run.log | tail -1 || true)
+          {
+            echo ""
+            echo "[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Verdicts, journals and provenance — never the raw export.
+      #
+      # A workflow artifact in a PUBLIC repository is downloadable by anyone,
+      # and the exported window and the Foundry dataset are a live export of
+      # a project that also serves real traffic. Scrubbing is deliberately not
+      # automatable (scrub_trace.py is propose -> human review -> apply), so
+      # raw exports live under out/raw/ and nothing under out/ is uploaded.
+      #
+      # Every path is named exactly or by a glob that cannot match an export.
+      # `artifacts/replay-*.json` looked safe and matched the raw spans file;
+      # tests/test_agent_gate_workflow.py now checks each glob against every
+      # path an export step writes.
+      #
+      # The journals are safe: they replay the committed, already-scrubbed
+      # cassettes. replay-baseline.json is rows of the committed baselines.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-gate-${{ inputs.environment }}
+          path: |
+            artifacts/gate.json
+            artifacts/replay-baseline.json
+            artifacts/journal-*.json
+            artifacts/manifest-*.json
+            artifacts/replay-*.log
+            artifacts/foundry-run.log
+          retention-days: 90

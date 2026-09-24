@@ -22,9 +22,9 @@ because the first run already changed the data.
 
 That rules out re-running agents against production. It does not rule out
 replaying them against *recorded tool output* — see
-[Cassette replay](#cassette-replay-built-not-wired). Exactly one thing in this
-repo invokes agents at all: `staging-replay.yml`, pinned to the test project
-and the dev instance.
+[Cassette replay](#cassette-replay-built-not-wired). Nothing in this repo
+invokes an agent against real tools, in any environment: an eval that writes
+to a system of record is not an eval.
 
 ---
 
@@ -122,7 +122,7 @@ generic "evaluate any agent" framework.
 | every push / PR | `frozen-sets` — committed traces vs committed baselines | no |
 | nightly 06:00 UTC | `drift` — export → convert → score → **score in Foundry** | yes |
 | Monday 07:00 UTC | the above plus the judged sample | yes |
-| push to `staging` touching `replay/**` | `staging-replay` — **invokes agents** in the test project | yes |
+| called from the agents repo before deploy | `agent-gate` — replays against **stubbed** tools, scores, gates | yes |
 
 GitHub Actions does the scheduling; Foundry does the scoring and keeps the
 history.
@@ -234,9 +234,9 @@ a sandbox with no network. `run_evals.py` returns a verdict *and* a reason —
 say why. So `run_evals.py` stays as the local gate that explains itself and as
 the baseline-diff regression gate, which Foundry has no equivalent for.
 
-Fidelity is tested: both frozen trace sets are scored with `run_evals.py` and
-with the ported functions and every comparable verdict must match — **56
-verdicts, 0 mismatches**.
+Fidelity is tested: every frozen trace set is scored with `run_evals.py` and
+with the ported functions and every comparable verdict must match, with **0
+mismatches**.
 
 Full detail, including the eight payload rejections it took to get a run
 through, in [`docs/FOUNDRY.md`](docs/FOUNDRY.md).
@@ -282,18 +282,25 @@ scrub_trace.py            redact customer data before committing a trace
 
 foundry/                  our tooling that TALKS TO Foundry
   to_foundry_dataset.py     rows -> a Foundry evaluation dataset
+  continuous_eval.py        have Foundry score live runs, natively
   register_evaluators.py    upload the checks, write the version lock
   run_cloud_eval.py         start a cloud run against registered evaluators
   check_cloud_eval.py       poll it, diff the scores against local
   submit_to_foundry.py      the judged evaluators (sampled, not a gate)
 
-foundry_evaluators/       code that RUNS INSIDE Foundry
-  checks.py  _shared.py     the eight checks, as uploaded
+foundry_evaluators/       the eight checks, one implementation
+  checks.py  _shared.py     as uploaded to Foundry
+  native.py                 the same objects, run by azure-ai-evaluation
+                            locally and offline
 
-replay/                   record/replay stub
+replay/                   record/replay stub -- THE agent-change gate
   make_cassette.py          a trace -> an ordered cassette
   replay_server.py          serve a cassette as an MCP toolbox
-  full-triage.json          dev tickets for the staging replay
+  run_replay.py             bind an agent to it, invoke, score, tear down
+
+dataverse/                outcome evaluation -- human review as ground truth
+  fetch_outcomes.py         --probe to discover the schema, then pull reviews
+  schema.json               entity/attribute names (UNPROBED -- see its README)
 
 tools/                    occasional, not part of a run
   extract_tool_manifest.py  a manifest from a URL, dump, source tree or trace
@@ -304,9 +311,13 @@ evaluator-versions.json   the registered versions a run pins
 baselines/                frozen results — COMMIT THESE
 traces/                   raw exports, dated, scrubbed, committed
 tool_manifests/           MCP tool schemas — all 20 ConnectWise tools
+eval-config.json          agents, write tools, toolbox variables — this
+                          project's facts, so the code stays generic
+Makefile / tasks.ps1      the same shortcuts, for bash and PowerShell
 tests/                    unit tests + frozen-set replay
 docs/                     HANDOFF, FOUNDRY, TELEMETRY, REPLAY, REPO-BOUNDARY,
-                          MCP-SERVER-FINDINGS, HISTORY-PURGE, CREDENTIALS
+                          MCP-SERVER-FINDINGS, HISTORY-PURGE, CREDENTIALS,
+                          ASSERT, NATIVE-RESEARCH, MIGRATION-READINESS
 ```
 
 `foundry/` and `foundry_evaluators/` are deliberately separate, and the
@@ -331,9 +342,9 @@ an agent does belongs there; anything that only measures belongs here. See
 | Gap | Blocks | Where |
 |---|---|---|
 | **`entity` and `filter` are still free-form** | `valid_tool_args` covers arity, types, required params, unexpected fields and `reference_type` — not entity paths or filter shapes. An `entity` enum was proposed and correctly rejected upstream (~36k tokens/request). | `tool_manifests/README.md` |
-| **Dataverse loading** | all outcome evaluation. Every check is process quality; a run can pass all eight having proposed the wrong company. | handoff §8 |
-| Cassette replay has no driver | the deterministic agent-change gate | `docs/REPLAY.md` |
-| `replay/` ticket ids | the staging replay | `replay/README.md` |
+| **The outcome join is unestablished** | all outcome evaluation. `dataverse/fetch_outcomes.py --probe` answers whether the orchestration record carries the App Insights `operation_Id`. Ticket id will not substitute — two orchestrations in the frozen set share ticket 805392. | `dataverse/README.md` |
+| **Continuous evaluation rule not created** | `foundry/continuous_eval.py` builds it; it needs an eval id and one run against the project. Until then the live path is only the nightly cron. | `docs/FOUNDRY.md` |
+| Hosting the replay server | the deterministic agent-change gate. `run_replay.py` does the Foundry wiring; the server still has to be reachable from Azure. | `docs/REPLAY.md` |
 | Cost / latency budgets | gating on spend | set `--max-tokens` |
 | Skill versions | "which rules were in force" across versions | `load_skill` returns no version |
 | Intent on the ops hand-off | intent-keyed expectations for the ops agent | the orchestrator sends a JSON write plan with no `intent=` |

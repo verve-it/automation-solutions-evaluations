@@ -183,6 +183,11 @@ def from_tools_list(payload):
         "name": base_tool_name(t.get("name", "")),
         "description": t.get("description", ""),
         "parameters": t.get("inputSchema") or t.get("parameters"),
+        # MCP defines readOnlyHint and destructiveHint for exactly the
+        # question "does calling this change anything". Dropping them meant
+        # which tools write had to be written down by hand somewhere else,
+        # and that list was wrong. Keep what the server says about itself.
+        "annotations": t.get("annotations") or None,
     } for t in payload]
 
 

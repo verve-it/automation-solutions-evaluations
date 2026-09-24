@@ -8,6 +8,7 @@ An e-mail address is the marker: high precision, and the scrubber has always
 caught them when it ran. A file with real addresses in it has not been
 scrubbed, whatever else is true of it.
 """
+import json
 import os
 import re
 import subprocess
@@ -29,7 +30,13 @@ def tracked_traces():
     out = subprocess.run(["git", "ls-files", "traces/"], cwd=REPO,
                          capture_output=True, text=True, check=True)
     return [p for p in out.stdout.split()
-            if not p.endswith((".md", ".meta.json"))]
+            if not p.endswith((".md", ".meta.json", ".scrub.json"))]
+
+
+def tracked_sidecars():
+    out = subprocess.run(["git", "ls-files", "traces/"], cwd=REPO,
+                         capture_output=True, text=True, check=True)
+    return [p for p in out.stdout.split() if p.endswith(".scrub.json")]
 
 
 def real_emails(path, cap=20):
@@ -51,7 +58,7 @@ def test_there_are_traces_to_check():
     assert tracked_traces()
 
 
-@pytest.mark.parametrize("path", tracked_traces())
+@pytest.mark.parametrize("path", tracked_traces() + tracked_sidecars())
 def test_a_committed_trace_carries_no_real_email_addresses(path):
     found = real_emails(path)
     assert not found, (
@@ -81,3 +88,55 @@ def test_a_committed_trace_shows_evidence_of_being_scrubbed(path):
                 return
     pytest.fail(f"{path} contains no pseudonym tokens — scrub_trace.py has "
                 f"never been run over it. See traces/README.md.")
+
+
+# Scrubbed before scrub_trace.py wrote a sidecar. Every trace since has one.
+PREDATES_SIDECAR = {"traces/2026-09-03-full-triage.json",
+                    "traces/2026-09-15-ops-worst-case.json"}
+SIDECAR_KEYS = {"salt_fingerprint", "literals", "tokens_issued", "source",
+                "scrubbed_utc"}
+
+
+@pytest.mark.parametrize("path", tracked_traces())
+def test_a_committed_trace_has_its_scrub_sidecar(path):
+    """Without it nothing says which salt made the tokens."""
+    if path in PREDATES_SIDECAR:
+        pytest.skip("scrubbed before the sidecar existed")
+    assert path + ".scrub.json" in tracked_sidecars(), (
+        f"{path} has no {path}.scrub.json -- commit the sidecar the scrub "
+        "wrote beside it")
+
+
+@pytest.mark.parametrize("path", tracked_sidecars())
+def test_a_sidecar_is_only_a_sidecar(path):
+    """A .scrub.json skips the token check; make sure it is what it says."""
+    with open(os.path.join(REPO, path), encoding="utf-8") as fh:
+        body = json.load(fh)
+    assert isinstance(body, dict) and set(body) == SIDECAR_KEYS, sorted(body)
+
+
+def test_every_committed_scrub_used_the_one_repo_salt():
+    """One salt, for ever. A second salt gives the same person a second token
+    and nothing in either file says so -- cross-trace reading just quietly
+    stops meaning anything. The sidecar's fingerprint is how it shows."""
+    prints = {}
+    for path in tracked_sidecars():
+        with open(os.path.join(REPO, path), encoding="utf-8") as fh:
+            prints.setdefault(json.load(fh)["salt_fingerprint"], []).append(path)
+    assert len(prints) <= 1, (
+        f"committed traces were scrubbed with {len(prints)} different salts: "
+        f"{prints}. Re-apply the reviewed redaction lists with the repo salt.")
+
+
+def test_no_git_repository_is_committed():
+    """2996618 committed purge.git/ -- the history-purge mirror, with its
+    pack, refs and blob list -- because the runbook's clone landed in the
+    working tree. A git directory in the tree is never intended."""
+    out = subprocess.run(["git", "ls-files"], cwd=REPO,
+                         capture_output=True, text=True, check=True)
+    inside = [p for p in out.stdout.splitlines()
+              if any(part.endswith(".git") for part in p.split("/")[:-1])
+              or p.endswith("/packed-refs") or "/objects/pack/" in p]
+    assert not inside, (
+        f"{len(inside)} tracked path(s) inside a git directory, e.g. "
+        f"{inside[:3]}. Untrack them: git rm -r --cached <dir>")

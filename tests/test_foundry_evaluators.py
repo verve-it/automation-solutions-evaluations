@@ -1,7 +1,7 @@
 """The checks, ported to Foundry code-based evaluators.
 
 The port is only worth having if it agrees with run_evals.py. These tests
-score both frozen trace sets with each and assert every comparable verdict
+score every frozen trace set with each and assert every comparable verdict
 matches — that is the guarantee, not the unit tests below it.
 """
 import json
@@ -23,7 +23,8 @@ import trace_to_eval                                   # noqa: E402
 from conftest import REPO                              # noqa: E402
 
 SETS = ["traces/2026-09-03-full-triage.json",
-        "traces/2026-09-15-ops-worst-case.json"]
+        "traces/2026-09-15-ops-worst-case.json",
+        "traces/2026-09-23-triage-analysis.json"]
 
 # registered evaluator -> the run_evals check it reproduces
 PAIRS = [
@@ -146,6 +147,18 @@ def test_trajectory_penalises_a_missing_step():
     assert checks.grade_trajectory({}, row) == 0.5
 
 
+def test_trajectory_ignores_the_server_label_prefix():
+    """Must agree with run_evals.check_trajectory, which matches bare names."""
+    row = {"tool_outcomes": [{"tool": t, "result": "", "success": True}
+                             for t in ["load_skill",
+                                       "CWPSA-ForAgents-prod___cw_get_ticket",
+                                       "CWPSA-ForAgents-prod___cw_search"]],
+           "expected_actions": ["load_skill",
+                                "ConnectWise-PSA-ForAgents___cw_get_ticket",
+                                "ConnectWise-PSA-ForAgents___cw_query"]}
+    assert checks.grade_trajectory({}, row) == pytest.approx(2 / 3)
+
+
 def test_dead_end_threshold_matches_max_empty_rate():
     """0.75 here is run_evals.py's max_empty_rate of 0.25, the other way up."""
     assert checks.EVALUATORS["cw_no_dead_ends"][4] == 0.75
@@ -256,7 +269,7 @@ def test_register_dry_run_calls_nothing(tmp_path):
          "--out", str(out)],
         cwd=REPO, check=True, capture_output=True, text=True)
     assert "nothing was called" in result.stdout
-    assert len(json.loads(out.read_text())) == len(checks.EVALUATORS)
+    assert len(json.loads(out.read_text(encoding="utf-8"))) == len(checks.EVALUATORS)
 
 
 # --- registration payload shape ---------------------------------------------
@@ -478,6 +491,25 @@ def test_item_schema_declares_every_column_with_its_real_type():
     assert props["run_agent"]["type"] == "string"
 
 
+def test_locked_versions_reach_the_criteria():
+    """TestingCriterionAzureAIEvaluator is a TypedDict. Setting
+    evaluator_version as an attribute raised AttributeError, after the
+    dataset had been uploaded, on every run with evaluator-versions.json --
+    the gate's and the nightly's. No test built the criteria, so it passed."""
+    pytest.importorskip("azure.ai.projects")
+    import run_cloud_eval
+
+    _, rows = _both(SETS[0])
+    lock = run_cloud_eval.load_lock(os.path.join(REPO,
+                                                 "evaluator-versions.json"))
+    assert lock, "evaluator-versions.json pins nothing"
+    criteria = run_cloud_eval.testing_criteria(rows, "gpt", lock=lock)
+    assert {c["name"]: c.get("evaluator_version") for c in criteria} == lock
+
+    unlocked = run_cloud_eval.testing_criteria(rows, "gpt", lock={})
+    assert all("evaluator_version" not in c for c in unlocked)
+
+
 def test_item_schema_has_no_type_unions():
     """A nullable column becomes a union, which the service may not take."""
     import run_cloud_eval
@@ -595,7 +627,7 @@ def test_lock_file_is_read_and_versions_coerced_to_strings(tmp_path):
     import run_cloud_eval
 
     lock = tmp_path / "v.json"
-    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}))
+    lock.write_text(json.dumps({"cw_trajectory": 4, "cw_no_dead_ends": "2"}), encoding="utf-8")
     assert run_cloud_eval.load_lock(str(lock)) == {"cw_trajectory": "4",
                                                    "cw_no_dead_ends": "2"}
 
@@ -701,3 +733,78 @@ def test_duplicate_indices_refuse():
 def test_an_out_of_range_index_refuses():
     assert _align([({"cw_x": 1.0}, {"datasource_item_id": i})
                    for i in (0, 1, 99)]) is None
+
+
+# --- the native local harness -----------------------------------------------
+
+sys.path.insert(0, os.path.join(REPO, "foundry_evaluators"))
+import native                                             # noqa: E402
+
+
+def test_the_adapter_builds_an_explicit_signature():
+    """evaluate() introspects the signature to decide which dataset columns
+    an evaluator needs, and reads **kwargs as a required input literally
+    named 'kw'. An explicit keyword-only signature is what avoids that."""
+    import inspect as _i
+    fn = native.as_evaluator("cw_x", lambda s, i: 1.0, ["query", "response"])
+    params = _i.signature(fn).parameters
+    assert list(params) == ["query", "response"]
+    assert all(p.kind is _i.Parameter.KEYWORD_ONLY for p in params.values())
+    assert "kwargs" not in params and "kw" not in params
+
+
+def test_the_adapter_returns_the_registered_metric_name():
+    """The key must match the registered evaluator, or the local run and the
+    cloud run report different metric names for the same check."""
+    fn = native.as_evaluator("cw_no_dead_ends", lambda s, i: 0.5, ["a"])
+    assert fn(a=1) == {"cw_no_dead_ends": 0.5}
+
+
+def test_every_registered_check_has_a_native_adapter():
+    built = native.evaluator_set([{"query": "x"}])
+    assert set(built) == set(checks.EVALUATORS)
+
+
+def test_verdicts_apply_the_registered_thresholds():
+    """A score is a number; a verdict is a number against a threshold.
+    cw_no_dead_ends passes at 0.75, the rest at 1.0."""
+    result = {"rows": [{"outputs.cw_no_dead_ends": 0.8,
+                        "outputs.cw_no_wasted_calls": 0.8}]}
+    v = native.verdicts(result)[0]
+    assert v["cw_no_dead_ends"] is True
+    assert v["cw_no_wasted_calls"] is False
+
+
+@pytest.mark.parametrize("trace", SETS)
+def test_the_native_harness_agrees_with_run_evals(trace, tmp_path):
+    """The point of the adapter: one implementation, two harnesses.
+
+    azure-ai-evaluation's evaluate() runs offline -- azure_ai_project is
+    optional -- so the merge gate can use the native harness over the same
+    checks.py objects Foundry runs, instead of a second implementation kept
+    in step by hand. This asserts the two agree verdict for verdict.
+    """
+    from azure.ai.evaluation import evaluate
+
+    local, rows = _both(trace)
+    data = tmp_path / "rows.jsonl"
+    with open(data, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+    result = evaluate(data=str(data), evaluators=native.evaluator_set(rows))
+    got = native.verdicts(result)
+    assert len(got) == len(local)
+
+    compared, mismatches = 0, []
+    for l, n in zip(local, got):
+        for registered, check in PAIRS:
+            verdict = l["checks"][check]["passed"]
+            if verdict is None or registered not in n:
+                continue
+            compared += 1
+            if n[registered] != verdict:
+                mismatches.append(f"{l['run_agent']} {check}: "
+                                  f"run_evals={verdict} native={n[registered]}")
+    assert compared, "nothing comparable"
+    assert not mismatches, "\n".join(mismatches)

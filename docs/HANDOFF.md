@@ -25,10 +25,15 @@
 > - §10 item 6: token data is now collected per run and printed every run;
 >   gated only if you set a budget.
 > - §10 item 7 (Foundry submission): `foundry/submit_to_foundry.py`.
-> - §10 item 9 (statistics): handed to `microsoft/ai-agent-evals`, which does
->   confidence intervals and significance testing. With a dev ConnectWise
->   instance and a Foundry staging project now available, §5's replay set is
->   viable and needs no harness of ours — see `replay/` and `docs/FOUNDRY.md`.
+> - §10 item 9 (statistics): **still open.** It was handed to
+>   `microsoft/ai-agent-evals`, which does confidence intervals and
+>   significance testing — but that action invokes the agents against a real
+>   ConnectWise instance, so it and `staging-replay.yml` were removed. Nothing
+>   in this repo reaches a system of record. The replacement gate is cassette
+>   replay (`docs/REPLAY.md`, `agent-gate.yml`), which is deterministic and
+>   therefore needs no significance test to compare two versions; what is
+>   still missing is a statistical treatment of the *judged* sample. See
+>   `docs/ASSERT.md`.
 > - The §2 numbers below were measured with two bugs live. `started` was empty
 >   on every run (the portal names the column `timestamp [UTC]`), and intent
 >   extraction never matched, because real hand-offs are `intent=Full Triage; …`

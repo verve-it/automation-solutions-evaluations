@@ -1,0 +1,1104 @@
+[
+ {
+  "orchestration_id": "97231eafd49ecfeb09b5f3a80eba8074",
+  "run_agent": "triage-analysis-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "triage-analysis-agent",
+  "started": "2026-09-23T15:22:05.585Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "6"
+   }
+  ],
+  "tool_calls": 37,
+  "duration_ms": 210180.0,
+  "usage": {
+   "llm_calls": 29,
+   "prompt_tokens_sum": 580542,
+   "uncached_input_tokens": 39680,
+   "cache_read_tokens": 540862,
+   "cache_write_tokens": 39474,
+   "output_tokens": 4636,
+   "reasoning_tokens": 1240,
+   "peak_input_tokens": 48228,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "26329ef4ac7cec9df9a2e9dd6692897a5f93abd578db4a4a1a43475ba0a3f919",
+    "bytes": 3468,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "junk-detection",
+    "sha256": "f5d788901b9cc16ed7a540f3a39cbfe702e46c220abee06b197519080285ee79",
+    "bytes": 1648,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "summary",
+    "sha256": "ea24c0c5a4d6e6247bcd457dc77f0f7ec0b076367862d39eba5f135b73f31a12",
+    "bytes": 1406,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "attachments",
+    "sha256": "cae0fab7279853d78d9d6ed62481f736b3b41a6f959b61694592ebfa51fe8b69",
+    "bytes": 922,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "description",
+    "sha256": "62e9aabbbeafd29ece29ae31e8e72867fb56735a545b3e386efaf0a72cbed245",
+    "bytes": 1956,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "company",
+    "sha256": "d01f7f40173390fc9c605498d597c66f3d7c2fd3e82d9e83a3ff9d5ffb262015",
+    "bytes": 3367,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "contact-site",
+    "sha256": "ad93102cf72331fdb0107084676b595bf576ba4019a7df44b81203660c05ee39",
+    "bytes": 2643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "agreement",
+    "sha256": "05bc061df5600abdc746cc63148cfda7f6447074761aa052b475b08e954ae072",
+    "bytes": 1343,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "missing-information",
+    "sha256": "a8a137de8c44c4816376607d09f7615cf9f0f61f249b67e55d8d9040461d8782",
+    "bytes": 955,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "security",
+    "sha256": "0ec87611bf101dc591cff28206feb28056925a72f72a699ab2da0d5e4a577e7d",
+    "bytes": 643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "validation",
+    "sha256": "5171cb5f251ff79885da0a406d9101902b3122dcd87d06936c2fe12eec9038a0",
+    "bytes": 937,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "77de5363582e54fdf54259d8c51df4b4c9bd24fd56193913b16035a08a021d69",
+    "bytes": 1576,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "board",
+    "sha256": "16e35dffcd967570dd402bf97d4793dd5a5ebd9a7174150ca8084d780491eb33",
+    "bytes": 973,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "status",
+    "sha256": "ff6fa5b6650982f2e8a44fa23831b331f0808ee04e8b1953303b898bffde3ba2",
+    "bytes": 1091,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "type-subtype-item",
+    "sha256": "32a36a9fd305a60b3a641ca77707b5aa91da2eb3da109f607570e5748bd8121c",
+    "bytes": 1067,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "impact-urgency-priority",
+    "sha256": "849ee28e8702c1d2bd28a62e40298092c68806189509fa0e208d9db652a04e07",
+    "bytes": 1280,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "configuration",
+    "sha256": "387cebf1c0040cd6429e0ecdef32aa4f6e07c5e7fb09e3a9440ce5b6e4a311af",
+    "bytes": 5748,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "duplicate-review",
+    "sha256": "06224add27129fa45d6a487e5f56de82c4b24db7927d9499a13c160940a5760d",
+    "bytes": 2140,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "bundle-matching",
+    "sha256": "3450ffa2bd7095f856859094ebadb1ca6c957d605722f9f676bdb3225fef852c",
+    "bytes": 1817,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "related-problem-tickets",
+    "sha256": "8c8ec8765c62578d87f82e3d65df9f9ed49c78178a71187900f1441cef6a7926",
+    "bytes": 944,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "due-date",
+    "sha256": "35c5591d57ff1cc610ce49e3bd30d9f2a8d5f4ee68fecd6e62046cf85e124626",
+    "bytes": 780,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "1 avoidable call(s): invalid_projection_fieldx1",
+    "count": 1
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "16 call(s) validated",
+    "checked": 16
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "2/37 tool calls errored",
+    "count": 2,
+    "rate": 0.05
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-analysis-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "4dad9aa3309e852485cf93106f2b6e3b",
+  "run_agent": "triage-analysis-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "triage-analysis-agent",
+  "started": "2026-09-23T15:24:41.409Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "6"
+   }
+  ],
+  "tool_calls": 36,
+  "duration_ms": 207244.0,
+  "usage": {
+   "llm_calls": 31,
+   "prompt_tokens_sum": 878685,
+   "uncached_input_tokens": 49972,
+   "cache_read_tokens": 828713,
+   "cache_write_tokens": 49760,
+   "output_tokens": 4133,
+   "reasoning_tokens": 666,
+   "peak_input_tokens": 58514,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "26329ef4ac7cec9df9a2e9dd6692897a5f93abd578db4a4a1a43475ba0a3f919",
+    "bytes": 3468,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "junk-detection",
+    "sha256": "f5d788901b9cc16ed7a540f3a39cbfe702e46c220abee06b197519080285ee79",
+    "bytes": 1648,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "summary",
+    "sha256": "ea24c0c5a4d6e6247bcd457dc77f0f7ec0b076367862d39eba5f135b73f31a12",
+    "bytes": 1406,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "attachments",
+    "sha256": "cae0fab7279853d78d9d6ed62481f736b3b41a6f959b61694592ebfa51fe8b69",
+    "bytes": 922,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "description",
+    "sha256": "62e9aabbbeafd29ece29ae31e8e72867fb56735a545b3e386efaf0a72cbed245",
+    "bytes": 1956,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "company",
+    "sha256": "d01f7f40173390fc9c605498d597c66f3d7c2fd3e82d9e83a3ff9d5ffb262015",
+    "bytes": 3367,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "contact-site",
+    "sha256": "ad93102cf72331fdb0107084676b595bf576ba4019a7df44b81203660c05ee39",
+    "bytes": 2643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "agreement",
+    "sha256": "05bc061df5600abdc746cc63148cfda7f6447074761aa052b475b08e954ae072",
+    "bytes": 1343,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "missing-information",
+    "sha256": "a8a137de8c44c4816376607d09f7615cf9f0f61f249b67e55d8d9040461d8782",
+    "bytes": 955,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "security",
+    "sha256": "0ec87611bf101dc591cff28206feb28056925a72f72a699ab2da0d5e4a577e7d",
+    "bytes": 643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "validation",
+    "sha256": "5171cb5f251ff79885da0a406d9101902b3122dcd87d06936c2fe12eec9038a0",
+    "bytes": 937,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "77de5363582e54fdf54259d8c51df4b4c9bd24fd56193913b16035a08a021d69",
+    "bytes": 1576,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "board",
+    "sha256": "16e35dffcd967570dd402bf97d4793dd5a5ebd9a7174150ca8084d780491eb33",
+    "bytes": 973,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "status",
+    "sha256": "ff6fa5b6650982f2e8a44fa23831b331f0808ee04e8b1953303b898bffde3ba2",
+    "bytes": 1091,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "type-subtype-item",
+    "sha256": "32a36a9fd305a60b3a641ca77707b5aa91da2eb3da109f607570e5748bd8121c",
+    "bytes": 1067,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "impact-urgency-priority",
+    "sha256": "849ee28e8702c1d2bd28a62e40298092c68806189509fa0e208d9db652a04e07",
+    "bytes": 1280,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "configuration",
+    "sha256": "387cebf1c0040cd6429e0ecdef32aa4f6e07c5e7fb09e3a9440ce5b6e4a311af",
+    "bytes": 5748,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "duplicate-review",
+    "sha256": "06224add27129fa45d6a487e5f56de82c4b24db7927d9499a13c160940a5760d",
+    "bytes": 2140,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "bundle-matching",
+    "sha256": "3450ffa2bd7095f856859094ebadb1ca6c957d605722f9f676bdb3225fef852c",
+    "bytes": 1817,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "related-problem-tickets",
+    "sha256": "8c8ec8765c62578d87f82e3d65df9f9ed49c78178a71187900f1441cef6a7926",
+    "bytes": 944,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "due-date",
+    "sha256": "35c5591d57ff1cc610ce49e3bd30d9f2a8d5f4ee68fecd6e62046cf85e124626",
+    "bytes": 780,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "2 avoidable call(s): invalid_entityx1, invalid_projection_fieldx1",
+    "count": 2
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "15 call(s) validated",
+    "checked": 15
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "3/36 tool calls errored",
+    "count": 3,
+    "rate": 0.08
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-analysis-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "1f3c5a2f5a73336acdb23b4e6e788f05",
+  "run_agent": "triage-analysis-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "triage-analysis-agent",
+  "started": "2026-09-23T15:35:28.959Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "6"
+   }
+  ],
+  "tool_calls": 22,
+  "duration_ms": 130541.0,
+  "usage": {
+   "llm_calls": 22,
+   "prompt_tokens_sum": 289978,
+   "uncached_input_tokens": 10858,
+   "cache_read_tokens": 279120,
+   "cache_write_tokens": 10673,
+   "output_tokens": 1036,
+   "reasoning_tokens": 296,
+   "peak_input_tokens": 19025,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "26329ef4ac7cec9df9a2e9dd6692897a5f93abd578db4a4a1a43475ba0a3f919",
+    "bytes": 3468,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "junk-detection",
+    "sha256": "f5d788901b9cc16ed7a540f3a39cbfe702e46c220abee06b197519080285ee79",
+    "bytes": 1648,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "summary",
+    "sha256": "ea24c0c5a4d6e6247bcd457dc77f0f7ec0b076367862d39eba5f135b73f31a12",
+    "bytes": 1406,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "attachments",
+    "sha256": "cae0fab7279853d78d9d6ed62481f736b3b41a6f959b61694592ebfa51fe8b69",
+    "bytes": 922,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "description",
+    "sha256": "62e9aabbbeafd29ece29ae31e8e72867fb56735a545b3e386efaf0a72cbed245",
+    "bytes": 1956,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "company",
+    "sha256": "d01f7f40173390fc9c605498d597c66f3d7c2fd3e82d9e83a3ff9d5ffb262015",
+    "bytes": 3367,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "contact-site",
+    "sha256": "ad93102cf72331fdb0107084676b595bf576ba4019a7df44b81203660c05ee39",
+    "bytes": 2643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "agreement",
+    "sha256": "05bc061df5600abdc746cc63148cfda7f6447074761aa052b475b08e954ae072",
+    "bytes": 1343,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "missing-information",
+    "sha256": "a8a137de8c44c4816376607d09f7615cf9f0f61f249b67e55d8d9040461d8782",
+    "bytes": 955,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "security",
+    "sha256": "0ec87611bf101dc591cff28206feb28056925a72f72a699ab2da0d5e4a577e7d",
+    "bytes": 643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "validation",
+    "sha256": "5171cb5f251ff79885da0a406d9101902b3122dcd87d06936c2fe12eec9038a0",
+    "bytes": 937,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "77de5363582e54fdf54259d8c51df4b4c9bd24fd56193913b16035a08a021d69",
+    "bytes": 1576,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "board",
+    "sha256": "16e35dffcd967570dd402bf97d4793dd5a5ebd9a7174150ca8084d780491eb33",
+    "bytes": 973,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "status",
+    "sha256": "ff6fa5b6650982f2e8a44fa23831b331f0808ee04e8b1953303b898bffde3ba2",
+    "bytes": 1091,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "type-subtype-item",
+    "sha256": "32a36a9fd305a60b3a641ca77707b5aa91da2eb3da109f607570e5748bd8121c",
+    "bytes": 1067,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "impact-urgency-priority",
+    "sha256": "849ee28e8702c1d2bd28a62e40298092c68806189509fa0e208d9db652a04e07",
+    "bytes": 1280,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "configuration",
+    "sha256": "387cebf1c0040cd6429e0ecdef32aa4f6e07c5e7fb09e3a9440ce5b6e4a311af",
+    "bytes": 5748,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "duplicate-review",
+    "sha256": "06224add27129fa45d6a487e5f56de82c4b24db7927d9499a13c160940a5760d",
+    "bytes": 2140,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "bundle-matching",
+    "sha256": "3450ffa2bd7095f856859094ebadb1ca6c957d605722f9f676bdb3225fef852c",
+    "bytes": 1817,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "related-problem-tickets",
+    "sha256": "8c8ec8765c62578d87f82e3d65df9f9ed49c78178a71187900f1441cef6a7926",
+    "bytes": 944,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "due-date",
+    "sha256": "35c5591d57ff1cc610ce49e3bd30d9f2a8d5f4ee68fecd6e62046cf85e124626",
+    "bytes": 780,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "1 call(s) validated",
+    "checked": 1
+   },
+   "no_tool_errors": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-analysis-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ },
+ {
+  "orchestration_id": "7f1cc80aab95ed0373b305a7fd8f4086",
+  "run_agent": "triage-analysis-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "triage-analysis-agent",
+  "started": "2026-09-23T15:35:56.438Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "6"
+   }
+  ],
+  "tool_calls": 37,
+  "duration_ms": 161284.0,
+  "usage": {
+   "llm_calls": 30,
+   "prompt_tokens_sum": 516991,
+   "uncached_input_tokens": 29909,
+   "cache_read_tokens": 487082,
+   "cache_write_tokens": 29700,
+   "output_tokens": 3975,
+   "reasoning_tokens": 842,
+   "peak_input_tokens": 38454,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "26329ef4ac7cec9df9a2e9dd6692897a5f93abd578db4a4a1a43475ba0a3f919",
+    "bytes": 3468,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "junk-detection",
+    "sha256": "f5d788901b9cc16ed7a540f3a39cbfe702e46c220abee06b197519080285ee79",
+    "bytes": 1648,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "summary",
+    "sha256": "ea24c0c5a4d6e6247bcd457dc77f0f7ec0b076367862d39eba5f135b73f31a12",
+    "bytes": 1406,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "attachments",
+    "sha256": "cae0fab7279853d78d9d6ed62481f736b3b41a6f959b61694592ebfa51fe8b69",
+    "bytes": 922,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "description",
+    "sha256": "62e9aabbbeafd29ece29ae31e8e72867fb56735a545b3e386efaf0a72cbed245",
+    "bytes": 1956,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "company",
+    "sha256": "d01f7f40173390fc9c605498d597c66f3d7c2fd3e82d9e83a3ff9d5ffb262015",
+    "bytes": 3367,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "contact-site",
+    "sha256": "ad93102cf72331fdb0107084676b595bf576ba4019a7df44b81203660c05ee39",
+    "bytes": 2643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "agreement",
+    "sha256": "05bc061df5600abdc746cc63148cfda7f6447074761aa052b475b08e954ae072",
+    "bytes": 1343,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "missing-information",
+    "sha256": "a8a137de8c44c4816376607d09f7615cf9f0f61f249b67e55d8d9040461d8782",
+    "bytes": 955,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "security",
+    "sha256": "0ec87611bf101dc591cff28206feb28056925a72f72a699ab2da0d5e4a577e7d",
+    "bytes": 643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "validation",
+    "sha256": "5171cb5f251ff79885da0a406d9101902b3122dcd87d06936c2fe12eec9038a0",
+    "bytes": 937,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "77de5363582e54fdf54259d8c51df4b4c9bd24fd56193913b16035a08a021d69",
+    "bytes": 1576,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "board",
+    "sha256": "16e35dffcd967570dd402bf97d4793dd5a5ebd9a7174150ca8084d780491eb33",
+    "bytes": 973,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "status",
+    "sha256": "ff6fa5b6650982f2e8a44fa23831b331f0808ee04e8b1953303b898bffde3ba2",
+    "bytes": 1091,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "type-subtype-item",
+    "sha256": "32a36a9fd305a60b3a641ca77707b5aa91da2eb3da109f607570e5748bd8121c",
+    "bytes": 1067,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "impact-urgency-priority",
+    "sha256": "849ee28e8702c1d2bd28a62e40298092c68806189509fa0e208d9db652a04e07",
+    "bytes": 1280,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "configuration",
+    "sha256": "387cebf1c0040cd6429e0ecdef32aa4f6e07c5e7fb09e3a9440ce5b6e4a311af",
+    "bytes": 5748,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "duplicate-review",
+    "sha256": "06224add27129fa45d6a487e5f56de82c4b24db7927d9499a13c160940a5760d",
+    "bytes": 2140,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "bundle-matching",
+    "sha256": "3450ffa2bd7095f856859094ebadb1ca6c957d605722f9f676bdb3225fef852c",
+    "bytes": 1817,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "related-problem-tickets",
+    "sha256": "8c8ec8765c62578d87f82e3d65df9f9ed49c78178a71187900f1441cef6a7926",
+    "bytes": 944,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "due-date",
+    "sha256": "35c5591d57ff1cc610ce49e3bd30d9f2a8d5f4ee68fecd6e62046cf85e124626",
+    "bytes": 780,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": false,
+    "reason": "1 avoidable call(s): invalid_projection_fieldx1",
+    "count": 1
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "16 call(s) validated",
+    "checked": 16
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "4/37 tool calls errored",
+    "count": 4,
+    "rate": 0.11
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-analysis-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": false,
+  "failed_gating": [
+   "no_wasted_calls"
+  ]
+ },
+ {
+  "orchestration_id": "a40b884764c9d8afae411c48011a02b2",
+  "run_agent": "triage-analysis-agent",
+  "intent": null,
+  "intent_source": "unknown",
+  "traj_key": "triage-analysis-agent",
+  "started": "2026-09-23T15:44:23.794Z",
+  "mcp_toolboxes": [
+   {
+    "toolbox": "ConnectwiseMCP",
+    "version": "6"
+   }
+  ],
+  "tool_calls": 31,
+  "duration_ms": 147031.0,
+  "usage": {
+   "llm_calls": 28,
+   "prompt_tokens_sum": 524796,
+   "uncached_input_tokens": 45101,
+   "cache_read_tokens": 479695,
+   "cache_write_tokens": 45017,
+   "output_tokens": 3666,
+   "reasoning_tokens": 949,
+   "peak_input_tokens": 53771,
+   "usage_source": "chat_spans"
+  },
+  "skills_in_force": [
+   {
+    "skill_name": "normalization",
+    "sha256": "26329ef4ac7cec9df9a2e9dd6692897a5f93abd578db4a4a1a43475ba0a3f919",
+    "bytes": 3468,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "classification",
+    "sha256": "77de5363582e54fdf54259d8c51df4b4c9bd24fd56193913b16035a08a021d69",
+    "bytes": 1576,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "junk-detection",
+    "sha256": "f5d788901b9cc16ed7a540f3a39cbfe702e46c220abee06b197519080285ee79",
+    "bytes": 1648,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "summary",
+    "sha256": "ea24c0c5a4d6e6247bcd457dc77f0f7ec0b076367862d39eba5f135b73f31a12",
+    "bytes": 1406,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "attachments",
+    "sha256": "cae0fab7279853d78d9d6ed62481f736b3b41a6f959b61694592ebfa51fe8b69",
+    "bytes": 922,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "description",
+    "sha256": "62e9aabbbeafd29ece29ae31e8e72867fb56735a545b3e386efaf0a72cbed245",
+    "bytes": 1956,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "company",
+    "sha256": "d01f7f40173390fc9c605498d597c66f3d7c2fd3e82d9e83a3ff9d5ffb262015",
+    "bytes": 3367,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "contact-site",
+    "sha256": "ad93102cf72331fdb0107084676b595bf576ba4019a7df44b81203660c05ee39",
+    "bytes": 2643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "agreement",
+    "sha256": "05bc061df5600abdc746cc63148cfda7f6447074761aa052b475b08e954ae072",
+    "bytes": 1343,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "missing-information",
+    "sha256": "a8a137de8c44c4816376607d09f7615cf9f0f61f249b67e55d8d9040461d8782",
+    "bytes": 955,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "security",
+    "sha256": "0ec87611bf101dc591cff28206feb28056925a72f72a699ab2da0d5e4a577e7d",
+    "bytes": 643,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "validation",
+    "sha256": "5171cb5f251ff79885da0a406d9101902b3122dcd87d06936c2fe12eec9038a0",
+    "bytes": 937,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "board",
+    "sha256": "16e35dffcd967570dd402bf97d4793dd5a5ebd9a7174150ca8084d780491eb33",
+    "bytes": 973,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "status",
+    "sha256": "ff6fa5b6650982f2e8a44fa23831b331f0808ee04e8b1953303b898bffde3ba2",
+    "bytes": 1091,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "type-subtype-item",
+    "sha256": "32a36a9fd305a60b3a641ca77707b5aa91da2eb3da109f607570e5748bd8121c",
+    "bytes": 1067,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "impact-urgency-priority",
+    "sha256": "849ee28e8702c1d2bd28a62e40298092c68806189509fa0e208d9db652a04e07",
+    "bytes": 1280,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "configuration",
+    "sha256": "387cebf1c0040cd6429e0ecdef32aa4f6e07c5e7fb09e3a9440ce5b6e4a311af",
+    "bytes": 5748,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "duplicate-review",
+    "sha256": "06224add27129fa45d6a487e5f56de82c4b24db7927d9499a13c160940a5760d",
+    "bytes": 2140,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "bundle-matching",
+    "sha256": "3450ffa2bd7095f856859094ebadb1ca6c957d605722f9f676bdb3225fef852c",
+    "bytes": 1817,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "related-problem-tickets",
+    "sha256": "8c8ec8765c62578d87f82e3d65df9f9ed49c78178a71187900f1441cef6a7926",
+    "bytes": 944,
+    "truncated": false,
+    "errored": false
+   },
+   {
+    "skill_name": "due-date",
+    "sha256": "35c5591d57ff1cc610ce49e3bd30d9f2a8d5f4ee68fecd6e62046cf85e124626",
+    "bytes": 780,
+    "truncated": false,
+    "errored": false
+   }
+  ],
+  "checks": {
+   "no_wasted_calls": {
+    "passed": true,
+    "reason": ""
+   },
+   "valid_tool_args": {
+    "passed": true,
+    "reason": "10 call(s) validated",
+    "checked": 10
+   },
+   "no_tool_errors": {
+    "passed": false,
+    "reason": "2/31 tool calls errored",
+    "count": 2,
+    "rate": 0.06
+   },
+   "no_dead_ends": {
+    "passed": true,
+    "reason": ""
+   },
+   "no_search_cascade": {
+    "passed": true,
+    "reason": ""
+   },
+   "trajectory": {
+    "passed": null,
+    "reason": "no expected_actions for triage-analysis-agent"
+   },
+   "no_truncation": {
+    "passed": true,
+    "reason": ""
+   },
+   "cost_latency": {
+    "passed": null,
+    "reason": "tracking only — no --max-tokens/--max-duration-ms set"
+   },
+   "evaluator_ready": {
+    "passed": true,
+    "reason": ""
+   }
+  },
+  "passed": true,
+  "failed_gating": []
+ }
+]

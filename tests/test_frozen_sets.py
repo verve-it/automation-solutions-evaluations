@@ -19,6 +19,8 @@ SETS = [
      "baselines/full-triage-2026-09-18.json", 7, 5),
     ("traces/2026-09-15-ops-worst-case.json",
      "baselines/ops-worst-case-2026-09-18.json", 2, 0),
+    ("traces/2026-09-23-triage-analysis.json",
+     "baselines/triage-analysis-2026-09-23.json", 5, 2),
 ]
 
 
@@ -52,7 +54,7 @@ def test_frozen_set_matches_its_baseline(tmp_path, trace, baseline, runs,
                                          passing):
     _convert(trace, tmp_path)
     jsonl = tmp_path / "eval_runs.jsonl"
-    rows = [json.loads(l) for l in jsonl.read_text().splitlines() if l.strip()]
+    rows = [json.loads(l) for l in jsonl.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(rows) == runs
 
     result = _score(jsonl, "--baseline", baseline)
@@ -65,7 +67,7 @@ def test_gating_verdicts_are_stable(tmp_path, trace, baseline, runs, passing):
     _convert(trace, tmp_path)
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
     assert sum(1 for r in rows if r["passed"]) == passing
 
 
@@ -79,7 +81,7 @@ def test_known_bad_set_still_fails_every_way_we_expect(tmp_path):
     _convert(SETS[1][0], tmp_path)
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
     assert all(r["checks"]["no_wasted_calls"]["passed"] is False for r in rows)
     assert all(r["checks"]["no_search_cascade"]["passed"] is False
                for r in rows)
@@ -97,7 +99,7 @@ def test_a_declared_enum_would_catch_the_reference_type_failures(tmp_path):
                   "--tool-defs", "tests/fixtures/connectwisemcp-v1-partial.json")
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
     args_checks = [r["checks"]["valid_tool_args"] for r in rows]
     assert all(c["passed"] is False for c in args_checks)
     assert all("reference_type" in c["reason"] for c in args_checks)
@@ -120,7 +122,7 @@ def test_the_enum_catches_the_invalid_reference_type(tmp_path):
     _convert(SETS[0][0], tmp_path)          # "severity" is in the full-triage set
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
 
     bad = [r for r in rows if r["checks"]["valid_tool_args"]["passed"] is False]
     assert len(bad) == 1, [r["run_agent"] for r in bad]
@@ -147,7 +149,7 @@ def test_the_enum_does_not_fire_on_the_resolver_bugs(tmp_path):
     _convert(SETS[1][0], tmp_path)
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
     assert all(r["checks"]["valid_tool_args"]["passed"] is True for r in rows)
     assert all(r["checks"]["valid_tool_args"]["checked"] > 0 for r in rows)
     assert all(r["checks"]["evaluator_ready"]["passed"] is True for r in rows)
@@ -186,7 +188,7 @@ def test_the_manifest_covers_every_tool_the_agents_called(tmp_path):
     called = set()
     for trace, *_ in SETS:
         _convert(trace, tmp_path / "cov")
-        for line in (tmp_path / "cov" / "eval_runs.jsonl").read_text().splitlines():
+        for line in (tmp_path / "cov" / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             for name in json.loads(line)["tool_names"]:
@@ -203,7 +205,7 @@ def test_every_agent_now_has_a_trajectory_expectation(tmp_path):
     _convert(SETS[0][0], tmp_path)
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = json.loads(out.read_text())
+    rows = json.loads(out.read_text(encoding="utf-8"))
     assert all(r["checks"]["trajectory"]["passed"] is True for r in rows)
 
 
@@ -212,7 +214,7 @@ def test_ops_run_that_never_read_the_ticket_fails_trajectory(tmp_path):
     _convert(SETS[1][0], tmp_path)
     out = tmp_path / "results.json"
     _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
-    rows = {r["orchestration_id"][:8]: r for r in json.loads(out.read_text())}
+    rows = {r["orchestration_id"][:8]: r for r in json.loads(out.read_text(encoding="utf-8"))}
     traj = rows["73d29f4c"]["checks"]["trajectory"]
     assert traj["passed"] is False
     assert "cw_get_ticket" in traj["reason"]
@@ -226,7 +228,7 @@ def test_every_truncation_in_the_frozen_sets_is_cw_query_not_load_skill(tmp_path
     for trace, *_ in SETS:
         _convert(trace, tmp_path)
         rows = [json.loads(l) for l in
-                (tmp_path / "eval_runs.jsonl").read_text().splitlines()
+                (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines()
                 if l.strip()]
         assert sum(r["truncated_skills"] for r in rows) == 0
 
@@ -234,7 +236,7 @@ def test_every_truncation_in_the_frozen_sets_is_cw_query_not_load_skill(tmp_path
 def test_skills_in_force_are_stable_across_both_orchestrations(tmp_path):
     _convert(SETS[0][0], tmp_path)
     rows = [json.loads(l) for l in
-            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+            (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     by_name = {}
     for r in rows:
         for s in r["skills_in_force"]:
@@ -249,7 +251,7 @@ def test_intent_keying_still_resolves_on_the_full_triage_set(tmp_path):
     stopped matching, the checks skipped and the diff read 'no change'."""
     _convert(SETS[0][0], tmp_path)
     rows = [json.loads(l) for l in
-            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+            (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     resolved = [r for r in rows if r["intent"]]
     assert len(resolved) == 5
     assert {r["intent"] for r in resolved} == {"Full Triage", "Write Request"}
@@ -264,7 +266,7 @@ def test_binding_revisions_differ_between_agents_but_the_contract_does_not(
     manifest normally declares "versions": ["*"]."""
     _convert(SETS[0][0], tmp_path)
     rows = [json.loads(l) for l in
-            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+            (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     revisions = {r["run_agent"]: {t["version"] for t in r["mcp_toolboxes"]}
                  for r in rows if r["mcp_toolboxes"]}
     assert revisions["triage-analysis-agent"] == {"5"}
@@ -278,7 +280,7 @@ def test_foundry_conversion_maps_actions_to_tool_calls(tmp_path):
 
     _convert(SETS[0][0], tmp_path)
     runs = [json.loads(l) for l in
-            (tmp_path / "eval_runs.jsonl").read_text().splitlines() if l.strip()]
+            (tmp_path / "eval_runs.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = submit_to_foundry.to_foundry_rows(runs)
     assert len(rows) == len(runs)
     with_calls = [r for r in rows if r["tool_calls"]]

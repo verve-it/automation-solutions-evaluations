@@ -45,129 +45,20 @@ from __future__ import annotations
 import os, sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
-import argparse, glob, json, os, sys, threading
-from collections import defaultdict
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import argparse, json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from make_cassette import canonical_args, interaction_key
-from trace_to_eval import base_tool_name, load_tool_manifests
+from trace_to_eval import load_tool_manifests
 
-PROTOCOL_VERSION = "2025-06-18"
+# The playback and the MCP dispatch live in mcp_core so that this server and
+# the Azure Function in functions/replay-mcp/ answer identically. Re-exported
+# because callers and tests have imported them from here since before the
+# hosted version existed.
+from mcp_core import (PROTOCOL_VERSION, Cassette, handle_rpc,  # noqa: F401
+                      parse_error, prefix_len, tool_definitions, tool_result)
 
-
-class Cassette:
-    """Ordered, keyed playback with a journal of what actually happened."""
-
-    def __init__(self, data, on_exhausted="repeat"):
-        self.data = data
-        self.on_exhausted = on_exhausted
-        self.queues = defaultdict(list)
-        for i in data["interactions"]:
-            self.queues[i["key"]].append(i)
-        self.cursor = defaultdict(int)
-        self.journal = []
-        self.lock = threading.Lock()
-
-    def tools(self):
-        names = []
-        for i in self.data["interactions"]:
-            bare = base_tool_name(i["tool"])
-            if bare not in names:
-                names.append(bare)
-        return names
-
-    def call(self, tool, arguments):
-        key = f"{base_tool_name(tool)}|{canonical_args(json.dumps(arguments))}"
-        with self.lock:
-            queue = self.queues.get(key)
-            seq = len(self.journal)
-            if not queue:
-                entry = {"seq": seq, "tool": tool, "outcome": "diverged",
-                         "key": key}
-                self.journal.append(entry)
-                return None, entry
-
-            idx = self.cursor[key]
-            if idx < len(queue):
-                self.cursor[key] += 1
-                rec, outcome = queue[idx], "matched"
-            elif self.on_exhausted == "repeat":
-                rec, outcome = queue[-1], "repeated"
-            else:
-                entry = {"seq": seq, "tool": tool, "outcome": "diverged",
-                         "key": key, "reason": "responses exhausted"}
-                self.journal.append(entry)
-                return None, entry
-
-            entry = {"seq": seq, "tool": tool, "outcome": outcome, "key": key,
-                     "recorded_seq": rec["seq"], "is_write": rec["is_write"],
-                     "truncated": rec["truncated"]}
-            self.journal.append(entry)
-            return rec, entry
-
-    def summary(self):
-        counts = defaultdict(int)
-        for e in self.journal:
-            counts[e["outcome"]] += 1
-        first_divergence = next(
-            (e for e in self.journal if e["outcome"] == "diverged"), None)
-        return {
-            "cassette": self.data["orchestration_id"],
-            "recorded_interactions": len(self.data["interactions"]),
-            "replayed_calls": len(self.journal),
-            "matched": counts["matched"],
-            "repeated": counts["repeated"],
-            "diverged": counts["diverged"],
-            # How far the agent followed the recorded path before doing
-            # something the recording cannot answer.
-            "matched_prefix": _prefix_len(self.journal),
-            "first_divergence": first_divergence,
-            "writes_attempted": sum(1 for e in self.journal
-                                    if e.get("is_write")),
-            "lossy_cassette": self.data.get("lossy", False),
-            "journal": self.journal,
-        }
-
-
-def _prefix_len(journal):
-    n = 0
-    for e in journal:
-        if e["outcome"] == "diverged":
-            break
-        n += 1
-    return n
-
-
-def tool_definitions(cassette, manifests):
-    """Advertise production schemas where we have them.
-
-    Without a manifest the tools are advertised with an empty schema, which
-    changes what the agent is told it may send — so the replay is no longer
-    a faithful stand-in. Fill tool_manifests/ before trusting a gate built on
-    this. See tool_manifests/README.md.
-    """
-    by_name = {}
-    for m in manifests:
-        for t in m["tools"]:
-            if t.get("parameters"):
-                by_name[base_tool_name(t.get("name", ""))] = t
-
-    out, missing = [], []
-    for bare in cassette.tools():
-        known = by_name.get(bare)
-        if known:
-            out.append({"name": bare,
-                        "description": known.get("description", ""),
-                        "inputSchema": known["parameters"]})
-        else:
-            missing.append(bare)
-            out.append({"name": bare, "description": "",
-                        "inputSchema": {"type": "object", "properties": {}}})
-    return out, missing
-
-
-def _result(text, is_error=False):
-    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+_result = tool_result
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -213,45 +104,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             req = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
-            return self._send({"jsonrpc": "2.0", "id": None,
-                               "error": {"code": -32700,
-                                         "message": "parse error"}})
+            return self._send(parse_error())
 
-        method, rid = req.get("method"), req.get("id")
-        if method == "notifications/initialized":
-            return self._send({})
+        self._send(handle_rpc(req, self.cassette, self.tools))
 
-        if method == "initialize":
-            return self._send({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "connectwise-replay", "version": "1"},
-            }})
 
-        if method == "tools/list":
-            return self._send({"jsonrpc": "2.0", "id": rid,
-                               "result": {"tools": self.tools}})
+def default_port():
+    """8931 locally; whatever the Functions host assigned when hosted.
 
-        if method == "tools/call":
-            params = req.get("params") or {}
-            name = params.get("name", "")
-            rec, entry = self.cassette.call(name, params.get("arguments") or {})
-            if rec is None:
-                return self._send({"jsonrpc": "2.0", "id": rid, "result": _result(
-                    json.dumps({
-                        "error": "not_recorded",
-                        "tool": name,
-                        "message": "This call was not made in the recorded "
-                                   "run, so there is no recorded response. "
-                                   "The replay diverged here.",
-                    }), is_error=True)})
-            # A write returns what the real write returned. Nothing is written.
-            return self._send({"jsonrpc": "2.0", "id": rid,
-                               "result": _result(rec["result"],
-                                                 is_error=not rec["success"])})
-
-        self._send({"jsonrpc": "2.0", "id": rid,
-                    "error": {"code": -32601, "message": f"no method {method}"}})
+    A custom handler is told its port in FUNCTIONS_CUSTOMHANDLER_PORT and the
+    host will not route to anything else, so honouring it costs one line and
+    saves a deployment that comes up healthy and answers nothing.
+    """
+    return int(os.environ.get("FUNCTIONS_CUSTOMHANDLER_PORT") or 8931)
 
 
 def main():
@@ -263,7 +128,7 @@ def main():
                     help="tool manifest or directory, so the replayed tools "
                          "advertise production schemas")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8931)
+    ap.add_argument("--port", type=int, default=default_port())
     ap.add_argument("--token", help="require this bearer token")
     ap.add_argument("--journal", help="write the replay journal here on exit")
     ap.add_argument("--on-exhausted", choices=("repeat", "diverge"),
