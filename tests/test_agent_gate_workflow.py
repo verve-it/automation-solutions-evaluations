@@ -387,6 +387,20 @@ def test_the_gate_has_no_agent_override(workflow):
     assert "inputs.agent" not in open(GATE, encoding="utf-8").read()
 
 
+def test_gate_agents_only_chooses_among_recordings(workflow):
+    """A caller gates its own agents, so the others need not exist in the
+    project. The filter picks recordings; the agent replayed is still the
+    one each recorded, and a name with no recording fails rather than
+    passing untested."""
+    inputs = workflow[True]["workflow_call"]["inputs"]
+    assert inputs["gate-agents"]["default"] == ""
+    step = [s for s in workflow["jobs"]["replay"]["steps"]
+            if "run_replay.py" in s.get("run", "")][0]
+    assert step["env"]["GATE_AGENTS"] == "${{ inputs.gate-agents }}"
+    assert "--agent " not in step["run"]
+    assert "no single-agent recording of it" in step["run"]
+
+
 def test_the_gate_scores_attributed_runs_strictly(steps):
     """Scored as exported, a replay has a new operation_Id, matches no
     baseline row, and the gate passes whatever the agent did."""
