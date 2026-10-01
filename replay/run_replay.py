@@ -176,6 +176,42 @@ def replay_agent_exists(agents, replay_agent):
                          "created.")
 
 
+# A hosted version is provisioned after create_version_from_code returns, and
+# create_session on it is refused until then: `(agent_version_not_ready)
+# Agent version is still being provisioned`. Seen on the first gate run in
+# staging, immediately after the clone was created.
+NOT_READY = "agent_version_not_ready"
+READY_TIMEOUT_S = 600
+READY_POLL_S = 10
+_sleep = time.sleep
+
+
+def _is_not_ready(exc):
+    code = getattr(getattr(exc, "error", None), "code", None)
+    return code == NOT_READY or NOT_READY in str(exc)
+
+
+def create_session_when_ready(agents, replay_agent, version_indicator,
+                              timeout_s=None, poll_s=None):
+    """create_session, waiting while the new version is provisioned. Any
+    other error, and still not ready after `timeout_s`, is raised."""
+    timeout_s = READY_TIMEOUT_S if timeout_s is None else timeout_s
+    poll_s = READY_POLL_S if poll_s is None else poll_s
+    waited = 0
+    while True:
+        try:
+            return agents.create_session(agent_name=replay_agent,
+                                         version_indicator=version_indicator)
+        except Exception as exc:
+            if not _is_not_ready(exc) or waited >= timeout_s:
+                raise
+        if waited == 0:
+            print(f"  {replay_agent} is still being provisioned; waiting "
+                  f"up to {timeout_s}s", flush=True)
+        _sleep(poll_s)
+        waited += poll_s
+
+
 def routing_problem(agents, replay_agent, temp_version):
     """Why calling `replay_agent` by name might not reach the clone, or None.
 
@@ -1288,10 +1324,9 @@ def main(argv=None):
             # VersionRefIndicator, not VersionIndicator: the latter is the
             # abstract discriminated base and takes no version at all. The
             # field is agent_version.
-            session = agents.create_session(
-                agent_name=replay_agent,
-                version_indicator=models.VersionRefIndicator(
-                    agent_version=str(temp_version)))
+            session = create_session_when_ready(
+                agents, replay_agent,
+                models.VersionRefIndicator(agent_version=str(temp_version)))
             session_id = getattr(session, "agent_session_id", None)
             run_ids["agent_session_id"] = session_id
             print(f"session {session_id} — query: {str(query)[:70]}")
