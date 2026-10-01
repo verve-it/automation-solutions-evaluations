@@ -84,9 +84,20 @@ class FakeProject:
             self.replay_latest = "8"
         return NS(version="8")
 
+    not_ready = 0      # create_session refusals before the version is ready
+    session_error = None
+
     def create_session(self, agent_name, version_indicator):
         self.calls.append(("session", agent_name,
                            version_indicator.agent_version))
+        if self.session_error:
+            raise self.session_error
+        if self.not_ready:
+            self.not_ready -= 1
+            from azure.core.exceptions import HttpResponseError
+            raise HttpResponseError(message=(
+                "(agent_version_not_ready) Agent version is still being "
+                "provisioned. Please try again after some time."))
         return NS(agent_session_id="sess_1")
 
     def stop_session(self, name, session_id):
@@ -300,3 +311,36 @@ def test_a_replay_agent_that_cannot_be_read_stops_before_anything_exists(run):
     assert "cannot read" in str(exc.value)
     assert not project.named("toolbox.create")
     assert not project.named("create")
+
+
+def test_a_version_still_being_provisioned_is_waited_for(run, monkeypatch):
+    """The first staging gate run failed here: create_session straight after
+    create_version_from_code -> agent_version_not_ready."""
+    slept = []
+    monkeypatch.setattr(rr, "_sleep", slept.append)
+    project = FakeProject()
+    project.not_ready = 3
+    assert run(project) == 0
+    assert len(project.named("session")) == 4 and len(slept) == 3
+    assert project.named("delete") or project.named("delete_version")
+
+
+def test_waiting_for_provisioning_gives_up_and_still_cleans_up(run, monkeypatch):
+    monkeypatch.setattr(rr, "_sleep", lambda s: None)
+    monkeypatch.setattr(rr, "READY_TIMEOUT_S", 30)
+    project = FakeProject()
+    project.not_ready = 99
+    with pytest.raises(Exception, match="agent_version_not_ready"):
+        run(project)
+    assert project.named("delete") or project.named("delete_version")
+    assert project.named("toolbox.delete")
+    assert len(project.named("session")) == 4      # 0, 10, 20, 30 s
+
+
+def test_any_other_session_error_is_not_retried(run, monkeypatch):
+    monkeypatch.setattr(rr, "_sleep", lambda s: pytest.fail("retried"))
+    project = FakeProject()
+    project.session_error = RuntimeError("403 Forbidden")
+    with pytest.raises(RuntimeError, match="403"):
+        run(project)
+    assert len(project.named("session")) == 1
