@@ -512,6 +512,68 @@ def test_sas_store_refuses_a_lost_update(blob_stub):
         store.save("k", {}, None)                        # create again -> 409
 
 
+def _lose_response(store, landed):
+    """The next PUT gets no response, as on the deployed instance that timed
+    out. `landed` decides whether the write reached storage first."""
+    import urllib.error
+    real = store._put
+    calls = []
+
+    def put(key, body, headers):
+        calls.append(key)
+        if len(calls) == 1:
+            if landed:
+                real(key, body, headers)
+            raise urllib.error.URLError("timed out")
+        return real(key, body, headers)
+    store._put = put
+    return calls
+
+
+def test_a_save_whose_response_was_lost_but_landed_is_not_written_twice(blob_stub):
+    from state_store import SasBlobStore
+    store = SasBlobStore(blob_stub)
+    version = store.save("k", {"journal": [0]}, None)
+    calls = _lose_response(store, landed=True)
+    etag = store.save("k", {"journal": [0, 1]}, version)
+    state, now = store.load("k")
+    assert state["journal"] == [0, 1] and now == etag
+    assert len(calls) == 1                     # no second PUT
+
+
+def test_a_save_whose_response_was_lost_and_did_not_land_is_retried(blob_stub):
+    """The failure the deployed gate hit: one slow write, refused, gate red."""
+    from state_store import SasBlobStore
+    store = SasBlobStore(blob_stub)
+    version = store.save("k", {"journal": [0]}, None)
+    calls = _lose_response(store, landed=False)
+    etag = store.save("k", {"journal": [0, 1]}, version)
+    state, now = store.load("k")
+    assert state["journal"] == [0, 1] and now == etag
+    assert len(calls) == 2
+    # A first write (create) is settled the same way.
+    calls = _lose_response(store, landed=False)
+    store.save("new", {"journal": [7]}, None)
+    assert store.load("new")[0]["journal"] == [7] and len(calls) == 2
+
+
+def test_a_lost_save_after_another_writer_won_is_a_conflict(blob_stub):
+    import urllib.error
+    from state_store import Conflict, SasBlobStore
+    store = SasBlobStore(blob_stub)
+    version = store.save("k", {"journal": [0]}, None)
+    real = store._put
+
+    def put(key, body, headers):
+        store._put = real
+        real(key, b'{"journal": [0, 9]}', {**headers})   # someone else's write
+        raise urllib.error.URLError("timed out")
+    store._put = put
+    with pytest.raises(Conflict):
+        store.save("k", {"journal": [0, 1]}, version)
+    assert store.load("k")[0]["journal"] == [0, 9]
+
+
 def test_sas_store_keeps_every_call_of_a_replay(blob_stub):
     """The failure this replaces: a journal with 3 of 50 calls in it."""
     from state_store import SasBlobStore

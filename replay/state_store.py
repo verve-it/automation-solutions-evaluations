@@ -205,12 +205,50 @@ class _RestBlobStore:
                    "Content-Type": "application/json"}
         headers["If-Match" if version else "If-None-Match"] = version or "*"
         try:
+            return self._put(key, body, headers)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            # No response: the write may or may not have landed. Seen on a
+            # freshly started instance -- `save failed: URLError: <urlopen
+            # error timed out>` -- with the next call 3 s later fine, and it
+            # failed a whole gate run. A blind retry could apply the call
+            # twice, so read the blob back and decide from what is there.
+            return self._settle_lost_put(key, body, headers, version, exc)
+
+    def _put(self, key, body, headers):
+        try:
             with self._request("PUT", self._url(key), body, headers) as resp:
                 return resp.headers.get("ETag")
         except urllib.error.HTTPError as exc:
             if exc.code in (409, 412):
                 raise Conflict(key) from exc
             raise
+
+    def _settle_lost_put(self, key, body, headers, version, cause):
+        """After a PUT that got no response:
+
+        * the blob holds exactly what we sent -> it landed; return its ETag;
+        * the blob is unchanged from the version we wrote against (or still
+          absent, for a create) -> it did not land; write again, still
+          conditional, so a writer in between is a Conflict, not lost;
+        * anything else -> another writer won; Conflict, which the server
+          answers by reloading and re-applying, as for any lost race.
+        """
+        try:
+            with self._request("GET", self._url(key)) as response:
+                current, etag = response.read(), response.headers.get("ETag")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise cause
+            current, etag = None, None
+        except (urllib.error.URLError, OSError):
+            raise cause
+        if current == body:
+            return etag
+        if (version is None and current is None) or (version and etag == version):
+            return self._put(key, body, headers)
+        raise Conflict(key) from cause
 
     def close(self):
         pass
