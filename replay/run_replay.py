@@ -189,6 +189,17 @@ def routing_problem(agents, replay_agent, temp_version):
     endpoint = getattr(details, "agent_endpoint", None)
     selector = getattr(endpoint, "version_selector", None) if endpoint else None
     rules = getattr(selector, "version_selection_rules", None) if selector else None
+    # Foundry gives every new agent a default selector: one rule, "@latest",
+    # 100% of traffic. That routes by name to the newest version, which is
+    # what the check below confirms is the clone, so it is not a problem. A
+    # rule pinning the clone's own version is equally safe. Anything else --
+    # another version, or traffic split -- can reach a version that is not
+    # the clone.
+    live = [r for r in (rules or [])
+            if str(getattr(r, "traffic_percentage", 100)) not in ("0", "0.0")]
+    if live and all(str(getattr(r, "agent_version", "")).lstrip("v")
+                    in ("@latest", str(temp_version)) for r in live):
+        rules = None
     if rules:
         routed = ", ".join(
             f"v{getattr(r, 'agent_version', '?')} "

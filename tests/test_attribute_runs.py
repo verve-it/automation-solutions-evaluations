@@ -837,6 +837,27 @@ def test_a_version_selector_on_the_replay_agent_is_refused():
         _Agents("98", rules), REPLAY_AGENT, "98")
 
 
+def test_foundrys_default_latest_selector_is_not_a_problem():
+    """Every new agent gets `@latest` at 100%. The first gate run in staging
+    refused its own clone for it: 'has a version selector (v@latest (100%))'."""
+    from types import SimpleNamespace as NS
+    latest = [NS(agent_version="@latest", traffic_percentage=100)]
+    assert rr.routing_problem(_Agents("98", latest), REPLAY_AGENT, "98") is None
+    # ...but @latest must still be the clone.
+    assert "resolves to v97" in rr.routing_problem(
+        _Agents("97", latest), REPLAY_AGENT, "98")
+
+
+def test_a_selector_pinned_to_the_clone_is_safe_and_a_split_is_not():
+    from types import SimpleNamespace as NS
+    pinned = [NS(agent_version="98", traffic_percentage=100)]
+    assert rr.routing_problem(_Agents("98", pinned), REPLAY_AGENT, "98") is None
+    split = [NS(agent_version="@latest", traffic_percentage=50),
+             NS(agent_version="5", traffic_percentage=50)]
+    assert "version selector" in rr.routing_problem(
+        _Agents("98", split), REPLAY_AGENT, "98")
+
+
 def test_the_hosted_clone_takes_the_base_agents_code_and_the_replay_name():
     agents = _Agents("98")
     rr.HostedBinding().create(agents, REPLAY_AGENT, {}, description="",
