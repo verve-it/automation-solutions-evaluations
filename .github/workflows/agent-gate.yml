@@ -44,6 +44,15 @@ on:
         description: "Ref of this repository to run the gate from."
         type: string
         default: main
+      gate-agents:
+        description: >-
+          Comma-separated agent names whose recordings to replay, e.g. the
+          agents the calling repository deploys. Empty replays every
+          single-agent recording. This only chooses among recordings: each
+          one still replays the agent it recorded, never another. A name with
+          no recording fails the gate rather than passing untested.
+        type: string
+        default: ""
     secrets:
       REPLAY_TOKEN:
         description: "Bearer token the hosted replay server requires."
@@ -57,6 +66,9 @@ on:
       min-score:
         type: string
         default: "0"
+      gate-agents:
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -149,17 +161,26 @@ jobs:
         env:
           REPLAY_TOKEN: ${{ secrets.REPLAY_TOKEN }}
           AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
+          GATE_AGENTS: ${{ inputs.gate-agents }}
         run: |
           set -o pipefail
           mkdir -p artifacts
           shopt -s nullglob
+          wanted=" $(echo "$GATE_AGENTS" | tr ',' ' ' | xargs) "
           ran=0
+          covered=" "
           for cassette in cassettes/*.json; do
             agents=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))['agents']))" "$cassette")
             if [ "$agents" != "1" ]; then
               echo "skip  $(basename "$cassette")  $agents agents — children would reach live ConnectWise"
               continue
             fi
+            agent=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['agents'][0])" "$cassette")
+            if [ "$wanted" != "  " ] && [[ "$wanted" != *" $agent "* ]]; then
+              echo "skip  $(basename "$cassette")  $agent — not in gate-agents"
+              continue
+            fi
+            covered="$covered$agent "
             id=$(basename "$cassette" .json)
             echo "::group::replay $id"
             python replay/run_replay.py \
@@ -171,6 +192,12 @@ jobs:
                 | tee "artifacts/replay-$id.log"
             echo "::endgroup::"
             ran=$((ran + 1))
+          done
+          for name in $wanted; do
+            if [[ "$covered" != *" $name "* ]]; then
+              echo "::error::gate-agents names $name, but there is no single-agent recording of it, so it would pass untested"
+              exit 1
+            fi
           done
           if [ "$ran" = "0" ]; then
             echo "::error::no single-agent cassette to replay, so nothing was gated"

@@ -53,6 +53,9 @@ jobs:
     uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
     with:
       environment: staging
+      # The agents this repository deploys. Only their recordings replay, so
+      # the project's other agents need not be deployed for this gate.
+      gate-agents: ""
     secrets: inherit
 
   deploy-prod:

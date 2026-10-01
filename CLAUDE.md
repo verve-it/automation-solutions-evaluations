@@ -317,7 +317,10 @@ What is refused **before** anything is created, because a check in the trace
 comes after the writes: another agent than the cassette recorded (an
 orchestrator on a single-agent cassette reaches its children by name, live),
 and a hosted agent whose environment names another agent in the project.
-The gate has no `agent:` input for the same reason.
+The gate has no `agent:` input for the same reason. It has `gate-agents`,
+which only **chooses among** recordings -- each still replays the agent it
+recorded -- so a caller gates its own agents without the rest of the project
+being deployed; a name with no single-agent recording fails the gate.
 
 ## The stub answers calls that arrive together
 
