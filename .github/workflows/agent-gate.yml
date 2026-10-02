@@ -461,20 +461,34 @@ jobs:
       - name: Score it in Foundry, for the detail view
         if: always() && steps.score.outcome != 'skipped'
         run: |
+          set -o pipefail
           python foundry/to_foundry_dataset.py out/raw/replay-spans.json \
               --expected expected.json --tool-defs tool_manifests/ \
               --no-messages -o out/raw/foundry-dataset.jsonl
+          # --no-lock: evaluator-versions.json pins the versions registered
+          # in one project, and an evaluator's version numbers are per
+          # project, so the gate's project floats to its latest. This view
+          # does not gate; the verdict above does.
+          #
+          # Not a red build when it fails, but never silent either: the
+          # 2026-10-02 run was green with no Foundry run at all, because the
+          # evaluators were not registered in this project and `| tee` hid
+          # the exit.
+          rc=0
           python foundry/run_cloud_eval.py out/raw/foundry-dataset.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --name "gate-${{ inputs.environment }}" \
               --dataset-version "$(date -u +%Y%m%dT%H%M%SZ)" \
-              | tee artifacts/foundry-run.log
-          url=$(grep -o 'https://[^ ]*' artifacts/foundry-run.log | tail -1 || true)
-          {
-            echo ""
-            echo "[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
-          } >> "$GITHUB_STEP_SUMMARY"
+              --no-lock 2>&1 | tee artifacts/foundry-run.log || rc=$?
+          if [ "$rc" = "0" ]; then
+            url=$(grep -o 'https://[^ ]*' artifacts/foundry-run.log | tail -1 || true)
+            line="[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
+          else
+            echo "::warning::No Foundry evaluation was created; the gate verdict stands. See foundry-run.log in the artifact."
+            line="No Foundry evaluation was created this run (see foundry-run.log). If it says 'not registered', run foundry/register_evaluators.py against this project once."
+          fi
+          { echo ""; echo "$line"; } >> "$GITHUB_STEP_SUMMARY"
 
       # Verdicts and provenance — never the raw export.
       #
