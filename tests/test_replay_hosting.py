@@ -239,6 +239,57 @@ def test_two_sessions_do_not_share_a_cursor(hosted):
     assert body_a2["result"]["content"][0]["text"] == "second"
 
 
+def test_a_session_header_sent_twice_is_one_session(hosted):
+    """What Foundry's toolbox actually sends: the configured session plus
+    the echoed one, joined by the Functions host. Observed in the state
+    container as `<cassette>.<id>, <id>.json` for every gated replay."""
+    call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "cw_get_ticket",
+                       "arguments": {"ticket_number": 1}}}
+    _, headers = _post(hosted, "/mcp/fixture",
+                       {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                       session="abc123")
+    assert headers["Mcp-Session-Id"] == "abc123"
+    _post(hosted, "/mcp/fixture", call, session="abc123, abc123")
+    _post(hosted, "/mcp/fixture", call, session="abc123")
+
+    mine = _get(hosted, "/summary/fixture", session="abc123")
+    assert mine["session"] == "abc123"
+    assert mine["replayed_calls"] == 2
+    assert _get(hosted, "/summary/fixture", session="abc123,abc123") \
+        ["replayed_calls"] == 2
+
+
+def test_two_different_sessions_in_one_header_are_refused(hosted):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(hosted, "/mcp/fixture",
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+               "params": {"name": "cw_get_ticket",
+                          "arguments": {"ticket_number": 1}}},
+              session="aaa, bbb")
+    assert exc.value.code == 400
+    assert "2 different sessions" in json.loads(exc.value.read()) \
+        ["error"]["message"]
+
+
+def test_closing_a_session_is_refused_and_keeps_the_journal(hosted):
+    _, headers = _post(hosted, "/mcp/fixture",
+                       {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    session = headers["Mcp-Session-Id"]
+    _post(hosted, "/mcp/fixture",
+          {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+           "params": {"name": "cw_get_ticket",
+                      "arguments": {"ticket_number": 1}}}, session=session)
+    req = urllib.request.Request(hosted + "/mcp/fixture", method="DELETE")
+    req.add_header("Authorization", "Bearer s3cret")
+    req.add_header("Mcp-Session-Id", session)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req)
+    assert exc.value.code == 405
+    assert _get(hosted, "/summary/fixture", session=session) \
+        ["replayed_calls"] == 1
+
+
 def test_ordered_playback_across_calls(hosted):
     _, headers = _post(hosted, "/mcp/fixture",
                        {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
