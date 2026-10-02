@@ -188,6 +188,17 @@ def routing_failures(m, row, rows):
                     "reached the stub cannot be told from a local one. "
                     "Re-run the replay with this run_replay.py.", False))
         return out
+    if row.get("content_missing"):
+        # Before anything that reads tool names: without its arguments the
+        # ops agent's `call_tool` wrapper cannot be unwrapped, and the call
+        # would read as a bypass -- a hard failure -- rather than a wait.
+        out.append((f"run {op[:12]} has {row['content_missing']} span(s) "
+                    "whose AppGenAIContent row was not in the export, so "
+                    "their arguments and results are App Insights' "
+                    "placeholder. Not fully ingested yet: the content table "
+                    "lands after the spans (22 s seen). If it never arrives, "
+                    "check the content row exists for those spans.", True))
+        return out
     every, remote = tool_counts(row, local)
     if honoured is False:
         out.append(("the replay server saw calls, but not under this replay's "
