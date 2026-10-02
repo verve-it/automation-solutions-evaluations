@@ -35,7 +35,7 @@ from __future__ import annotations
 import argparse, json, os, sys
 from collections import Counter, defaultdict
 
-from trace_to_eval import base_tool_name
+from trace_to_eval import CONTENT_PLACEHOLDER, base_tool_name
 
 # ---------------------------------------------------------------- helpers
 
@@ -305,26 +305,39 @@ def check_valid_tool_args(run, cfg):
     if not index:
         return _skip("no tool schemas (run the converter with --tool-defs)")
 
-    checked, problems = 0, []
+    checked, problems, unavailable = 0, [], 0
     for action in run.get("actions", []):
         for part in action.get("content", []):
             name = base_tool_name(part.get("name", ""))
             schema = index.get(name)
             if schema is None:
                 continue
+            raw = part.get("arguments") or "{}"
+            # App Insights' stand-in for arguments it holds in
+            # AppGenAIContent: not the call's arguments, so not judged.
+            if isinstance(raw, str) and raw.startswith(CONTENT_PLACEHOLDER):
+                unavailable += 1
+                continue
+            # Counted before parsing: a call whose arguments do not parse is
+            # a validated call that failed. Counted after, a run whose only
+            # schema'd calls were malformed skipped as "no call matched".
+            checked += 1
             try:
-                args = json.loads(part.get("arguments") or "{}")
+                args = json.loads(raw)
             except json.JSONDecodeError:
-                problems.append(f"{name}: arguments are not JSON")
+                problems.append(f"{name}: arguments are not JSON "
+                                f"({len(raw)} chars)")
                 continue
             if not isinstance(args, dict):
                 problems.append(f"{name}: arguments are not an object")
                 continue
-            checked += 1
             for p in validate_args(args, schema):
                 problems.append(f"{name}: {p}")
 
     if not checked:
+        if unavailable:
+            return _skip(f"arguments of {unavailable} call(s) not ingested "
+                         "(AppGenAIContent placeholder)")
         return _skip(f"no call matched a schema ({len(index)} tool(s) known)")
     if not problems:
         return _pass(f"{checked} call(s) validated", checked=checked)

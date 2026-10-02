@@ -100,6 +100,37 @@ def test_check_passes_on_good_arguments():
     assert e.check_valid_tool_args(r, {})["passed"] is True
 
 
+def _raw_action(name, raw):
+    return {"role": "assistant",
+            "content": [{"type": "function_call", "name": name,
+                         "arguments": raw}]}
+
+
+def test_a_run_whose_only_call_is_malformed_fails_rather_than_skips():
+    """Counted only after a successful parse, a malformed only-call left
+    `checked` at 0 and the check skipped as "no call matched a schema" --
+    lost coverage with a false reason, and a malformed call never reported."""
+    r = run(tool_definitions=DEFS,
+            actions=[_raw_action("cw_resolve", '{"reference_type": "company"')])
+    res = e.check_valid_tool_args(r, {})
+    assert res["passed"] is False and res["checked"] == 1
+    assert "not JSON (28 chars)" in res["reason"]
+
+
+def test_placeholder_arguments_are_not_judged():
+    placeholder = "This attribute has moved to the genAIContent table."
+    r = run(tool_definitions=DEFS,
+            actions=[_raw_action("cw_resolve", placeholder),
+                     action("cw_resolve", {"reference_type": "company",
+                                           "query": "x"})])
+    res = e.check_valid_tool_args(r, {})
+    assert res["passed"] is True and res["checked"] == 1
+    only = run(tool_definitions=DEFS,
+               actions=[_raw_action("cw_resolve", placeholder)])
+    res = e.check_valid_tool_args(only, {})
+    assert res["passed"] is None and "not ingested" in res["reason"]
+
+
 # --- trajectory -------------------------------------------------------------
 
 def test_trajectory_allows_extra_steps_but_requires_order():
