@@ -497,6 +497,20 @@ def test_a_local_tool_this_recording_never_used_is_not_a_bypass(w):
     assert w.attribute(spans=w.spans + [search]) == 0
 
 
+def test_the_models_parallel_wrapper_is_not_expected_at_the_stub():
+    """gpt models sometimes emit `multi_tool_use.parallel` as a tool call.
+    Every replay of triage-analysis-agent on 2026-10-02 did; the spans had
+    no children and an empty result, and attribution refused all five runs
+    as stub bypasses. It is in the shipped config, so it is local."""
+    with open(os.path.join(REPO, "eval-config.json"), encoding="utf-8") as fh:
+        config = json.load(fh)
+    assert "multi_tool_use.parallel" in config["local_tools"]
+    row = {"tool_names": ["multi_tool_use.parallel", PREFIXED + "cw_search"]}
+    every, remote = ar.tool_counts(row, config["local_tools"])
+    assert every["multi_tool_use.parallel"] == 1
+    assert dict(remote) == {"cw_search": 1}
+
+
 def test_local_tools_come_from_config_and_every_recording_of_the_agent(
         tmp_path, monkeypatch):
     a = tmp_path / "a.json"
