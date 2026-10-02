@@ -48,6 +48,25 @@ def test_candidate_query_filters_thin_traces_and_ranks():
     assert "order by usable asc" in q
 
 
+def test_standalone_counts_every_agent_in_the_operation():
+    """Filtered to the named agent before counting, an orchestration in which
+    it is a child counts as single-agent, and the gate gets a multi-agent
+    cassette it cannot replay. The agent picks the operations; the count is
+    over all of their spans."""
+    q = x.candidates_query("AppDependencies", ["triage-analysis-agent"], 1, 5,
+                           standalone=True)
+    picked, ranked = q.split(";\n", 1)
+    assert picked.startswith("let ops = AppDependencies")
+    assert '"triage-analysis-agent"' in picked
+    assert "distinct operation_Id" in picked
+    assert "where operation_Id in (ops)" in ranked
+    assert "where agent in" not in ranked
+    assert "agent_count = dcountif(agent, isnotempty(agent))" in ranked
+    assert ranked.index("where agent_count == 1") < ranked.index("limit 5")
+    default = x.candidates_query("AppDependencies", ["a"], 1, 5)
+    assert "agent_count == 1" not in default and "let ops" not in default
+
+
 def test_candidate_query_tracks_tool_definitions_availability():
     """The signal that says the manifest gap has closed at the source."""
     q = x.candidates_query("dependencies", ["a"], 1, 5)

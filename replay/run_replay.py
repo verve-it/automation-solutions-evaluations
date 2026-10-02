@@ -20,6 +20,10 @@ recorded trace.
     python3 replay/run_replay.py --cassette cassettes/2026-09-03-4dda7f4fa5f0.json \\
         --agent triage-orchestrator --server-url https://replay.example.net/mcp
 
+    # a recording no deployment carries: uploaded for this run, then deleted
+    python3 replay/run_replay.py --cassette out/raw/cassettes/<id>.json \\
+        --server-url https://replay.example.net --upload
+
     # see exactly what it would do to the project, touch nothing
     python3 replay/run_replay.py --cassette ... --agent ... --dry-run
 
@@ -386,6 +390,25 @@ def summary(base, token=None, session=None):
         body = exc.read().decode("utf-8", "replace")[:500]
         raise SystemExit(f"GET {summary_url(base)} returned {exc.code}: "
                          f"{body or exc.reason}")
+
+
+def _cassette_http(method, url, token, body=None, session=None):
+    """The status of a PUT or DELETE on the hosted server's /cassettes/<id>,
+    or the exception's class when there is none. Never the body: the request
+    was a recording, and this prints to a public job log."""
+    req = urllib.request.Request(url, body, method=method,
+                                 headers={"Content-Type": "application/json"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if session:
+        req.add_header("Mcp-Session-Id", session)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except OSError as exc:
+        return type(exc).__name__
 
 
 # ------------------------------------------------------------------- binding
@@ -1002,6 +1025,11 @@ def recorded_local_tools(cassette_path):
         unprefixed -- so a local tool this recording happened not to use does
         not make an unchanged agent look like a bypass.
 
+    A write is never local, whatever a recording did: the recordings are the
+    agent's live runs, which nobody reviews. In review, one unprefixed
+    `cw_update` planted in a fetched recording made attribution count it as
+    local, so a replay that sent that write around the stub passed.
+
     None when the cassette cannot be read: attribution refuses a manifest
     without the list rather than guessing.
     """
@@ -1010,7 +1038,8 @@ def recorded_local_tools(cassette_path):
             data = json.load(fh)
         return (data.get("agents") or [None])[0], {
             i["tool"] for i in data.get("interactions") or []
-            if i.get("tool") and "___" not in i["tool"]}
+            if i.get("tool") and "___" not in i["tool"]
+            and not i.get("is_write")}
 
     try:
         agent, names = unprefixed(cassette_path)
@@ -1204,6 +1233,10 @@ def main(argv=None):
                          "REPLAY_AGENT_SUFFIX.")
     ap.add_argument("--server-url", help="where FOUNDRY reaches the replay "
                                          "server. Not localhost.")
+    ap.add_argument("--upload", action="store_true",
+                    help="--server-url is the hosted server's base URL: PUT "
+                         "the cassette there for this run, replay it as "
+                         "/mcp/rt-<id>, and DELETE it afterwards")
     ap.add_argument("--serve", action="store_true",
                     help="run replay_server.py locally as a subprocess")
     ap.add_argument("--port", type=int, default=8901)
@@ -1271,7 +1304,7 @@ def main(argv=None):
     # Chosen here so the journal can be read back. See replay_tools().
     replay_session = uuid.uuid4().hex
 
-    proc = None
+    proc = upload_url = cassette_id = None
     if args.serve:
         proc, base = serve(args.cassette, args.port, args.tool_defs,
                            args.journal)
@@ -1281,7 +1314,14 @@ def main(argv=None):
         server_url = args.server_url
         if not server_url:
             sys.exit("--server-url is required unless --serve is given")
+        if args.upload:
+            # The recording is fetched for this gate run, so no deployment
+            # carries it: it goes up under an id of this replay's own.
+            cassette_id = f"rt-{replay_session[:20]}"
+            upload_url = f"{server_url.rstrip('/')}/cassettes/{cassette_id}"
+            server_url = f"{server_url.rstrip('/')}/mcp/{cassette_id}"
 
+    uploaded = False
     try:
         if is_locally_scoped(server_url) and not args.allow_local:
             sys.exit(
@@ -1377,6 +1417,24 @@ def main(argv=None):
                     "name, at their production versions, against the live "
                     "toolbox -- the replay can only stub the agent it clones. "
                     "Nothing was created.")
+            # The environment is not enough: the orchestrator's holds only
+            # AZURE_AI_MODEL_DEPLOYMENT_NAME, its children's names are
+            # defaults in its code, and one of its live runs whose hand-offs
+            # failed before the children emitted a span is a single-agent
+            # recording. Replayed, it passed every check here and invoked.
+            try:
+                reads, _hosts = code_env_reads(
+                    agents, args.agent, getattr(base, "version", None))
+            except CodeUnreadable as exc:
+                sys.exit(f"cannot read {args.agent}'s code to check it names "
+                         f"no other agent: {exc}. Nothing was created.")
+            delegates = sorted(r for r in reads if r.endswith("_AGENT_NAME"))
+            if delegates:
+                sys.exit(
+                    f"{args.agent} reads {', '.join(delegates)} in its code. "
+                    "It reaches those agents by name, at their production "
+                    "versions, against the live toolbox -- the replay can "
+                    "only stub the agent it clones. Nothing was created.")
         base_version = getattr(base, "version", None) or "latest"
         print(f"binding    : kind={definition_kind(payload)} — "
               f"{binding.describe_plan(payload)}")
@@ -1384,6 +1442,19 @@ def main(argv=None):
         print(f"replay as  : {replay_agent} "
               + ("(exists)" if replay_existed
                  else "(created by this run, deleted after it)"))
+
+        if upload_url:
+            # Before anything is created: a server without the recording
+            # answers every call 404, after the agent has been invoked. Set
+            # first, so a PUT that landed and lost its response is deleted.
+            uploaded = True
+            with open(args.cassette, "rb") as fh:
+                status = _cassette_http("PUT", upload_url, args.token,
+                                        fh.read())
+            if status != 201:
+                sys.exit(f"could not upload the cassette to the replay "
+                         f"server: {status}. Nothing was created.")
+            print(f"uploaded   : {cassette_id}")
 
         prepare_binding(binding, client=client, server_url=server_url,
                         token=args.token, session=replay_session,
@@ -1430,6 +1501,8 @@ def main(argv=None):
                                       if getattr(binding, "toolbox", None)
                                       else None),
                    "started_utc": _utcnow()}
+        if cassette_id:
+            run_ids["cassette_id"] = cassette_id
         try:
             for attempt in range(1 + BUILD_RETRIES):
                 problem = routing_problem(agents, replay_agent, temp_version)
@@ -1523,6 +1596,15 @@ def main(argv=None):
         return 0 if ok else 1
 
     finally:
+        # After the journal is read, and after any failure: the recording is
+        # this run's alone. Best effort -- a cassette left behind is in the
+        # private state container, under an id nothing will ask for again.
+        if uploaded:
+            status = _cassette_http("DELETE", upload_url, args.token,
+                                    session=replay_session)
+            if status != 204:
+                print(f"WARNING  could not delete the uploaded cassette "
+                      f"{cassette_id}: {status}")
         if proc:
             proc.terminate()
 

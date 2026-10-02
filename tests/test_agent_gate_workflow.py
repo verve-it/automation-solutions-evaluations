@@ -124,9 +124,8 @@ def test_the_export_is_windowed_to_this_replay(steps):
     unrelated success diluted a failure. Either way the gate stops meaning
     what it says.
     """
-    export = [s for s in steps if "export_traces.py" in s.get("run", "")]
-    assert len(export) == 1
-    run = export[0]["run"]
+    run = _step(steps, "attribute")
+    assert "export_traces.py" in run
     assert "--since" in run and "--until" in run
     assert "--hours" not in run
     assert "steps.window.outputs" in run
@@ -423,24 +422,174 @@ def test_the_gate_has_no_agent_override(workflow):
     assert "inputs.agent" not in open(GATE, encoding="utf-8").read()
 
 
-def test_gate_agents_only_chooses_among_recordings(workflow):
-    """A caller gates its own agents, so the others need not exist in the
-    project. The filter picks recordings; the agent replayed is still the
-    one each recorded, and a name with no recording fails rather than
-    passing untested."""
-    inputs = workflow[True]["workflow_call"]["inputs"]
-    assert inputs["gate-agents"]["default"] == ""
-    step = [s for s in workflow["jobs"]["replay"]["steps"]
-            if "run_replay.py" in s.get("run", "")][0]
-    assert step["env"]["GATE_AGENTS"] == "${{ inputs.gate-agents }}"
-    assert "--agent " not in step["run"]
-    assert "no single-agent recording of it" in step["run"]
+def _bash(script, cwd, **env):
+    """A step's own bash, under GitHub's `bash -e`, with the job's env and
+    `${{ }}` stubbed."""
+    import re
+    import subprocess
+    if os.name == "nt":
+        pytest.skip("runs the Linux runner's bash")
+    script = re.sub(r"\$\{\{[^}]*\}\}", "X", script)
+    job = {k: str(v) for k, v in _load(GATE)["jobs"]["replay"]["env"].items()}
+    return subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", script],
+                          cwd=cwd, env=dict(os.environ, **job, **env),
+                          capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("agents,ok", [("", False), (" , ", False),
+                                       ("ops", True), ("ops, triage-a", True),
+                                       ("../x", False), ("ops *", False),
+                                       ("ops triage", False), ("-o", False),
+                                       ("a,b,c,d", True), ("a,b,c,d,e", False)])
+def test_gate_agents_is_required_and_only_names(steps, tmp_path, agents, ok):
+    """Recordings are fetched per agent, so an empty gate-agents has nothing
+    to gate; each name becomes a path under out/raw/; and preflight splits on
+    commas only, so "ops triage" was two agents to the fetch and one to it.
+    More agents than the job has time to replay is refused up front."""
+    check = next(s for s in steps if s.get("name") == "Check the gate is configured")
+    assert check["env"]["GATE_AGENTS"] == "${{ inputs.gate-agents }}"
+    p = _bash(check["run"], tmp_path, REF="main", GATE_AGENTS=agents)
+    assert (p.returncode == 0) is ok, p.stdout + p.stderr
+    if agents.strip(" ,") == "":
+        assert "::error::gate-agents is empty" in p.stdout
+
+
+def test_the_gate_reads_no_committed_recording(steps):
+    """Recordings and their baselines are this run's, fetched live; the
+    committed traces and baselines are the eval-code frozen sets only."""
+    text = _run_text(steps)
+    assert "make cassettes" not in text
+    assert "traces/" not in text and "--baselines baselines" not in text
+    assert "--cassettes out/raw/cassettes --baselines out/raw/baselines" in text
+    assert "--baselines out/raw/baselines" in _step(steps, "attribute")
+
+
+def test_the_fetch_writes_only_under_out_raw(steps):
+    import re
+    fetch = next(s for s in steps if s.get("name") == "Fetch live recordings")
+    run = fetch["run"]
+    written = [m.group(1).strip('"') for m in re.finditer(
+        r"(?:\s-o|--json|>)\s+(\S+)", run)]
+    assert len(written) >= 5, written
+    assert all(w.startswith("out/raw/") for w in written), written
+    for raw in ("out/raw/recorded", "out/raw/cassettes", "out/raw/baselines",
+                "out/raw/recorded-rows"):
+        assert raw in run, raw
+    assert "--standalone" in run and "--strict" in run
+    assert fetch["env"]["WORKSPACES"] == ("${{ secrets.RECORDINGS_WORKSPACE_IDS"
+                                          " || secrets.LOG_ANALYTICS_WORKSPACE_ID }}")
+
+
+def test_recordings_workspaces_are_optional(workflow):
+    secrets = workflow[True]["workflow_call"]["secrets"]
+    assert secrets["RECORDINGS_WORKSPACE_IDS"]["required"] is False
+
+
+def test_verify_and_every_replay_upload_the_recording(steps):
+    verify = _command(_run_text(steps), "verify.py")
+    assert "--cassette-dir out/raw/cassettes --upload" in verify
+    replay = _command(_run_text(steps), "run_replay.py")
+    assert '--server-url "${{ vars.REPLAY_SERVER_URL }}" --upload' in replay
+    assert "/mcp/" not in replay
+    assert "out/raw/cassettes/*.json" in _run_text(steps)
+
+
+FETCH_PY = r'''#!/usr/bin/env python3
+import json, os, sys
+script, args = sys.argv[1], sys.argv[2:]
+arg = lambda flag: args[args.index(flag) + 1]
+if script == "export_traces.py":
+    open(os.environ["LOG"], "a").write(" ".join(args) + "\n")
+    # FAIL lists the workspaces that cannot be read
+    if arg("--workspace") in os.environ.get("FAIL", "").split():
+        sys.exit(1)
+    # HAS lists the "<workspace>:<agent>" pairs that have a standalone run
+    if f"{arg('--workspace')}:{arg('--agents')}" in os.environ["HAS"].split():
+        json.dump([], open(arg("-o"), "w"))
+elif script == "replay/make_cassette.py":
+    os.makedirs(arg("-o"), exist_ok=True)
+    name = os.path.basename(args[0])
+    json.dump({"agents": [name[:-5]]}, open(os.path.join(arg("-o"), name), "w"))
+elif script == "trace_to_eval.py":
+    os.makedirs(arg("-o"), exist_ok=True)
+elif script == "run_evals.py":
+    json.dump([], open(arg("--json"), "w"))
+    print("CANARY-RUN-EVALS-STDOUT")
+    sys.exit(1)        # a recorded run that fails a check is a baseline
+else:
+    sys.exit("unexpected python " + script)
+'''
+
+
+def _run_fetch(steps, tmp_path, has, fail=""):
+    fetch = next(s for s in steps if s.get("name") == "Fetch live recordings")
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "python").write_text(FETCH_PY, encoding="utf-8")
+    (bin_ / "python").chmod(0o755)
+    return _bash(fetch["run"], tmp_path, PATH=f"{bin_}:{os.environ['PATH']}",
+                 HAS=has, FAIL=fail, LOG=str(tmp_path / "exports.log"),
+                 GATE_AGENTS="ops, triage",
+                 WORKSPACES="11111111-prod,22222222-stg")
+
+
+def test_the_fetch_prefers_the_first_workspace_and_names_only_its_place(
+        steps, tmp_path):
+    p = _run_fetch(steps, tmp_path, "22222222-stg:ops 11111111-prod:triage "
+                                    "22222222-stg:triage")
+    out = p.stdout + p.stderr
+    assert p.returncode == 0, out
+    assert "ops: 1 recording(s) from workspace 2 of 2" in out
+    assert "triage: 1 recording(s) from workspace 1 of 2" in out
+    assert "11111111" not in out and "22222222" not in out
+    assert "CANARY-RUN-EVALS-STDOUT" not in out
+    raw = tmp_path / "out" / "raw"
+    assert sorted(os.listdir(raw / "cassettes")) == ["ops.json", "triage.json"]
+    assert sorted(os.listdir(raw / "baselines")) == ["ops.json", "triage.json"]
+
+
+def test_the_fetch_takes_settled_runs_and_shares_out_the_replays(
+        steps, tmp_path):
+    """The newest runs are picked first, and one not fully ingested became
+    a recording of placeholders. Five per agent did not fit two agents in
+    the job's 60 minutes."""
+    import datetime as dt
+    p = _run_fetch(steps, tmp_path, "11111111-prod:ops 11111111-prod:triage")
+    assert p.returncode == 0, p.stdout + p.stderr
+    log = (tmp_path / "exports.log").read_text(encoding="utf-8").split("\n")
+    for line in filter(None, log):
+        args = line.split()
+        until = dt.datetime.fromisoformat(
+            args[args.index("--until") + 1].replace("Z", "+00:00"))
+        age = dt.datetime.now(dt.timezone.utc) - until
+        assert dt.timedelta(minutes=29) < age < dt.timedelta(minutes=31)
+        assert args[args.index("--max-orchestrations") + 1] == "2"
+
+
+def test_an_unreadable_workspace_moves_on_to_the_next(steps, tmp_path):
+    """Production's is first; a role not granted there yet must not stop
+    the gate before it tries staging's."""
+    p = _run_fetch(steps, tmp_path, "22222222-stg:ops 22222222-stg:triage",
+                   fail="11111111-prod")
+    out = p.stdout + p.stderr
+    assert p.returncode == 0, out
+    assert "::warning::cannot read recordings workspace 1 of 2" in out
+    assert "Log Analytics Reader" in out
+    assert "ops: 1 recording(s) from workspace 2 of 2" in out
+    assert "11111111" not in out and "22222222" not in out
+
+
+def test_an_agent_with_no_recording_fails_the_fetch_by_name(steps, tmp_path):
+    p = _run_fetch(steps, tmp_path, "11111111-prod:triage")
+    assert p.returncode == 1
+    assert ("::error::ops has no recording to replay: it needs at least one "
+            "standalone run with a tool call in the last 14 days") in p.stdout
 
 
 def test_the_gate_scores_attributed_runs_strictly(steps):
     """Scored as exported, a replay has a new operation_Id, matches no
     baseline row, and the gate passes whatever the agent did."""
-    score = [s for s in steps if "run_evals.py" in s.get("run", "")][0]["run"]
+    score = _step(steps, "score")
     assert "out/replay/eval_runs.jsonl" in score
     assert "--baseline artifacts/replay-baseline.json" in score
     assert "--strict-baseline" in score
@@ -627,7 +776,7 @@ def test_preflight_runs_before_anything_is_created(steps):
     first clone: the point is seconds, not a failure 25 minutes in."""
     names = [s.get("name", "") for s in steps]
     pre = names.index("Preflight")
-    assert names.index("Build cassettes from the committed traces") < pre
+    assert names.index("Fetch live recordings") < pre
     assert pre < names.index("Verify the replay server serves what we recorded")
     assert pre < names.index("Replay each single-agent cassette against "
                              "stubbed tools")

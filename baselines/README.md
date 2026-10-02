@@ -18,7 +18,7 @@ case, and they move independently.
 |---|---|---|---|
 | `full-triage-2026-09-18.json` | `traces/2026-09-03-full-triage.json` | 5/7 runs pass | Known-good. Two full orchestrations, seven agent runs, 715 spans. |
 | `ops-worst-case-2026-09-18.json` | `traces/2026-09-15-ops-worst-case.json` | 0/2 runs pass | Known-bad. The two worst observed ops runs. |
-| `triage-analysis-2026-09-23.json` | `traces/2026-09-23-triage-analysis.json` | 2/5 runs pass | Standalone triage-analysis runs, read-only. The same runs are the agent gate's cassettes for `triage-analysis-agent`. |
+| `triage-analysis-2026-09-23.json` | `traces/2026-09-23-triage-analysis.json` | 2/5 runs pass | Standalone triage-analysis runs, read-only. |
 
 Re-frozen 2026-09-18 when the traces moved to their scrubbed JSON forms. Two
 things changed and both are improvements, not drift:
@@ -49,11 +49,9 @@ The current three are `full-triage-2026-09-18.json`,
 `ops-worst-case-2026-09-18.json` and `triage-analysis-2026-09-23.json` — what
 the Makefile, `tasks.ps1` and `evals.yml` all name.
 
-## The agent gate reads all of them
+## The agent gate reads none of them
 
-`agent-gate.yml` names no baseline file. `replay/attribute_runs.py` finds the
-row for each replayed recording across **every** file here, and refuses a
-recording that appears in two — so "one baseline per trace set" is now load
-bearing, not tidiness. A replayed cassette with no baseline row fails the gate
-rather than going uncompared: freeze one from the trace the cassette came
-from.
+These are the eval-code frozen sets. The agent gate fetches each agent's
+recent runs when it starts and scores their baselines in the same job, under
+`out/raw/baselines/`; `replay/attribute_runs.py` finds each replayed
+recording's row there and refuses one that appears in two files.

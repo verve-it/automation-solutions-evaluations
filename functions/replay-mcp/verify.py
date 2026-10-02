@@ -6,8 +6,9 @@ verify.py — prove the hosted replay server is a faithful stub.
         --token "$REPLAY_TOKEN"
 
 Deploying it is not the same as it being right. This replays every cassette
-the server carries, from the local copy of the same recording, and checks the
-things the gate rests on:
+the server carries, from the local copy of the same recording -- or, with
+--upload, every local cassette, uploaded for the check and deleted after, as
+the gate uses them -- and checks the things the gate rests on:
 
   1. Every recorded call comes back byte-identical.
   2. Writes are replayed as recorded successes and nothing is written.
@@ -50,6 +51,7 @@ class Client:
         self.base = base.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.sessions = {}      # cassette -> the sessions initialize issued
 
     def _request(self, method, path, body=None, session=None):
         url = self.base + path
@@ -71,7 +73,9 @@ class Client:
         body, headers = self._request(
             "POST", f"/mcp/{cassette}",
             {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-        return body, headers.get("Mcp-Session-Id")
+        session = headers.get("Mcp-Session-Id")
+        self.sessions.setdefault(cassette, []).append(session)
+        return body, session
 
     def tools(self, cassette, session):
         body, _ = self._request(
@@ -89,6 +93,17 @@ class Client:
     def summary(self, cassette, session):
         return self._request("GET", f"/summary/{cassette}",
                              session=session)[0]
+
+    def upload(self, cassette, recording):
+        self._request("PUT", f"/cassettes/{cassette}", recording)
+
+    def delete(self, cassette):
+        """The cassette, and every session the checks opened on it: a
+        session's journal is keyed by the call's arguments, which are a live
+        run's, unscrubbed. Left behind, 4 of 8 blobs after one verify held
+        a marker planted in the recordings."""
+        for session in self.sessions.pop(cassette, None) or [None]:
+            self._request("DELETE", f"/cassettes/{cassette}", session=session)
 
 
 def local_cassette(cassette_dir, cassette_id):
@@ -471,6 +486,10 @@ def main(argv=None):
                     help="local recordings to compare against")
     ap.add_argument("--cassette", action="append",
                     help="check only this one; repeatable")
+    ap.add_argument("--upload", action="store_true",
+                    help="check each cassette in --cassette-dir by uploading "
+                         "it under a throwaway rt-verify-* id, and delete it "
+                         "after; what is deployed is not required")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print every mismatch")
     ap.add_argument("-g", "--resource-group",
@@ -498,7 +517,15 @@ def main(argv=None):
         return _fail("health endpoint does not report the write guarantee; "
                      "this is not the replay server")
 
-    wanted = args.cassette or remote
+    built = (sorted(f[:-len(".json")] for f in os.listdir(args.cassette_dir)
+                    if f.endswith(".json"))
+             if os.path.isdir(args.cassette_dir) else [])
+    # The gate's recordings are fetched when it runs, so none is deployed:
+    # each is checked the way the gate will use it, uploaded under an id of
+    # its own, and deleted after.
+    served = ({c: f"rt-verify-{os.urandom(8).hex()}"
+               for c in (args.cassette or built)} if args.upload else {})
+    wanted = list(served) if args.upload else (args.cassette or remote)
     missing_locally, failures, checked = [], [], 0
 
     # The gate replays every cassette built here, against this server. One
@@ -506,9 +533,7 @@ def main(argv=None):
     # invoked, and reads as the agent's failure. Checking only what the server
     # lists would pass exactly that: a server deployed before a trace was
     # committed.
-    if not args.cassette and os.path.isdir(args.cassette_dir):
-        built = sorted(f[:-len(".json")] for f in os.listdir(args.cassette_dir)
-                       if f.endswith(".json"))
+    if not args.cassette and not args.upload:
         for cassette_id in built:
             if cassette_id not in remote:
                 failures.append(
@@ -518,17 +543,25 @@ def main(argv=None):
                        if os.name == "nt" else "make replay-deploy RG=<rg>"))
 
     for cassette_id in wanted:
-        if cassette_id not in remote:
+        if cassette_id not in remote and not args.upload:
             failures.append(f"{cassette_id}: not deployed")
             continue
         recording = local_cassette(args.cassette_dir, cassette_id)
         if recording is None:
             missing_locally.append(cassette_id)
             continue
+        if args.upload:
+            try:
+                client.upload(served[cassette_id], recording)
+            except urllib.error.HTTPError as exc:
+                failures.append(f"{cassette_id}: upload refused, "
+                                f"{_http_failure(exc)}")
+                continue
+        remote_id = served.get(cassette_id, cassette_id)
 
         print(f"\n{cassette_id}")
         try:
-            report, problems = replay(client, cassette_id, recording,
+            report, problems = replay(client, remote_id, recording,
                                       args.verbose)
         except urllib.error.HTTPError as exc:
             failures.append(f"{cassette_id}: {_http_failure(exc)}")
@@ -541,7 +574,7 @@ def main(argv=None):
         # rather than as a traceback that skips the state check.
         for check in (check_isolation, check_fan_out):
             try:
-                problems += check(client, cassette_id, recording)
+                problems += check(client, remote_id, recording)
             except urllib.error.HTTPError as exc:
                 problems.append(f"{check.__name__}: {_http_failure(exc)}")
             except urllib.error.URLError as exc:
@@ -564,6 +597,15 @@ def main(argv=None):
             problems.append(f"{report['mismatched']} recorded call(s) came "
                             "back different")
         failures.extend(f"{cassette_id}: {p}" for p in problems)
+
+    # ponytail: after the loop, not in a finally -- a crash mid-check leaves
+    # an rt-verify-* blob and its sessions in the private state container.
+    # A lifecycle rule on the container would sweep them.
+    for remote_id in served.values():
+        try:
+            client.delete(remote_id)
+        except urllib.error.URLError as exc:
+            print(f"  WARNING    could not delete {remote_id}: {exc}")
 
     after, why = wait_for_health(_Resolving(client), 60)
     if after is None:

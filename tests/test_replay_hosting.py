@@ -1676,6 +1676,33 @@ def test_verifier_fails_on_a_cassette_the_server_was_never_given(
     assert "replay-deploy" in out
 
 
+def test_verifier_uploads_what_it_checks_and_deletes_it(
+        hosted, recordings, blob_stub, monkeypatch, capsys):
+    """The gate's recordings are fetched when it runs, so none is deployed:
+    --upload checks each local one as the gate will use it. The fan-out
+    recording is one the server was never given."""
+    from state_store import open_store
+    store = server.Handler.store = open_store(sas_url=blob_stub)
+    saved, real_save = [], store.save
+    monkeypatch.setattr(store, "save", lambda key, state, version: (
+        saved.append(key), real_save(key, state, version))[1])
+    with open(os.path.join(recordings, "2026-10-01-live00000000.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(_fan_out_cassette(), fh)
+
+    assert verify.main([hosted, "--token", "s3cret", "--cassette-dir",
+                        recordings, "--upload"]) == 0
+    out = capsys.readouterr().out
+    assert "OK — 2 cassette(s) replay identically" in out
+    assert "not deployed" not in out
+    uploaded = [k for k in saved if k.startswith("cassette.rt-verify-")]
+    assert len(uploaded) == 2
+    # and the checks' sessions: a journal is keyed by a live run's arguments
+    sessions = [k for k in saved if k.startswith("rt-verify-")]
+    assert len(sessions) >= 8, saved
+    assert all(store.load(k) == (None, None) for k in uploaded + sessions)
+
+
 def test_verifier_fails_on_a_bad_token(hosted, recordings, capsys):
     assert verify.main([hosted, "--token", "wrong",
                         "--cassette-dir", recordings]) == 1

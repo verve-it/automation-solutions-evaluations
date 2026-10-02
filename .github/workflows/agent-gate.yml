@@ -5,8 +5,10 @@
 # what it does — which is how you decide whether an agent change is safe to
 # deploy. No ConnectWise request is made, for reads or writes.
 #
-# It replays the LATEST version of each recorded agent in the named project,
-# so it runs after the agent reaches staging and before it reaches prod:
+# It replays the LATEST version of each agent in gate-agents, against that
+# agent's own recent real runs -- fetched from Log Analytics when the gate
+# starts, never committed -- so it runs after the agent reaches staging and
+# before it reaches prod:
 #
 #   deploy-staging -> gate (environment: staging) -> deploy-prod (needs: gate)
 #
@@ -46,17 +48,24 @@ on:
         default: main
       gate-agents:
         description: >-
-          Comma-separated agent names whose recordings to replay, e.g. the
-          agents the calling repository deploys. Empty replays every
-          single-agent recording. This only chooses among recordings: each
-          one still replays the agent it recorded, never another. A name with
-          no recording fails the gate rather than passing untested.
+          Comma-separated agent names to gate, e.g. the agents the calling
+          repository deploys. Required, and at most MAX_REPLAYS (4): each
+          one's recent standalone runs are fetched and replayed against that
+          agent. A name with no such run in the last 14 days fails the gate
+          rather than passing untested.
         type: string
         default: ""
     secrets:
       REPLAY_TOKEN:
         description: "Bearer token the hosted replay server requires."
         required: true
+      RECORDINGS_WORKSPACE_IDS:
+        description: >-
+          Comma-separated Log Analytics workspace GUIDs to fetch recordings
+          from, in order of preference: production's first, then staging's
+          for an agent that has not reached production. Unset, the gate's own
+          LOG_ANALYTICS_WORKSPACE_ID.
+        required: false
   workflow_dispatch:
     inputs:
       environment:
@@ -96,6 +105,16 @@ jobs:
     # Replays, then up to ten one-minute waits for ingestion. A hang past
     # this is not a slow gate; it is a broken one.
     timeout-minutes: 60
+    env:
+      # Replays, shared out between the gated agents. One takes ~8 minutes,
+      # most of it the clone's provisioning: the first staging run took
+      # 16m26s from login to export for two. Four leave the 60 minutes room
+      # for ingestion waits and scoring, and end before the Foundry token
+      # taken at preflight does -- the CLI cannot renew it once GitHub's
+      # assertion has expired. Five per agent did not fit two agents.
+      # ponytail: a budget, not a measurement. One clone per agent per run
+      # would let an agent's recordings share one provisioning wait.
+      MAX_REPLAYS: 4
     steps:
       # Fail here, before login, rather than at login or three steps in with an
       # unhelpful SDK error.
@@ -107,8 +126,17 @@ jobs:
       - name: Check the gate is configured
         env:
           REF: ${{ inputs.ref || 'main' }}
+          GATE_AGENTS: ${{ inputs.gate-agents }}
         run: |
           [[ "$REF" =~ ^(main|v[0-9][0-9.]*|[0-9a-f]{40})$ ]] || { echo "::error::ref $REF is not main, a v-tag or a commit"; exit 1; }
+          # Recordings are fetched per agent, so the gate has to be told which.
+          [ -n "${GATE_AGENTS//[, ]/}" ] || { echo "::error::gate-agents is empty. Name the agents to gate: each one's own recent runs are fetched and replayed"; exit 1; }
+          # It becomes file names under out/raw/, so names only -- and split
+          # on commas alone: preflight splits there, the fetch on both, so
+          # "a b" was two agents to one step and one to the other.
+          [[ "$GATE_AGENTS" =~ ^\ *[A-Za-z0-9][A-Za-z0-9-]*(\ *,\ *[A-Za-z0-9][A-Za-z0-9-]*)*\ *$ ]] || { echo "::error::gate-agents is not a comma list of agent names"; exit 1; }
+          n=$(echo "$GATE_AGENTS" | tr ',' ' ' | wc -w)
+          [ "$n" -le "$MAX_REPLAYS" ] || { echo "::error::gate-agents names $n agents; one gate run has time for $MAX_REPLAYS replays. Split them across calls"; exit 1; }
           missing=
           [ -n "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" ] || missing="$missing AZURE_AI_PROJECT_ENDPOINT(var)"
           [ -n "${{ vars.REPLAY_SERVER_URL }}" ]         || missing="$missing REPLAY_SERVER_URL(var)"
@@ -123,6 +151,9 @@ jobs:
           echo "environment : ${{ inputs.environment }}"
           echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
           echo "replay      : ${{ vars.REPLAY_SERVER_URL }}"
+          # Optional. Which secret the recordings come from, never its GUIDs.
+          [ -n "${{ secrets.RECORDINGS_WORKSPACE_IDS }}" ] && from="RECORDINGS_WORKSPACE_IDS" || from="LOG_ANALYTICS_WORKSPACE_ID"
+          echo "recordings  : $from"
 
       - uses: actions/checkout@v4
         with:
@@ -154,8 +185,75 @@ jobs:
           # runs `az account set` on one, which fails the same way.
           allow-no-subscriptions: true
 
-      - name: Build cassettes from the committed traces
-        run: make cassettes
+      # Each agent's own recent real runs, not committed recordings: the
+      # first workspace in RECORDINGS_WORKSPACE_IDS (production's) that has
+      # one, else the next (staging's, for an agent that has not reached
+      # production). --standalone keeps operations in which the agent is the
+      # only agent; an orchestration replays its children live, so it is
+      # never a recording here. The baselines are scored from the same runs,
+      # in this job: a recorded run that fails a check is a baseline, not an
+      # error, so run_evals.py's exit code is ignored.
+      #
+      # Everything lands under out/raw/, which is never uploaded, and the
+      # log gets an agent, a workspace's place in the list and a count --
+      # never a GUID or a recorded value; run_evals.py's report goes to a
+      # file for the same reason.
+      #
+      # Only runs from half an hour ago or earlier. The newest are picked
+      # first, and in review one not fully ingested -- a content row lands
+      # after its span, 22 s apart on 2026-10-02 -- became a recording of
+      # placeholders, or of its first 28 of 34 calls with the writes cut
+      # off. Attribution waits for ingestion on the replay; a recording is
+      # taken once.
+      #
+      # A workspace that cannot be read is skipped with a warning: the
+      # production one is listed first, and a role not granted there yet
+      # would stop the gate before it tried staging.
+      - name: Fetch live recordings
+        env:
+          GATE_AGENTS: ${{ inputs.gate-agents }}
+          WORKSPACES: ${{ secrets.RECORDINGS_WORKSPACE_IDS || secrets.LOG_ANALYTICS_WORKSPACE_ID }}
+        run: |
+          shopt -s nullglob
+          mkdir -p out/raw/recorded out/raw/cassettes out/raw/baselines
+          spaces=$(echo "$WORKSPACES" | tr ',' ' ')
+          until=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          per=$((MAX_REPLAYS / $(echo "$GATE_AGENTS" | tr ',' ' ' | wc -w)))
+          for agent in $(echo "$GATE_AGENTS" | tr ',' ' '); do
+            i=0 found=()
+            for ws in $spaces; do
+              i=$((i + 1))
+              rm -rf "out/raw/recorded/$agent.json" out/raw/fetched
+              python export_traces.py --workspace "$ws" --agents "$agent" --standalone \
+                  --hours 336 --until "$until" --max-orchestrations "$per" --min-tool-calls 1 \
+                  -o "out/raw/recorded/$agent.json" \
+                || { echo "::warning::cannot read recordings workspace $i of $(echo $spaces | wc -w): the gate's identity needs Log Analytics Reader and Privileged Monitoring Data Reader on it, and the id must be the workspace GUID. Trying the next"; continue; }
+              [ -f "out/raw/recorded/$agent.json" ] || continue
+              python replay/make_cassette.py "out/raw/recorded/$agent.json" --strict \
+                  -o out/raw/fetched || true
+              found=(out/raw/fetched/*.json)
+              [ "${#found[@]}" = "0" ] || break
+            done
+            if [ "${#found[@]}" = "0" ]; then
+              echo "::error::$agent has no recording to replay: it needs at least one standalone run with a tool call in the last 14 days"
+              exit 1
+            fi
+            mv "${found[@]}" out/raw/cassettes/
+            echo "$agent: ${#found[@]} recording(s) from workspace $i of $(echo $spaces | wc -w)"
+            python trace_to_eval.py "out/raw/recorded/$agent.json" \
+                -o "out/raw/recorded-rows/$agent" --tool-defs tool_manifests/
+            python run_evals.py "out/raw/recorded-rows/$agent/eval_runs.jsonl" \
+                --expected expected.json --json "out/raw/baselines/$agent.json" \
+                > "out/raw/baseline-$agent.log" || true
+          done
+
+      # Again: the fetch can outlast GitHub's 5-minute OIDC assertion, and
+      # preflight is the first step to ask for a Foundry token.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
 
       # Seconds, before anything is created. Each check here was once found
       # 5-25 minutes into a run, after clones were built: an agent not in the
@@ -166,7 +264,7 @@ jobs:
         env:
           GATE_AGENTS: ${{ inputs.gate-agents }}
         run: |
-          python replay/preflight.py --cassettes cassettes --baselines baselines \
+          python replay/preflight.py --cassettes out/raw/cassettes --baselines out/raw/baselines \
               --gate-agents "$GATE_AGENTS" \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
@@ -174,60 +272,49 @@ jobs:
               --summary "$GITHUB_STEP_SUMMARY"
 
       # The replay server has to be answering before an agent is pointed at
-      # it, or every call diverges and the gate blames the agent.
+      # it, or every call diverges and the gate blames the agent. Checked
+      # with the recordings this run fetched, uploaded the way the replays
+      # upload them.
       - name: Verify the replay server serves what we recorded
         env:
           REPLAY_TOKEN: ${{ secrets.REPLAY_TOKEN }}
         run: |
           python functions/replay-mcp/verify.py "${{ vars.REPLAY_SERVER_URL }}" \
-              --token "$REPLAY_TOKEN"
+              --token "$REPLAY_TOKEN" --cassette-dir out/raw/cassettes --upload
 
       # Only single-agent cassettes. An orchestration reaches its children by
       # NAME, which resolves to their production versions — still pointed at
       # the real ConnectWise toolbox — so replaying one would send their
-      # calls, writes included, to the live service. run_replay.py refuses;
-      # this skips them rather than relying on that refusal.
+      # calls, writes included, to the live service. The fetch asks for
+      # standalone runs only and run_replay.py refuses one; this skips them
+      # rather than relying on either. Each cassette is uploaded to the
+      # replay server for its replay and deleted after it.
       - name: Replay each single-agent cassette against stubbed tools
         env:
           REPLAY_TOKEN: ${{ secrets.REPLAY_TOKEN }}
           AZURE_AI_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
-          GATE_AGENTS: ${{ inputs.gate-agents }}
         run: |
           set -o pipefail
           mkdir -p artifacts out/raw
           shopt -s nullglob
-          wanted=" $(echo "$GATE_AGENTS" | tr ',' ' ' | xargs) "
           ran=0
-          covered=" "
-          for cassette in cassettes/*.json; do
+          for cassette in out/raw/cassettes/*.json; do
             agents=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))['agents']))" "$cassette")
             if [ "$agents" != "1" ]; then
               echo "skip  $(basename "$cassette")  $agents agents — children would reach live ConnectWise"
               continue
             fi
-            agent=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['agents'][0])" "$cassette")
-            if [ "$wanted" != "  " ] && [[ "$wanted" != *" $agent "* ]]; then
-              echo "skip  $(basename "$cassette")  $agent — not in gate-agents"
-              continue
-            fi
-            covered="$covered$agent "
             id=$(basename "$cassette" .json)
             echo "::group::replay $id"
             python replay/run_replay.py \
                 --cassette "$cassette" \
-                --server-url "${{ vars.REPLAY_SERVER_URL }}/mcp/$id" \
+                --server-url "${{ vars.REPLAY_SERVER_URL }}" --upload \
                 --token "$REPLAY_TOKEN" \
                 --journal "out/raw/journal-$id.json" \
                 --manifest "artifacts/manifest-$id.json" \
                 | tee "artifacts/replay-$id.log"
             echo "::endgroup::"
             ran=$((ran + 1))
-          done
-          for name in $wanted; do
-            if [[ "$covered" != *" $name "* ]]; then
-              echo "::error::gate-agents names $name, but there is no single-agent recording of it, so it would pass untested"
-              exit 1
-            fi
           done
           if [ "$ran" = "0" ]; then
             echo "::error::no single-agent cassette to replay, so nothing was gated"
@@ -282,7 +369,7 @@ jobs:
       # temporary version), proves it ran against the stub and only the stub
       # (no A2A, no other toolbox, every MCP call journalled by the replay
       # server), presents it under the recording's agent, toolbox and tool
-      # definitions, and pulls that recording's committed baseline row.
+      # definitions, and pulls that recording's baseline row, scored above.
       #
       # It exits 3 while a replay is not ingested yet, or only partly: App
       # Insights ingests with a lag of minutes, and a half-ingested run scores
@@ -327,6 +414,7 @@ jobs:
             rc=0
             python replay/attribute_runs.py "artifacts/manifest-*.json" \
                 --runs out/window/eval_runs.jsonl \
+                --baselines out/raw/baselines \
                 --tool-defs tool_manifests/ \
                 --spans out/raw/window-spans.json \
                 --out-spans out/raw/replay-spans.json \
@@ -402,11 +490,10 @@ jobs:
       # path an export step writes.
       #
       # Not the journals either. Each entry's key is the call's arguments as
-      # the agent under test sent them, which are no longer the scrubbed
-      # cassette's once an agent change diverges, so they are written under
-      # out/raw/. Nothing needs them uploaded: attribution reads the
-      # per-tool counts (journal_tools, diverged_tools) from the manifests.
-      # replay-baseline.json is rows of the committed baselines.
+      # the agent under test sent them, so they are written under out/raw/.
+      # Nothing needs them uploaded: attribution reads the per-tool counts
+      # (journal_tools, diverged_tools) from the manifests.
+      # replay-baseline.json is verdict rows, the shape gate.json is.
       - uses: actions/upload-artifact@v4
         if: always()
         with:

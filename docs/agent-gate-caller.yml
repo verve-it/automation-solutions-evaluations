@@ -5,9 +5,10 @@
 # say so. Kept here, not under .github/workflows, so it never runs in the
 # evaluations repository.
 #
-# Order matters. The gate replays the LATEST version of each recorded agent
-# in the project it is pointed at, so it has to run after the change reaches
-# staging and before it reaches prod:
+# Order matters. The gate replays the LATEST version of each agent in
+# gate-agents, in the project it is pointed at, against that agent's own
+# recent real runs, so it has to run after the change reaches staging and
+# before it reaches prod:
 #
 #   deploy-staging  ->  gate (staging)  ->  deploy-prod
 #
@@ -18,7 +19,11 @@
 # reads the CALLER's environment:
 #   vars     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_AI_PROJECT_ENDPOINT,
 #            REPLAY_SERVER_URL, AZURE_JUDGE_DEPLOYMENT (optional)
-#   secrets  REPLAY_TOKEN, LOG_ANALYTICS_WORKSPACE_ID
+#   secrets  REPLAY_TOKEN, LOG_ANALYTICS_WORKSPACE_ID,
+#            RECORDINGS_WORKSPACE_IDS (optional: comma-separated workspace
+#            GUIDs to fetch recordings from, production's first; the gate's
+#            identity needs Log Analytics Reader and Privileged Monitoring
+#            Data Reader on each. Unset, LOG_ANALYTICS_WORKSPACE_ID)
 # and the staging app's federated credential must trust this repository:
 #   repo:<owner>/<this-repo>:environment:staging
 # The gate's first step names anything missing.
@@ -53,8 +58,11 @@ jobs:
     uses: verve-it/automation-solutions-evaluations/.github/workflows/agent-gate.yml@main
     with:
       environment: staging
-      # The agents this repository deploys. Only their recordings replay, so
-      # the project's other agents need not be deployed for this gate.
+      # Required: the agents this repository deploys, at most four per call
+      # (a replay takes ~8 minutes). Each one's standalone runs from the
+      # last 14 days are fetched and replayed; an agent with none (no run of
+      # it alone, with a tool call) fails the gate, and so does an
+      # orchestrator, whose children would run live.
       gate-agents: ""
     secrets: inherit
 

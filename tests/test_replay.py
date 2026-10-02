@@ -165,6 +165,17 @@ def test_a_clean_cassette_is_not_lossy():
     assert mc.build(spans)[0]["lossy"] is False
 
 
+def test_content_not_ingested_yet_makes_the_cassette_lossy():
+    """The content row lands after the span (22 s on 2026-10-02). Fetched
+    in that gap, the placeholder became every result and key, and --strict
+    wrote it as `lossy: False`."""
+    spans = tool_call("cw_query", "a", args={"entity": "x"}, result="short")
+    spans[0]["content_missing"] = True
+    cas = mc.build(spans)[0]
+    assert cas["lossy"] is True
+    assert "AppGenAIContent" in cas["warnings"][0]
+
+
 def test_a2a_handoffs_are_not_part_of_the_toolbox_cassette():
     """The callee is replayed as its own agent run; the toolbox must not
     answer for it."""
