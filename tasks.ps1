@@ -73,6 +73,7 @@ switch ($Target) {
         Write-Host '  evals-triage        score the standalone triage-analysis set against its baseline'
         Write-Host '  baselines           re-freeze every baseline from the committed traces'
         Write-Host '  cassettes           build replay cassettes from the committed traces'
+        Write-Host '  preflight           check recordings and baselines line up, before a gate run (no Azure)'
         Write-Host '  replay              serve a cassette as an MCP toolbox  -Cassette <path>'
         Write-Host '  replay-package      assemble the Azure Function deployment package'
         Write-Host '  replay-deploy       provision and publish  -ResourceGroup <rg> [-Location] [-StorageAuth] [-SkipRoleAssignment]'
@@ -128,6 +129,10 @@ switch ($Target) {
         Run @('replay/make_cassette.py', $FULL_TRIAGE, '-o', 'cassettes')
         Run @('replay/make_cassette.py', $OPS_WORST, '-o', 'cassettes')
         Run @('replay/make_cassette.py', $TRIAGE, '-o', 'cassettes')
+    }
+
+    'preflight' {
+        Run @('replay/preflight.py', '--cassettes', 'cassettes', '--baselines', 'baselines', '--offline')
     }
 
     'replay' {

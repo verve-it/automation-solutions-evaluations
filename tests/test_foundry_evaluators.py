@@ -110,7 +110,10 @@ def test_the_ported_evaluator_also_catches_the_bad_reference_type():
            if l["checks"]["valid_tool_args"]["passed"] is False]
     assert len(bad) == 1, [l["run_agent"] for l, _ in bad]
     l, row = bad[0]
-    assert "severity" in l["checks"]["valid_tool_args"]["reason"]
+    # The value itself is recorded content; run_evals shows its type and
+    # length unless --show-values is passed (test_frozen_sets has both).
+    assert "'reference_type'=<str, 8 chars>" in \
+        l["checks"]["valid_tool_args"]["reason"]
     assert fn({}, row) < threshold, "local fails, the Foundry evaluator passes"
 
 

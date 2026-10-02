@@ -230,6 +230,14 @@ def build(spans, manifests=()):
                 warnings.append(
                     f"seq {seq}: {bare} result truncated at 8192 chars — "
                     "replaying it feeds the agent incomplete data")
+            if s.get("content_missing"):
+                # The content row lands after the span: 22 s apart on
+                # 2026-10-02. A recording fetched inside that gap replays
+                # App Insights' placeholder as the result and keys the call
+                # on it, so every call diverges.
+                warnings.append(
+                    f"seq {seq}: {bare} content not in AppGenAIContent yet "
+                    "— replaying it feeds the agent a placeholder")
             interactions.append({
                 "seq": seq,
                 "agent": agent,
@@ -290,7 +298,8 @@ def main():
                          "writes, ahead of eval-config.json.")
     ap.add_argument("--strict", action="store_true",
                     help="refuse to write a cassette containing a truncated "
-                         "result. Use this for anything that gates.")
+                         "or not-yet-ingested result. Use this for anything "
+                         "that gates.")
     args = ap.parse_args()
 
     cassettes = build(load_spans(args.spans),
@@ -301,9 +310,10 @@ def main():
     for c in cassettes:
         name = f"{c['recorded'][:10]}-{c['orchestration_id'][:12]}.json"
         path = os.path.join(args.out, name)
-        # `lossy` means a truncated RESULT -- a corrupted fixture the agent
-        # would reason over. An unescaped query is neither corrupt nor a
-        # reason to refuse the cassette, so it is reported on its own line.
+        # `lossy` means a truncated or not-yet-ingested RESULT -- a
+        # corrupted fixture the agent would reason over. An unescaped query
+        # is neither corrupt nor a reason to refuse the cassette, so it is
+        # reported on its own line.
         flag = "LOSSY" if c["lossy"] else "ok   "
         detail = (f"{len(c['interactions']):>3} interactions, "
                   f"{c['writes']} write(s), {len(c['agents'])} agent(s)")
@@ -332,4 +342,5 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from evalconfig import public_main
+    sys.exit(public_main(main))

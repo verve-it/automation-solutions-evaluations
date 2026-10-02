@@ -39,7 +39,7 @@ being the thing that made the whole apparatus pointless.
 | Gate | Mechanism | Tools |
 |---|---|---|
 | Eval-code change | frozen sets vs frozen baselines | none |
-| **Agent change** | **cassette replay** | **STUBBED** |
+| **Agent change** | **replay of the agent's own live runs** | **STUBBED** |
 | Production behaviour | recorded traces, `run_evals.py` | none |
 | Judged sample | recorded traces, Foundry evaluators | none |
 
@@ -161,6 +161,11 @@ behind it. Cassettes and manifests live in one `replay_payload.json` beside
 A checkout still uses `cassettes/` and `tool_manifests/`. `Source` in
 `server.py` reads whichever is there.
 
+The gate's recordings are in neither: they exist only for the run that
+fetched them, so `run_replay.py --upload` PUTs each to
+`/cassettes/rt-<id>` (create-only, into the state store), replays it as
+`/mcp/rt-<id>`, and DELETEs it with its session afterwards.
+
 ## No SDK in the hosted replay server, and no build step
 
 `azure-storage-blob` is not importable in a custom handler: Oryx installs it
@@ -257,19 +262,36 @@ never show it.
 
 `run_replay.py` refuses a multi-agent cassette, with **no override** — the
 refusal is the only thing between such a cassette and a live write. The
-single-agent cassettes -- two `connectwise-operations-agent`, five
-`triage-analysis-agent` -- replay fully stubbed today. Fixing it for
-orchestrations needs the children addressable by version,
+gate fetches standalone runs only (`export_traces.py --standalone`: every
+agent in the operation is counted, not just the named one), and its replay
+loop skips anything else besides. That is not enough on its own: an
+orchestrator run whose hand-offs failed before a child emitted a span is a
+single-agent recording, and its environment names no child (the names are
+defaults in its code). So `run_replay.py` also refuses a hosted agent whose
+**code** reads a `*_AGENT_NAME` variable, or whose code it cannot read.
+Fixing it for orchestrations needs the children addressable by version,
 which is the agent code's decision, not this script's.
 
 ## Gating a deployment
 
 `.github/workflows/agent-gate.yml` is a **reusable** workflow (`workflow_call`)
-because the agents merge in another repository. It verifies the replay server,
-replays every single-agent cassette against stubbed tools, scores against the
-baseline, writes the table into `$GITHUB_STEP_SUMMARY`, and creates the run in
-Foundry → Evaluation. `needs:` in the calling workflow is what makes it a gate
-rather than a dashboard.
+because the agents merge in another repository. It fetches each gated agent's
+recent real runs, verifies the replay server, replays them against stubbed
+tools, scores against the baseline, writes the table into
+`$GITHUB_STEP_SUMMARY`, and creates the run in Foundry → Evaluation. `needs:`
+in the calling workflow is what makes it a gate rather than a dashboard.
+
+**The recordings are live, not committed.** For each agent in `gate-agents`
+(required; at most four, as the job has time for four replays, shared out
+between them) it exports standalone runs with a tool call from the 14 days
+up to half an hour ago -- none still being ingested -- from the first
+workspace in `RECORDINGS_WORKSPACE_IDS` (production's) that has one and can
+be read, else the next (staging's, for a new agent); unset,
+`LOG_ANALYTICS_WORKSPACE_ID` -- builds cassettes and scores their
+baselines in the same job, all under `out/raw/`, and uploads each cassette to
+the replay server for its replay only. An agent with no such run fails the
+gate by name. `traces/`, `baselines/` and `make cassettes` serve the
+eval-code frozen sets alone; the gate reads none of them.
 
 Four things the gate must not do, all of which look like they work:
 
@@ -286,7 +308,7 @@ Four things the gate must not do, all of which look like they work:
   prefix, because a write through a client the agent built itself has none —
   then presents it under the
   recording's agent, `traj_key`, toolbox and tool definitions and pulls that
-  recording's committed baseline row. `run_evals.py --strict-baseline` then
+  recording's baseline row. `run_evals.py --strict-baseline` then
   fails if any replayed run went uncompared. Nightly drift must **not** use
   strict: new orchestrations arrive every day.
 - **Fail on a reporting check.** Only a regression on a `GATING` check fails
@@ -302,10 +324,15 @@ Four things the gate must not do, all of which look like they work:
   downloadable by anyone, and `scrub_trace.py` is propose → human review →
   apply, so it cannot be dropped into CI. Neither `agent-gate.yml` nor the
   nightly drift job uploads raw spans or the Foundry dataset. Verdicts,
-  journals (which replay the already-scrubbed cassettes) and the Foundry run
-  are the record. Raw exports live under `out/`, which is never uploaded;
+  manifests and the Foundry run are the record. Raw exports -- recordings,
+  cassettes and journals included -- live under `out/raw/`, which is never
+  uploaded;
   `artifacts/replay-*.json` once matched the raw spans file, so the test
   matches every upload glob against every path an export step writes.
+  More generally, **no value read from a recording reaches a public
+  channel** -- job log, annotation, step summary or upload: ids, names,
+  versions, counts, lengths and timestamps only, which is why
+  `run_evals.py --show-values` is local and no workflow may pass it.
 
 Attribution retries while App Insights catches up (exit 3 = not ingested, or
 only partly: for some tool, fewer calls in the trace than the replay server
@@ -316,11 +343,10 @@ early. The comparison is per tool because local tools (`load_skill`,
 What is refused **before** anything is created, because a check in the trace
 comes after the writes: another agent than the cassette recorded (an
 orchestrator on a single-agent cassette reaches its children by name, live),
-and a hosted agent whose environment names another agent in the project.
-The gate has no `agent:` input for the same reason. It has `gate-agents`,
-which only **chooses among** recordings -- each still replays the agent it
-recorded -- so a caller gates its own agents without the rest of the project
-being deployed; a name with no single-agent recording fails the gate.
+and a hosted agent whose environment names another agent in the project or
+whose code reads a `*_AGENT_NAME` variable.
+The gate has no `agent:` input for the same reason. `gate-agents` names
+whose runs are fetched; each recording still replays the agent it recorded.
 
 ## The stub answers calls that arrive together
 

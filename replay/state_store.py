@@ -115,6 +115,10 @@ class MemoryStore:
             self._data[key] = (json.loads(json.dumps(state)), nxt)
             return nxt
 
+    def delete(self, key):
+        with self._lock:
+            self._data.pop(key, None)
+
     def close(self):
         pass
 
@@ -249,6 +253,15 @@ class _RestBlobStore:
         if (version is None and current is None) or (version and etag == version):
             return self._put(key, body, headers)
         raise Conflict(key) from cause
+
+    def delete(self, key):
+        """Gone afterwards, whether or not it was there before."""
+        try:
+            with self._request("DELETE", self._url(key)):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
 
     def close(self):
         pass
@@ -459,6 +472,9 @@ class LazyStore:
 
     def save(self, key, state, version):
         return self._use("save", key, state, version)
+
+    def delete(self, key):
+        return self._use("delete", key)
 
     def close(self):
         if self._store is not None:

@@ -15,7 +15,7 @@ import pytest
 
 import mcp_core
 import replay_server as rs
-from state_store import Conflict, MemoryStore
+from state_store import Conflict, MemoryStore, Unavailable
 from conftest import REPO
 
 FUNCTION_DIR = os.path.join(REPO, "functions", "replay-mcp")
@@ -344,6 +344,162 @@ def test_unknown_cassette_is_a_404(hosted):
     assert exc.value.code == 404
 
 
+# ------------------------------------------- cassettes uploaded for one run
+#
+# The gate replays the agent's recent real runs, fetched when it starts, so
+# they cannot be baked into a deployment: run_replay.py --upload PUTs one for
+# the run and DELETEs it after.
+
+RT = "rt-0123456789abcdef0123"
+CALL = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "cw_get_ticket", "arguments": {"ticket_number": 1}}}
+
+
+def _http(base, method, path, body=None, token="s3cret", session=None):
+    """(status, decoded body), error or not."""
+    req = urllib.request.Request(base + path, body, method=method)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if session:
+        req.add_header("Mcp-Session-Id", session)
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.status, json.loads(response.read() or b"null")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read() or b"null")
+
+
+def _upload(base, cassette_id=RT, data=None, **kw):
+    body = json.dumps(_cassette_fixture() if data is None else data).encode()
+    return _http(base, "PUT", f"/cassettes/{cassette_id}", body, **kw)
+
+
+def test_an_uploaded_cassette_replays_and_is_gone_after_its_delete(
+        hosted, blob_stub):
+    from state_store import open_store
+    store = server.Handler.store = open_store(sas_url=blob_stub)
+    assert _upload(hosted) == (201, {"cassette": RT, "interactions": 2})
+    assert RT not in _get(hosted, "/", token=None)["cassettes"]
+
+    body, _ = _post(hosted, f"/mcp/{RT}", CALL, session="run-1")
+    assert body["result"]["content"][0]["text"] == "first"
+    assert _get(hosted, f"/summary/{RT}", session="run-1") \
+        ["replayed_calls"] == 1
+    assert store.load(server._state_key(RT, "run-1"))[0]
+
+    assert _http(hosted, "DELETE", f"/cassettes/{RT}", session="run-1") \
+        == (204, None)
+    assert store.load(f"cassette.{RT}") == (None, None)
+    assert store.load(server._state_key(RT, "run-1")) == (None, None)
+    assert _http(hosted, "POST", f"/mcp/{RT}", json.dumps(CALL).encode(),
+                 session="run-1")[0] == 404
+
+
+@pytest.mark.parametrize("cassette_id", [
+    "fixture", "2026-09-03-4dda7f4fa5f0", "rt-short", "rt-UPPERCASE1",
+    "rt-" + "a" * 64, "rt-..%2F..%2Fstate1", "rt-0123456789abcdef/extra"])
+def test_only_a_runtime_id_is_uploaded_or_deleted(hosted, cassette_id):
+    """Never a deployed cassette, and nothing that names another blob."""
+    assert _upload(hosted, cassette_id)[0] == 400
+    assert _http(hosted, "DELETE", f"/cassettes/{cassette_id}")[0] == 400
+
+
+def test_an_uploaded_cassette_is_immutable(hosted):
+    assert _upload(hosted)[0] == 201
+    assert _upload(hosted, data=dict(_cassette_fixture(),
+                                     interactions=[]))[0] == 409
+    body, _ = _post(hosted, f"/mcp/{RT}", CALL, session="s")
+    assert body["result"]["content"][0]["text"] == "first"
+
+
+def test_upload_and_delete_need_the_token(hosted):
+    assert _upload(hosted, token=None)[0] == 401
+    assert _upload(hosted, token="wrong")[0] == 401
+    assert _http(hosted, "DELETE", f"/cassettes/{RT}", token=None)[0] == 401
+    assert server.Handler.store.load(f"cassette.{RT}") == (None, None)
+
+
+def test_an_oversized_upload_is_refused(hosted, monkeypatch):
+    monkeypatch.setattr(server, "MAX_CASSETTE_BYTES", 100)
+    assert _upload(hosted)[0] == 413
+    assert server.Handler.store.load(f"cassette.{RT}") == (None, None)
+
+
+@pytest.mark.parametrize("length", ["-1", "abc"])
+def test_a_content_length_that_is_not_a_byte_count_is_refused(
+        hosted, monkeypatch, length):
+    """read(-1) reads to the end of the stream: a 40 MB body went past the
+    limit that way, and `abc` was a traceback and a dropped connection."""
+    import http.client
+    from urllib.parse import urlparse
+    monkeypatch.setattr(server, "MAX_CASSETTE_BYTES", 100)
+    url = urlparse(hosted)
+    conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    conn.putrequest("PUT", f"/cassettes/{RT}")
+    conn.putheader("Authorization", "Bearer s3cret")
+    conn.putheader("Content-Length", length)
+    conn.endheaders(json.dumps(_cassette_fixture()).encode())
+    assert conn.getresponse().status == 400
+    conn.close()
+    assert server.Handler.store.load(f"cassette.{RT}") == (None, None)
+
+
+@pytest.mark.parametrize("body", [b"[]", b'{"no": 1}',
+                                  b'{"interactions": "x"}', b"not json", b"",
+                                  b'{"interactions": [1]}',
+                                  b'{"interactions": [{"tool": "x"}]}'])
+def test_only_a_cassette_is_accepted(hosted, body):
+    """Parsed as a lookup parses it: the last two were stored, and every
+    call on them was then a traceback."""
+    assert _http(hosted, "PUT", f"/cassettes/{RT}", body)[0] == 400
+    assert server.Handler.store.load(f"cassette.{RT}") == (None, None)
+
+
+class _Down(MemoryStore):
+    """A configured store that cannot be reached."""
+
+    def _down(self, *a):
+        raise Unavailable("storage is down")
+
+    load = save = delete = _down
+
+
+def test_an_unreachable_store_is_a_503_on_every_route(hosted):
+    """Resolving an uploaded cassette reads the store, so it fails the way a
+    state read does: an answer naming the cause, never a traceback."""
+    server.Handler.store = _Down()
+    for method, path, body in (
+            ("POST", f"/mcp/{RT}", json.dumps(CALL).encode()),
+            ("GET", f"/summary/{RT}", None),
+            ("PUT", f"/cassettes/{RT}", json.dumps(_cassette_fixture()).encode()),
+            ("DELETE", f"/cassettes/{RT}", None)):
+        code, answer = _http(hosted, method, path, body, session="s")
+        assert code == 503, (method, answer)
+        assert "storage is down" in json.dumps(answer), method
+
+
+def test_deleting_is_idempotent(hosted):
+    """run_replay.py deletes in its finally path, after a failure too."""
+    assert _http(hosted, "DELETE", f"/cassettes/{RT}", session="s")[0] == 204
+    _upload(hosted)
+    for _ in range(2):
+        assert _http(hosted, "DELETE", f"/cassettes/{RT}",
+                     session="s")[0] == 204
+
+
+def test_the_stores_delete_and_a_missing_key_is_fine(blob_stub):
+    from state_store import SasBlobStore
+    for store in (MemoryStore(), SasBlobStore(blob_stub)):
+        store.save("k", {"a": 1}, None)
+        store.delete("k")
+        assert store.load("k") == (None, None)
+        store.delete("k")
+        store.save("k", {"a": 2}, None)      # create-only works again
+    store._sas = "sv=2023-01-03"             # no signature: a 403, not a 404
+    with pytest.raises(urllib.error.HTTPError):
+        store.delete("k")
+
+
 # ------------------------------------------------- reading back the journal
 
 def test_the_gate_reads_the_journal_it_created(hosted):
@@ -515,6 +671,11 @@ def blob_stub():
             self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
             self.end_headers()
+
+        def do_DELETE(self):
+            if "sig=" not in self.path:
+                return self._status(403)
+            self._status(202 if blobs.pop(self._key(), None) else 404)
 
         def _status(self, code):
             self.send_response(code)
@@ -1515,6 +1676,33 @@ def test_verifier_fails_on_a_cassette_the_server_was_never_given(
     assert "replay-deploy" in out
 
 
+def test_verifier_uploads_what_it_checks_and_deletes_it(
+        hosted, recordings, blob_stub, monkeypatch, capsys):
+    """The gate's recordings are fetched when it runs, so none is deployed:
+    --upload checks each local one as the gate will use it. The fan-out
+    recording is one the server was never given."""
+    from state_store import open_store
+    store = server.Handler.store = open_store(sas_url=blob_stub)
+    saved, real_save = [], store.save
+    monkeypatch.setattr(store, "save", lambda key, state, version: (
+        saved.append(key), real_save(key, state, version))[1])
+    with open(os.path.join(recordings, "2026-10-01-live00000000.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(_fan_out_cassette(), fh)
+
+    assert verify.main([hosted, "--token", "s3cret", "--cassette-dir",
+                        recordings, "--upload"]) == 0
+    out = capsys.readouterr().out
+    assert "OK — 2 cassette(s) replay identically" in out
+    assert "not deployed" not in out
+    uploaded = [k for k in saved if k.startswith("cassette.rt-verify-")]
+    assert len(uploaded) == 2
+    # and the checks' sessions: a journal is keyed by a live run's arguments
+    sessions = [k for k in saved if k.startswith("rt-verify-")]
+    assert len(sessions) >= 8, saved
+    assert all(store.load(k) == (None, None) for k in uploaded + sessions)
+
+
 def test_verifier_fails_on_a_bad_token(hosted, recordings, capsys):
     assert verify.main([hosted, "--token", "wrong",
                         "--cassette-dir", recordings]) == 1
@@ -1652,3 +1840,35 @@ def test_verify_fails_a_server_that_advertises_the_agents_own_tools():
     assert any("load_skill" in p and "redeploy" in p for p in problems), problems
     assert verify.advertised_local_tools(
         [{"name": "cw_get_ticket"}], local=["load_skill"]) == []
+
+
+def test_verify_v_reports_lengths_and_offset_not_the_responses():
+    """-v is how a failing deploy is rerun, in a public job log. Both sides
+    of a mismatch are a recorded ConnectWise response."""
+    recorded = 'CANARY-R-7f3a {"id": 805392}'
+    got = 'CANARY-R-7f3a {"id": 805393, "extra": 1}'
+
+    class Differs:
+        def initialize(self, cassette):
+            return {}, "s1"
+
+        def tools(self, cassette, session):
+            return [{"name": "cw_get_ticket", "inputSchema": {}}]
+
+        def call(self, *args):
+            return {"content": [{"text": got}]}
+
+        def summary(self, cassette, session):
+            return {"replayed_calls": 1, "diverged": 0}
+
+    recording = {"interactions": [{"seq": 4, "tool": "cw_get_ticket",
+                                   "arguments": {}, "result": recorded,
+                                   "is_write": False}]}
+    _report, problems = verify.replay(Differs(), "c", recording, verbose=True)
+    text = "\n".join(problems)
+    assert "CANARY-R-7f3a" not in text and "805392" not in text
+    offset = recorded.index("2}")
+    assert (f"seq 4 cw_get_ticket: expected {len(recorded)} chars, got "
+            f"{len(got)}; first difference at char {offset}") in text
+    assert verify._first_diff("abc", "abcd") == 3
+    assert verify._first_diff("abc", "abc") == 3

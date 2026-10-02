@@ -89,24 +89,39 @@ def _kusto_list(values):
     return ", ".join(json.dumps(v) for v in sorted(values))
 
 
-def candidates_query(table, agents, min_tool_calls, limit):
+def candidates_query(table, agents, min_tool_calls, limit, standalone=False):
     """Rank orchestrations by how much of them is evaluable.
 
     `has_tool_defs` stays in the ranking even though it is nearly always 0
     today — it is the signal that tells you the moment the MCP manifest gap
     closes at the source.
+
+    `standalone` keeps only operations in which one of `agents` is the ONLY
+    agent. Filtering spans to the named agents before counting, as the
+    default does, makes an orchestration in which the agent is a child count
+    as single-agent; make_cassette then builds a multi-agent cassette from
+    it, which the gate cannot replay. So the agents pick the operations, and
+    the count runs over every span in them.
     """
     rename = _RENAME if table == TABLES["workspace"] else ""
-    return f"""{table}{rename}
+    scope = f"| where agent in ({_kusto_list(agents)})"
+    prefix = single = ""
+    if standalone:
+        prefix = (f"let ops = {table}{rename}\n"
+                  f'| where tostring(customDimensions["gen_ai.agent.name"]) '
+                  f"in ({_kusto_list(agents)})\n| distinct operation_Id;\n")
+        scope = "| where operation_Id in (ops)"
+        single = "| where agent_count == 1\n"
+    return f"""{prefix}{table}{rename}
 | extend d = customDimensions
 | extend agent = tostring(d["gen_ai.agent.name"])
-| where agent in ({_kusto_list(agents)})
+{scope}
 | summarize started = min(timestamp), agents = make_set(agent),
-            agent_count = dcount(agent), spans = count(),
+            agent_count = dcountif(agent, isnotempty(agent)), spans = count(),
             tool_calls = countif(name startswith "execute_tool"),
             has_tool_defs = countif(isnotempty(tostring(d["gen_ai.tool.definitions"])))
   by operation_Id
-| where tool_calls >= {int(min_tool_calls)}
+{single}| where tool_calls >= {int(min_tool_calls)}
 | extend usable = case(agent_count > 1 and tool_calls > 0 and has_tool_defs > 0, "1-full",
                        tool_calls > 0 and has_tool_defs > 0, "2-single agent",
                        tool_calls > 0, "3-no tool defs", "4-thin")
@@ -245,6 +260,9 @@ def main():
                     help="comma-separated agent names to look for")
     ap.add_argument("--min-tool-calls", type=int, default=1,
                     help="drop thin traces with fewer tool calls than this")
+    ap.add_argument("--standalone", action="store_true",
+                    help="only operations in which the agent is the only "
+                         "agent: what the agent gate can replay")
     ap.add_argument("--max-orchestrations", type=int, default=25)
     ap.add_argument("--no-content-join", action="store_true",
                     help="do not join AppGenAIContent. Only for a workspace "
@@ -287,7 +305,7 @@ def main():
         if not ids:
             print("-- 1. discover orchestrations")
             print(candidates_query(table, agents, args.min_tool_calls,
-                                   args.max_orchestrations))
+                                   args.max_orchestrations, args.standalone))
         print("-- 2. export spans")
         print(spans_query(table, ids or ["<operation_id>"],
                           content=not args.no_content_join))
@@ -298,8 +316,8 @@ def main():
 
     if not ids:
         tables = run_query(client, args, candidates_query(
-            table, agents, args.min_tool_calls, args.max_orchestrations),
-            timespan)
+            table, agents, args.min_tool_calls, args.max_orchestrations,
+            args.standalone), timespan)
         found = rows_from(tables)
         ids = [r["operation_Id"] for r in found]
         for r in found:
@@ -358,4 +376,5 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from evalconfig import public_main
+    sys.exit(public_main(main))

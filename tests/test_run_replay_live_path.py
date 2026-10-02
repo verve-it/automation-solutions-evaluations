@@ -7,7 +7,9 @@ silently not performed. A review found every one of these call sites could be
 pointed back at the production agent with the suite green, because nothing
 drove main() past --dry-run. This does.
 """
+import io
 import json
+import zipfile
 from types import SimpleNamespace as NS
 
 import pytest
@@ -19,6 +21,18 @@ REPLAY = OPS + "-replay"
 LABEL = "ConnectWise-PSA-ForAgents"
 
 
+def _zip(source):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("main.py", source)
+    return buf.getvalue()
+
+
+# What every hosted agent here reads (--inspect-code), and nothing else.
+CODE = _zip(f'import os\nn = os.environ["{rr.TOOLBOX_NAME_VAR}"]\n'
+            f'v = os.getenv("{rr.TOOLBOX_VERSION_VAR}")\n')
+
+
 class NotFound(Exception):
     status_code = 404
 
@@ -28,8 +42,10 @@ class FakeProject:
     agent's name resolves to after the clone is created."""
 
     def __init__(self, env=None, routes_to_clone=True, replay_readable=True,
-                 others=("triage-analysis-agent",), replay_exists=True):
+                 others=("triage-analysis-agent",), replay_exists=True,
+                 code=CODE):
         self.calls = []
+        self.code = code
         self.env = env or {"AZURE_AI_MODEL_DEPLOYMENT_NAME": "gpt",
                            rr.TOOLBOX_NAME_VAR: "ConnectwiseMCP",
                            rr.TOOLBOX_VERSION_VAR: "1"}
@@ -73,7 +89,7 @@ class FakeProject:
 
     def download_code(self, name, agent_version):
         self.calls.append(("download_code", name, agent_version))
-        return [b"PK\x03\x04zip"]
+        return [self.code]
 
     def create_version_from_code(self, agent_name, definition, code,
                                  description=None, metadata=None):
@@ -143,7 +159,7 @@ def run(monkeypatch, tmp_path, cassette):
     import azure.ai.projects
     import azure.identity
 
-    def _run(project, *extra):
+    def _run(project, *extra, summary=None):
         monkeypatch.setattr(azure.ai.projects, "AIProjectClient", project)
         monkeypatch.setattr(azure.identity, "DefaultAzureCredential",
                             lambda: None)
@@ -151,7 +167,8 @@ def run(monkeypatch, tmp_path, cassette):
             "cassette": "rec", "session": session, "session_honoured": True,
             "replayed_calls": 1, "matched_prefix": 1,
             "recorded_interactions": 2, "writes_attempted": 0,
-            "journal": [{"tool": "cw_query", "outcome": "matched"}]})
+            "journal": [{"tool": "cw_query", "outcome": "matched"}],
+            **(summary or {})})
         return rr.main(["--cassette", cassette, "--server-url",
                         "https://replay.example.net/mcp/rec", "--token", "t",
                         "--project-endpoint", "https://project.example.net",
@@ -167,8 +184,9 @@ def test_every_call_names_the_replay_agent_never_the_agent_under_test(run):
              for kind in ("create", "session", "invoke", "stop_session",
                           "delete_version")}
     assert names == {k: [REPLAY] for k in names}, names
-    # the code comes from the agent under test, byte for byte
-    assert project.named("download_code") == [("download_code", OPS, "29")]
+    # the code comes from the agent under test, byte for byte (read once to
+    # check it names no other agent, once to upload)
+    assert set(project.named("download_code")) == {("download_code", OPS, "29")}
 
 
 def test_the_name_is_checked_to_resolve_to_the_clone_before_invoking(run):
@@ -240,6 +258,24 @@ def test_an_agent_that_names_another_agent_is_refused_before_anything_exists(run
     with pytest.raises(SystemExit) as exc:
         run(project)
     assert "TRIAGE_ANALYSIS_AGENT_NAME=triage-analysis-agent" in str(exc.value)
+    assert not project.named("create") and not project.named("toolbox.create")
+
+
+@pytest.mark.parametrize("code,said", [
+    (_zip('import os\nchild = os.getenv("TRIAGE_ANALYSIS_AGENT_NAME", '
+          '"triage-analysis-agent")\n'), "reads TRIAGE_ANALYSIS_AGENT_NAME"),
+    (b"PK\x03\x04 not a zip", "cannot read")])
+def test_code_that_names_another_agent_is_refused_before_anything_exists(
+        run, code, said):
+    """The orchestrator's environment names no child -- the names are
+    defaults in its code -- and a live run whose hand-offs failed before the
+    children emitted a span is a single-agent recording. That replayed: the
+    clone invoked, its children ran against the live toolbox. Code that
+    cannot be read is refused too: unknown is not none."""
+    project = FakeProject(code=code)
+    with pytest.raises(SystemExit) as exc:
+        run(project)
+    assert said in str(exc.value) and "Nothing was created" in str(exc.value)
     assert not project.named("create") and not project.named("toolbox.create")
 
 
@@ -384,3 +420,150 @@ def test_a_rebuild_beside_other_versions_deletes_the_failed_one(run):
     project.build_failures = 1
     assert run(project) == 0
     assert ("delete_version", REPLAY, "8") in project.calls
+
+
+# --- no recorded content in the job log or the manifest ---------------------
+
+QUERY_CANARY = "CANARY-Q-7f3a"
+ERROR_CANARY = "CANARY-E-7f3a"
+
+
+class FailingInvoke(FakeProject):
+    """The service quotes the input back in its error message."""
+
+    def get_openai_client(self, agent_name):
+        self.calls.append(("invoke", agent_name))
+
+        def create(**kw):
+            raise Exception(f"(invalid_request) bad input {ERROR_CANARY} "
+                            "[Request ID: 0123456789abcdef0123456789abcdef]")
+        return NS(responses=NS(create=create))
+
+
+def test_the_query_is_printed_as_its_length(run, capsys):
+    assert run(FakeProject(), "--query", QUERY_CANARY) == 0
+    out = capsys.readouterr()
+    assert QUERY_CANARY not in out.out + out.err
+    assert f"query: {len(QUERY_CANARY)} chars" in out.out
+
+
+def test_an_invoke_error_prints_class_status_and_request_id_only(run, capsys):
+    run(FailingInvoke(), "--query", QUERY_CANARY)
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert ERROR_CANARY not in text and QUERY_CANARY not in text
+    assert "invoke failed: Exception, no status, request id " \
+           "0123456789abcdef0123456789abcdef" in text
+
+
+def test_an_openai_error_prints_its_code_and_request_id_attribute():
+    """The openai client keeps the id in exc.request_id, not the message, so
+    reading only the message printed "no request id" for every invoke
+    failure, and dropped the code that says whether it was a schema
+    complaint."""
+    exc = Exception(f"Error code: 400 - {ERROR_CANARY}")
+    exc.status_code, exc.request_id, exc.code = \
+        400, "req_0123abcd", "unknown_parameter"
+    text = rr._public_error(exc)
+    assert ERROR_CANARY not in text
+    assert text == ("Exception, status 400, code unknown_parameter, "
+                    "request id req_0123abcd")
+
+
+def test_an_error_attribute_that_is_not_an_identifier_is_not_printed():
+    exc = Exception("x")
+    exc.code, exc.request_id = f"bad {ERROR_CANARY}", f"{ERROR_CANARY} x"
+    text = rr._public_error(exc)
+    assert ERROR_CANARY not in text
+    assert text == "Exception, no status, no request id"
+
+
+def test_the_dry_run_prints_the_querys_length_and_source(run, capsys):
+    assert run(FakeProject(), "--query", QUERY_CANARY, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert QUERY_CANARY not in out
+    assert '"chars": 13' in out and '"source": "--query"' in out
+
+
+def test_the_manifest_keeps_where_it_diverged_not_what_was_sent(run, tmp_path):
+    canary = "CANARY-K-7f3a"
+    assert run(FakeProject(), summary={"first_divergence": {
+        "seq": 3, "tool": "cw_query", "outcome": "diverged",
+        "reason": "not recorded", "key": f'cw_query {{"q": "{canary}"}}',
+        "arguments": {"q": canary}}}) == 0
+    text = (tmp_path / "manifest.json").read_text(encoding="utf-8")
+    assert canary not in text
+    assert json.loads(text)["first_divergence"] == {
+        "seq": 3, "tool": "cw_query", "outcome": "diverged",
+        "reason": "not recorded"}
+
+
+def test_the_manifest_still_carries_what_attribution_reads(run, tmp_path):
+    assert run(FakeProject(), summary={"first_divergence": None}) == 0
+    m = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    for key in ("journal_tools", "diverged_tools", "local_tools",
+                "replay_session", "temp_version", "replayed_calls"):
+        assert key in m, key
+    assert m["first_divergence"] is None
+
+
+# --- a recording uploaded for this run ----------------------------------------
+
+UPLOAD = ("--upload", "--server-url", "https://replay.example.net")
+
+
+def _fake_server(monkeypatch, project, put=201):
+    """The hosted server's /cassettes/<id>, recorded into the project's calls
+    so their order against the SDK's is visible."""
+    def http(method, url, token, body=None, session=None):
+        project.calls.append((method, url, session, body))
+        return put if method == "PUT" else 204
+    monkeypatch.setattr(rr, "_cassette_http", http)
+
+
+def test_the_recording_goes_up_before_anything_is_created(run, monkeypatch,
+                                                          tmp_path, cassette):
+    project = FakeProject()
+    _fake_server(monkeypatch, project)
+    assert run(project, *UPLOAD) == 0
+    kinds = [c[0] for c in project.calls]
+    assert kinds.index("PUT") < kinds.index("toolbox.create") \
+        < kinds.index("create")
+    (_put, url, _session, body), = project.named("PUT")
+    cassette_id = url.rsplit("/", 1)[-1]
+    assert url == f"https://replay.example.net/cassettes/{cassette_id}"
+    assert cassette_id.startswith("rt-")
+    with open(cassette, "rb") as fh:
+        assert body == fh.read()
+    (_kind, _name, tools), = project.named("toolbox.create")
+    assert tools[0].server_url == \
+        f"https://replay.example.net/mcp/{cassette_id}"
+    (_delete, deleted, session, _body), = project.named("DELETE")
+    assert deleted == url and session
+    assert kinds.index("DELETE") > kinds.index("toolbox.delete")
+    manifest = json.loads((tmp_path / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert manifest["cassette_id"] == cassette_id
+
+
+def test_the_upload_is_deleted_when_the_invoke_raises(run, monkeypatch):
+    project = FakeProject()
+    _fake_server(monkeypatch, project)
+
+    def raises(*a):
+        raise RuntimeError("invoke blew up")
+    monkeypatch.setattr(rr, "invoke_agent", raises)
+    with pytest.raises(RuntimeError):
+        run(project, *UPLOAD)
+    assert project.named("DELETE")
+
+
+@pytest.mark.parametrize("status", [503, 409, "URLError"])
+def test_a_failed_upload_creates_nothing(run, monkeypatch, status):
+    project = FakeProject()
+    _fake_server(monkeypatch, project, put=status)
+    with pytest.raises(SystemExit) as exc:
+        run(project, *UPLOAD)
+    assert f"could not upload the cassette to the replay server: {status}" \
+        in str(exc.value)
+    assert not project.named("toolbox.create") and not project.named("create")

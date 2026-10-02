@@ -105,6 +105,10 @@ A replayed run is scored on its **matched prefix** and its divergence point:
  "writes_attempted": 1}
 ```
 
+That is the server's summary. The run manifest, which the gate uploads, keeps
+only `seq`, `tool`, `outcome` and `reason` of `first_divergence`: `key` is the
+call's arguments, which are recorded content.
+
 That answers *"did this change alter the trajectory, and where"* — the right
 question for an agent-change gate. It is **not** the same as *"did the agent do
 the task well"*, which still needs recorded production traces scored by
@@ -521,8 +525,10 @@ jobs:
 **`needs:` is the gate.** Without it the evals run, report, and the deploy
 goes ahead regardless — a dashboard, not a gate.
 
-What it does, in order: verifies the replay server still serves what was
-recorded, replays each **single-agent** cassette against stubbed tools,
+What it does, in order: fetches each `gate-agents` agent's recent standalone
+runs from Log Analytics (production's workspace first, then staging's) and
+scores their baselines, verifies the replay server serves them, uploads and
+replays each **single-agent** cassette against stubbed tools,
 exports the window those replays ran in, **attributes each replayed run to the
 recording it replays**, scores it against that recording's baseline row,
 writes the scores into the job summary, and creates the run in Foundry.
@@ -545,7 +551,7 @@ verdicts — left the gate at **exit 0**. It could not fail.
 | Prove it used the stub | Refuse an A2A call, another agent in the operation, any toolbox but the replay's own, a session the server did not see, another agent than the cassette recorded, and — per tool — more calls than the server journalled, counting every tool the recording did not run locally (bare names included: a write through a locally built client has no prefix). Each of those is a call that reached something real. |
 | Present it as the recording | `run_agent`, `traj_key`, `mcp_toolboxes` and tool definitions become the recording's, so an unchanged agent matches its baseline. What was observed stays under the row's `replay` key. The replayed spans for the Foundry dataset are renamed the same way. |
 | Re-key it | to `(recorded_orchestration_id, recorded_agent)`, which `run_replay.py` now writes into the manifest from the cassette. |
-| Pick the baseline | the committed row for that recording, from **every** file in `baselines/`. None, or two, is a failure. |
+| Pick the baseline | the row for that recording, from **every** file in `out/raw/baselines/` (scored from the fetched runs). None, or two, is a failure. |
 | Wait for ingestion | exit 3 while the row is absent or, for some tool, shows fewer calls than the replay server journalled; the workflow re-exports up to ten times, a minute apart. A half-ingested run would score as a regression. |
 
 Then `run_evals.py --strict-baseline` fails if any replayed run is not in the

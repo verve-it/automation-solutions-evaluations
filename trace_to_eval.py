@@ -1036,4 +1036,5 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from evalconfig import public_main
+    sys.exit(public_main(main))

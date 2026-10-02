@@ -139,3 +139,34 @@ def local_tools(config=None):
 def replay_tool_label(config=None):
     config = config if config is not None else load()
     return config.get("replay_tool_label") or DEFAULTS["replay_tool_label"]
+
+
+def public_main(main):
+    """Run a script's main() so that, in CI, a crash names itself without
+    printing what it was holding.
+
+    The repository is public, so a GitHub Actions log is too. An uncaught
+    exception prints its message, and an SDK error or a json error quotes
+    what it choked on: an agent's input, a tool's result. Under Actions
+    the message is withheld and the class and the line that raised are
+    printed instead; the operation id in the log is enough to reproduce it
+    locally, where the full traceback is printed as before. SystemExit is
+    left alone: those messages are the scripts' own.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return main()
+    import sys
+    import traceback
+    try:
+        return main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as exc:            # noqa: BLE001 -- reported, not hidden
+        frames = traceback.extract_tb(exc.__traceback__)
+        where = (f"{os.path.basename(frames[-1].filename)}:{frames[-1].lineno}"
+                 if frames else "unknown location")
+        script = os.path.basename(sys.argv[0] or "script")
+        print(f"{script}: {type(exc).__name__} at {where} (message withheld: "
+              "it can carry recorded content; reproduce locally with the "
+              "operation id)", file=sys.stderr, flush=True)
+        return 1

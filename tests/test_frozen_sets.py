@@ -121,7 +121,7 @@ def test_the_enum_catches_the_invalid_reference_type(tmp_path):
     """
     _convert(SETS[0][0], tmp_path)          # "severity" is in the full-triage set
     out = tmp_path / "results.json"
-    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out), "--show-values")
     rows = json.loads(out.read_text(encoding="utf-8"))
 
     bad = [r for r in rows if r["checks"]["valid_tool_args"]["passed"] is False]
@@ -132,6 +132,26 @@ def test_the_enum_catches_the_invalid_reference_type(tmp_path):
     # the enum is 20 long; the message shows a prefix and must say so rather
     # than reading as the whole valid set
     assert "more]" in reason, reason
+
+
+def test_the_enum_failure_hides_the_value_without_show_values(tmp_path):
+    """The same failure as above, as a workflow scores it.
+
+    The value is what the agent sent, so it is recorded content, and the
+    reason reaches the job log, the step summary and the uploaded verdicts.
+    Type and length still say which argument was wrong and roughly how.
+    """
+    _convert(SETS[0][0], tmp_path)
+    out = tmp_path / "results.json"
+    _score(tmp_path / "eval_runs.jsonl", "--json", str(out))
+    rows = json.loads(out.read_text(encoding="utf-8"))
+
+    bad = [r for r in rows if r["checks"]["valid_tool_args"]["passed"] is False]
+    assert len(bad) == 1, [r["run_agent"] for r in bad]
+    reason = bad[0]["checks"]["valid_tool_args"]["reason"]
+    assert "'reference_type'=<str, 8 chars> not in [" in reason, reason
+    assert "severity" not in reason, reason
+    assert "severity" not in out.read_text(encoding="utf-8")
 
 
 def test_the_enum_does_not_fire_on_the_resolver_bugs(tmp_path):
