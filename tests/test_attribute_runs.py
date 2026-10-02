@@ -633,6 +633,29 @@ def test_a_run_not_ingested_at_all_waits_and_names_what_was_there(w, capsys):
     assert f"{OPS} v16" in out          # the evidence
 
 
+def test_a_run_exported_before_its_content_rows_waits(w, capsys):
+    """2026-10-02: a cw_query span was ingested at 16:07:56 and its
+    AppGenAIContent row at 16:08:18. Exported in between, the arguments were
+    App Insights' placeholder and valid_tool_args -- a gating check --
+    reported "cw_query: arguments are not JSON" for a call that was fine."""
+    import trace_to_eval as tte
+    span = _calls_to(w.spans, w.replay_ops[0], "cw_resolve")[0]
+    dims = span["customDimensions"]
+    dims = json.loads(dims) if isinstance(dims, str) else dict(dims)
+    placeholder = tte.CONTENT_PLACEHOLDER + "."
+    dims.update({tte.K_TOOL_ARGS: placeholder, tte.K_TOOL_RES: placeholder,
+                 "_MS.GenAIContentId": "pending"})
+    late = dict(span, customDimensions=json.dumps(dims))
+    for k in list(late):
+        if k.startswith("c_"):
+            late[k] = None
+    spans = [late if s is span else s for s in w.spans]
+
+    assert w.attribute(spans=spans) == ar.EXIT_NOT_YET
+    out = capsys.readouterr().out
+    assert "1 span(s) whose AppGenAIContent row was not in the export" in out
+
+
 def test_local_tools_are_not_expected_at_the_stub(w):
     """load_skill and tool_search are in the trace and never reach the
     server; a per-tool comparison must not wait for them."""
