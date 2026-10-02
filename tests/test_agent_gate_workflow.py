@@ -492,3 +492,17 @@ def test_the_configuration_check_runs_before_login_and_names_everything(steps):
     optional = {"AZURE_JUDGE_DEPLOYMENT"}
     for name in read - optional:
         assert name in check["run"], name
+
+
+def test_azure_is_logged_into_again_before_each_late_azure_step(steps):
+    """GitHub's OIDC assertion lives 5 minutes and the CLI presents it for
+    each new resource. The first staging run reached the export 16 minutes
+    in and failed AADSTS700024. Each step that first touches a resource late
+    is preceded by its own login."""
+    names = [s.get("name") or s.get("uses", "") for s in steps]
+    for late in ("Export the window and attribute each replay to its recording",
+                 "Score it in Foundry, for the detail view"):
+        i = names.index(late)
+        assert str(steps[i - 1].get("uses", "")).startswith("azure/login"), late
+    foundry = names.index("Score it in Foundry, for the detail view")
+    assert steps[foundry - 1].get("if") == steps[foundry].get("if")

@@ -260,6 +260,17 @@ jobs:
       #
       # Raw exports go under out/raw/, which is never uploaded -- see the
       # upload step. Only the replay's own spans go on to the Foundry dataset.
+      # Log in again. GitHub's OIDC assertion, which the CLI presents for
+      # every resource it has no token for yet, is valid for 5 minutes. The
+      # first Log Analytics call comes after the replays -- 16 minutes in on
+      # the first staging run, with provisioning waits -- and failed with
+      # AADSTS700024 "Client assertion is not within its valid time range".
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - name: Export the window and attribute each replay to its recording
         id: attribute
         env:
@@ -321,6 +332,14 @@ jobs:
       # the detail is in Foundry -> Evaluation rather than only in this log.
       # Runs even when scoring failed: a failed gate is exactly when someone
       # wants to open the run and look at it.
+      # And again: attribution retries for up to ten minutes first.
+      - uses: azure/login@v2
+        if: always() && steps.score.outcome != 'skipped'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - name: Score it in Foundry, for the detail view
         if: always() && steps.score.outcome != 'skipped'
         run: |
