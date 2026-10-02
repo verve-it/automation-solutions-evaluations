@@ -23,8 +23,8 @@
     "version": "CONNECTWISE_TOOLBOX_VERSION"
   },
 
-  "_local_tools": "Foundry-side tools a hosted agent runs itself (skills, tool search). A recording that happens not to call one must not make a replay that does look like a stub bypass.",
-  "local_tools": ["load_skill", "run_skill_script", "tool_search"],
+  "_local_tools": "Foundry-side tools a hosted agent runs itself (skills, tool search). A recording that happens not to call one must not make a replay that does look like a stub bypass. multi_tool_use.parallel is the model's parallel-call wrapper leaking out as a call of its own: on 2026-10-02 it wrapped load_skill and cw_search/cw_resolve calls, its spans had no child spans and an empty result, so nothing inside it was executed anywhere. The calls it names are not counted; any that really ran have their own spans and are checked one by one.",
+  "local_tools": ["load_skill", "multi_tool_use.parallel", "run_skill_script", "tool_search"],
 
   "_replay_tool_label": "Fallback only. A replay binds under the server_label its recording used (ConnectWise-PSA-ForAgents___*), read from the cassette, because the label is part of every tool name the agent sees.",
   "replay_tool_label": "connectwise_replay"
