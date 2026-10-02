@@ -21,10 +21,13 @@ them, passed 0 of 2 runs (4 of 8 gating verdicts) and exited 0.
 
 How a replayed row is found
 ---------------------------
-By `(run_agent, agent_version) == (replay_agent, temp_version)`. The clone is
-a version of a separate replay agent that nothing but run_replay.py calls, so
-the pair is exact, and the export window can hold any amount of other
-traffic without any of it being scored.
+By `(run_agent, agent_version) == (replay_agent, temp_version)`, and then by
+the replay's own toolbox. The clone is a version of a separate replay agent
+that nothing but run_replay.py calls, so other traffic in the window is never
+scored. The version alone is not unique: the replay agent is created for each
+run and deleted after it, so every clone is v1, and the gate's replays of one
+agent all share that pair. Each replay binds a toolbox named for its own
+session (`replay-<session>`), which is.
 
 What is proven before it is scored
 ----------------------------------
@@ -303,6 +306,17 @@ def attribute(manifests, rows, baselines, tool_manifests=()):
                  "a different version than the one run_replay.py created.",
                  retryable=True)
             continue
+        if len(matches) > 1 and m.get("replay_toolbox"):
+            own = (str(m["replay_toolbox"][0]), str(m["replay_toolbox"][1]))
+            matches = [r for r in matches
+                       if own in {(str(t.get("toolbox")), str(t.get("version")))
+                                  for t in r.get("mcp_toolboxes") or []}]
+            if not matches:
+                fail(f"no scored run of {agent} v{version} called this "
+                     f"replay's toolbox {own[0]}@{own[1]}. Either its spans "
+                     "are not ingested yet or the replay never reached the "
+                     "stub.", retryable=True)
+                continue
         if len(matches) > 1:
             ops = ", ".join((r.get("orchestration_id") or "?")[:12]
                             for r in matches)

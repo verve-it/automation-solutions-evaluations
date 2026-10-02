@@ -223,6 +223,21 @@ def w(tmp_path):
 
 # ------------------------------------------------------------ the original bug
 
+def test_replays_that_are_all_v1_are_told_apart_by_their_toolbox(w):
+    """The first full staging run: the replay agent is made for each run, so
+    every clone is v1, and attribution refused all seven replays -- '2 scored
+    runs of connectwise-operations-agent-replay v1 ... refusing to pick'."""
+    recorded = _load(OPS_TRACE)
+    spans, manifests = [], []
+    for op, new, box in zip(w.ops, w.replay_ops, ("replay-aaaa", "replay-bbbb")):
+        spans += as_replayed(recorded, op, new, version="1", toolbox=box)
+        manifests.append(_manifest(op, "1", replay_toolbox=[box, "1"]))
+    spans += _load(FULL_TRACE)
+    assert w.attribute(spans=spans, manifests=manifests) == 0
+    got = {r["orchestration_id"] for r in w.rows()}
+    assert got == set(w.ops)        # each presented as its own recording
+
+
 def test_the_old_gate_passed_the_two_worst_runs(w, capsys):
     """Scored as exported, against the baseline the workflow named, nothing
     is compared and the exit code is 0."""
