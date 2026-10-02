@@ -311,7 +311,52 @@ class Handler(BaseHTTPRequestHandler):
         # tail keeps /mcp, /api/mcp and /runtime/... all working.
         return parts, parse_qs(parsed.query)
 
+    def _session(self):
+        """This request's session, and why it cannot be used if it cannot.
+
+        Foundry's MCP client sends the session it was configured with AND
+        the one the server echoed back, and the Functions host hands the
+        custom handler both as one header: `<id>, <id>`. Taken whole, that
+        is a session nobody reads -- every call of a gated replay was
+        journalled under `<id>, <id>.json` while /summary looked under
+        `<id>`, so attribution saw zero calls and called the run a bypass.
+        One value repeated is one session; two different ones are a client
+        that cannot say which it means, and guessing would put calls in
+        another replay's queue.
+        """
+        raw = self.headers.get("Mcp-Session-Id")
+        if not raw:
+            return None, None
+        values = {v.strip() for v in raw.split(",") if v.strip()}
+        if len(values) == 1:
+            return values.pop(), None
+        if not values:
+            return None, None
+        return None, (f"Mcp-Session-Id carries {len(values)} different "
+                      f"sessions ({', '.join(sorted(values))}); send one")
+
     # -------------------------------------------------------------- routes
+
+    def do_DELETE(self):
+        """Session termination, which this server does not allow.
+
+        A client closes its session with DELETE when it is done. The state
+        has to outlive that: it is the journal run_replay.py reads after the
+        agent finishes. 405 is the answer MCP defines for a server that does
+        not let clients terminate sessions; without this method the base
+        handler answered 501, which reads as a broken server in the logs.
+        """
+        if not self._authorized():
+            return self._send({"error": "unauthorized"}, 401)
+        body = json.dumps({"error": "method_not_allowed", "message":
+                           "sessions are kept for the journal"}).encode()
+        self.send_response(405)
+        self.send_header("Allow", "GET, POST")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
     def do_GET(self):
         parts, query = self._path()
@@ -362,8 +407,11 @@ class Handler(BaseHTTPRequestHandler):
         if cassette is None:
             return self._send({"error": "unknown_cassette",
                                "cassette": cassette_id}, 404)
-        session = (query.get("session", [None])[0]
-                   or self.headers.get("Mcp-Session-Id"))
+        session, problem = self._session()
+        if problem:
+            return self._send({"error": "bad_session", "message": problem},
+                              400)
+        session = query.get("session", [None])[0] or session
         try:
             state, _version = self.store.load(_state_key(cassette_id, session))
         except Unavailable as exc:
@@ -403,7 +451,11 @@ class Handler(BaseHTTPRequestHandler):
         # initialize; one that ignores the header shares a single session per
         # cassette, which is the old single-process behaviour rather than a
         # failure.
-        session = self.headers.get("Mcp-Session-Id")
+        session, problem = self._session()
+        if problem:
+            return self._send({"jsonrpc": "2.0", "id": req.get("id"),
+                               "error": {"code": -32600,
+                                         "message": problem}}, 400)
         if not session and req.get("method") == "initialize":
             session = uuid.uuid4().hex
 
