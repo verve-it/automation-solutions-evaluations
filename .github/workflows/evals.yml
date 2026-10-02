@@ -88,6 +88,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # setup-python's problem matcher copies a traceback's exception line
+      # into an annotation, which is public. See agent-gate.yml.
+      - name: Keep tracebacks out of annotations
+        run: echo "::remove-matcher owner=python::"
+
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt
 
@@ -126,6 +131,10 @@ jobs:
         with:
           name: frozen-set-results
           path: artifacts/
+
+      - name: Remove the converted sets
+        if: always()
+        run: rm -rf out out-ops out-triage
 
   # ------------------------------------------------------------------ plan
   # Which Foundry projects this run touches.
@@ -176,6 +185,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # setup-python's problem matcher copies a traceback's exception line
+      # into an annotation, which is public. See agent-gate.yml.
+      - name: Keep tracebacks out of annotations
+        run: echo "::remove-matcher owner=python::"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
@@ -210,12 +224,12 @@ jobs:
               --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
               --hours "${{ github.event.inputs.hours || '24' }}" \
               --min-tool-calls 1 \
-              -o artifacts/spans.json
+              -o out/raw/spans.json
 
       - name: Convert
         run: |
-          python trace_to_eval.py artifacts/spans.json -o out \
-              --tool-defs tool_manifests/ --skill-registry artifacts/skills
+          python trace_to_eval.py out/raw/spans.json -o out/drift \
+              --tool-defs tool_manifests/ --skill-registry out/raw/skills
 
       # New orchestrations are not in any baseline, so this reports rather
       # than gates until a baseline covering them is promoted. What it does
@@ -223,7 +237,7 @@ jobs:
       # printed report.
       - name: Score against the current baseline
         run: |
-          python run_evals.py out/eval_runs.jsonl \
+          python run_evals.py out/drift/eval_runs.jsonl \
               --expected expected.json \
               --baseline baselines/full-triage-2026-09-18.json \
               --json "artifacts/drift-$(date -u +%Y%m%dT%H%M%SZ).json"
@@ -239,15 +253,15 @@ jobs:
       # just be a re-registration.
       - name: Build the Foundry dataset
         run: |
-          python foundry/to_foundry_dataset.py artifacts/spans.json \
+          python foundry/to_foundry_dataset.py out/raw/spans.json \
               --expected expected.json \
               --tool-defs tool_manifests/ \
               --no-messages \
-              -o artifacts/foundry-dataset.jsonl
+              -o out/raw/foundry-dataset.jsonl
 
       - name: Score it in Foundry
         run: |
-          python foundry/run_cloud_eval.py artifacts/foundry-dataset.jsonl \
+          python foundry/run_cloud_eval.py out/raw/foundry-dataset.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --name "drift-${{ matrix.environment }}" \
@@ -261,19 +275,20 @@ jobs:
           github.event.schedule == '0 7 * * 1'
           || github.event.inputs.judged == 'true'
         run: |
-          python foundry/submit_to_foundry.py out/eval_runs.jsonl \
+          python foundry/submit_to_foundry.py out/drift/eval_runs.jsonl \
               --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
               --model-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
               --sample 20 \
               --name "triage-evals-${{ matrix.environment }}-$(date -u +%Y%m%d)" \
-              --out artifacts/foundry-input.jsonl
+              --out out/raw/foundry-input.jsonl
 
       # Verdicts, not the raw export. `spans.json` and the Foundry dataset
       # are a live export of a production project, and a workflow artifact in
       # a PUBLIC repository is downloadable by anyone. Scrubbing is
       # deliberately not automatable (scrub_trace.py is propose -> human
-      # review -> apply), so the export stays on the runner; the run this job
-      # creates in Foundry is where a drift finding is investigated.
+      # review -> apply), so the export stays on the runner, under out/,
+      # which no upload names; the run this job creates in Foundry is where
+      # a drift finding is investigated.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -281,3 +296,9 @@ jobs:
           path: |
             artifacts/drift-*.json
           retention-days: 90     # matches Foundry trace retention
+
+      # A self-hosted runner keeps its workspace, and the next job on it may
+      # be anyone's. The raw export is gone when this job is.
+      - name: Remove the raw export
+        if: always()
+        run: rm -rf out

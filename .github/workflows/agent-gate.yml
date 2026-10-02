@@ -97,22 +97,18 @@ jobs:
     # this is not a slow gate; it is a broken one.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: verve-it/automation-solutions-evaluations
-          ref: ${{ inputs.ref || 'main' }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
       # Fail here, before login, rather than at login or three steps in with an
       # unhelpful SDK error.
+      #
+      # First, before the checkout: `ref` is checked out and its code run
+      # with this environment's token and secrets, and a caller could pass
+      # any ref -- `refs/pull/<n>/head` from a fork included. Only main, a
+      # release tag or a pinned commit is code someone here reviewed.
       - name: Check the gate is configured
+        env:
+          REF: ${{ inputs.ref || 'main' }}
         run: |
+          [[ "$REF" =~ ^(main|v[0-9][0-9.]*|[0-9a-f]{40})$ ]] || { echo "::error::ref $REF is not main, a v-tag or a commit"; exit 1; }
           missing=
           [ -n "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" ] || missing="$missing AZURE_AI_PROJECT_ENDPOINT(var)"
           [ -n "${{ vars.REPLAY_SERVER_URL }}" ]         || missing="$missing REPLAY_SERVER_URL(var)"
@@ -128,6 +124,24 @@ jobs:
           echo "project     : ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}"
           echo "replay      : ${{ vars.REPLAY_SERVER_URL }}"
 
+      - uses: actions/checkout@v4
+        with:
+          repository: verve-it/automation-solutions-evaluations
+          ref: ${{ inputs.ref || 'main' }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # setup-python registers a problem matcher that copies a traceback's
+      # exception line into an annotation, and an annotation is public: an
+      # SDK error quoting the agent's input would be on the run's front page.
+      - name: Keep tracebacks out of annotations
+        run: echo "::remove-matcher owner=python::"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -142,6 +156,22 @@ jobs:
 
       - name: Build cassettes from the committed traces
         run: make cassettes
+
+      # Seconds, before anything is created. Each check here was once found
+      # 5-25 minutes into a run, after clones were built: an agent not in the
+      # project, a workspace id in the wrong form, a missing read role, a
+      # hosted agent whose code ignores the toolbox variables, a recording
+      # with no baseline. replay/preflight.py says what each one means.
+      - name: Preflight
+        env:
+          GATE_AGENTS: ${{ inputs.gate-agents }}
+        run: |
+          python replay/preflight.py --cassettes cassettes --baselines baselines \
+              --gate-agents "$GATE_AGENTS" \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
+              --judge-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --summary "$GITHUB_STEP_SUMMARY"
 
       # The replay server has to be answering before an agent is pointed at
       # it, or every call diverges and the gate blames the agent.
@@ -164,7 +194,7 @@ jobs:
           GATE_AGENTS: ${{ inputs.gate-agents }}
         run: |
           set -o pipefail
-          mkdir -p artifacts
+          mkdir -p artifacts out/raw
           shopt -s nullglob
           wanted=" $(echo "$GATE_AGENTS" | tr ',' ' ' | xargs) "
           ran=0
@@ -187,7 +217,7 @@ jobs:
                 --cassette "$cassette" \
                 --server-url "${{ vars.REPLAY_SERVER_URL }}/mcp/$id" \
                 --token "$REPLAY_TOKEN" \
-                --journal "artifacts/journal-$id.json" \
+                --journal "out/raw/journal-$id.json" \
                 --manifest "artifacts/manifest-$id.json" \
                 | tee "artifacts/replay-$id.log"
             echo "::endgroup::"
@@ -358,7 +388,7 @@ jobs:
             echo "[Open this run in Foundry -> Evaluation](${url:-${{ vars.AZURE_AI_PROJECT_ENDPOINT }}})"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Verdicts, journals and provenance — never the raw export.
+      # Verdicts and provenance — never the raw export.
       #
       # A workflow artifact in a PUBLIC repository is downloadable by anyone,
       # and the exported window and the Foundry dataset are a live export of
@@ -371,8 +401,12 @@ jobs:
       # tests/test_agent_gate_workflow.py now checks each glob against every
       # path an export step writes.
       #
-      # The journals are safe: they replay the committed, already-scrubbed
-      # cassettes. replay-baseline.json is rows of the committed baselines.
+      # Not the journals either. Each entry's key is the call's arguments as
+      # the agent under test sent them, which are no longer the scrubbed
+      # cassette's once an agent change diverges, so they are written under
+      # out/raw/. Nothing needs them uploaded: attribution reads the
+      # per-tool counts (journal_tools, diverged_tools) from the manifests.
+      # replay-baseline.json is rows of the committed baselines.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -380,8 +414,13 @@ jobs:
           path: |
             artifacts/gate.json
             artifacts/replay-baseline.json
-            artifacts/journal-*.json
             artifacts/manifest-*.json
             artifacts/replay-*.log
             artifacts/foundry-run.log
           retention-days: 90
+
+      # A self-hosted runner keeps its workspace between jobs, and the next
+      # job on it may be anyone's. The raw export is gone when this job is.
+      - name: Remove the raw export
+        if: always()
+        run: rm -rf out

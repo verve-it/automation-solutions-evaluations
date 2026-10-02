@@ -13,7 +13,14 @@ import pytest
 from conftest import REPO
 
 yaml = pytest.importorskip("yaml")
-GATE = os.path.join(REPO, ".github", "workflows", "agent-gate.yml")
+WORKFLOWS = os.path.join(REPO, ".github", "workflows")
+GATE = os.path.join(WORKFLOWS, "agent-gate.yml")
+EVALS = os.path.join(WORKFLOWS, "evals.yml")
+
+
+def _load(path):
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
 
 
 @pytest.fixture(scope="module")
@@ -140,8 +147,12 @@ def _raw_outputs(steps):
     """Every path a step writes that holds exported trace content.
 
     Read from the commands themselves -- the output of export_traces.py,
-    trace_to_eval.py, attribute_runs.py's --out-spans/--out-runs and
-    to_foundry_dataset.py -- so a renamed output cannot slip past the check.
+    trace_to_eval.py (and its --skill-registry), attribute_runs.py's
+    --out-spans/--out-runs, to_foundry_dataset.py, make_cassette.py,
+    submit_to_foundry.py's --out and run_replay.py's --journal -- so a
+    renamed output cannot slip past the check. A journal's keys are the
+    arguments the agent under test sent, which stop being the scrubbed
+    cassette's the moment an agent change diverges.
     """
     import re
     raw = []
@@ -150,9 +161,13 @@ def _raw_outputs(steps):
         for cmd in re.split(r"\n(?=\s*python )", run):
             if not any(t in cmd for t in ("export_traces.py", "trace_to_eval.py",
                                           "attribute_runs.py",
-                                          "to_foundry_dataset.py")):
+                                          "to_foundry_dataset.py",
+                                          "make_cassette.py",
+                                          "submit_to_foundry.py",
+                                          "run_replay.py")):
                 continue
-            for flag in ("-o", "--out-spans", "--out-runs"):
+            for flag in ("-o", "--out", "--out-spans", "--out-runs",
+                         "--skill-registry", "--journal"):
                 for m in re.finditer(rf"(?:^|\s){re.escape(flag)}\s+(\S+)", cmd):
                     raw.append(m.group(1).strip('"'))
     return raw
@@ -162,6 +177,23 @@ def _upload_globs(steps):
     upload = [s for s in steps
               if str(s.get("uses", "")).startswith("actions/upload-artifact")][0]
     return [g.strip() for g in upload["with"]["path"].splitlines() if g.strip()]
+
+
+@pytest.fixture(scope="module")
+def drift_steps():
+    return _load(EVALS)["jobs"]["drift"]["steps"]
+
+
+def test_the_journals_are_raw_and_not_uploaded(steps):
+    raw = _raw_outputs(steps)
+    assert "out/raw/journal-$id.json" in raw, raw
+    assert not any("journal" in g for g in _upload_globs(steps))
+
+
+def test_the_drift_export_is_not_published(drift_steps):
+    """The nightly export is the same live content as the gate's window."""
+    _assert_unpublished(drift_steps, minimum=5)
+    assert "artifacts/drift-*.json" in _upload_globs(drift_steps)
 
 
 def test_the_raw_export_is_not_published(steps):
@@ -180,9 +212,14 @@ def test_the_raw_export_is_not_published(steps):
     output -- and each export's sidecars -- lives under out/, and every upload
     entry is a file pattern directly inside artifacts/.
     """
+    _assert_unpublished(steps, minimum=6)
+    assert "artifacts/gate.json" in _upload_globs(steps)
+
+
+def _assert_unpublished(steps, minimum):
     import fnmatch
     raw = _raw_outputs(steps)
-    assert len(raw) >= 5, raw
+    assert len(raw) >= minimum, raw
     sidecars = []
     for path in raw:
         assert path.startswith("out/"), f"raw output outside out/: {path}"
@@ -197,7 +234,6 @@ def test_the_raw_export_is_not_published(steps):
             parts = path.split("/")
             for i in range(1, len(parts) + 1):     # the file and every parent
                 assert not fnmatch.fnmatch("/".join(parts[:i]), g), (path, g)
-    assert "artifacts/gate.json" in _upload_globs(steps)
 
 
 def _step(steps, step_id):
@@ -506,3 +542,97 @@ def test_azure_is_logged_into_again_before_each_late_azure_step(steps):
         assert str(steps[i - 1].get("uses", "")).startswith("azure/login"), late
     foundry = names.index("Score it in Foundry, for the detail view")
     assert steps[foundry - 1].get("if") == steps[foundry].get("if")
+
+
+# --- public channels ---------------------------------------------------------
+# The job log, its annotations, $GITHUB_STEP_SUMMARY and the artifacts of a
+# public repository are readable by anyone. No value read from a recording
+# goes to them.
+
+def _python_jobs():
+    for path in (GATE, EVALS):
+        for name, job in _load(path)["jobs"].items():
+            yield os.path.basename(path), name, job
+
+
+@pytest.mark.parametrize("where,name,job", list(_python_jobs()),
+                         ids=lambda v: v if isinstance(v, str) else "")
+def test_every_job_runs_on_a_fresh_hosted_runner(where, name, job):
+    """A hosted runner is discarded with the job; a cache is not."""
+    assert job["runs-on"] == "ubuntu-latest", (where, name)
+    for step in job.get("steps", []):
+        assert not str(step.get("uses", "")).startswith("actions/cache"), \
+            (where, name)
+
+
+@pytest.mark.parametrize("where,name,job", [
+    j for j in _python_jobs()
+    if any(str(s.get("uses", "")).startswith("actions/setup-python")
+           for s in j[2].get("steps", []))],
+    ids=lambda v: v if isinstance(v, str) else "")
+def test_every_python_job_keeps_tracebacks_out_of_annotations_and_cleans_up(
+        where, name, job):
+    """setup-python's problem matcher turns a traceback's exception line --
+    an SDK error quoting the agent's input, say -- into a public annotation.
+    And the last step, whatever happened, removes what was written under
+    out/."""
+    steps = job["steps"]
+    i = next(n for n, s in enumerate(steps)
+             if str(s.get("uses", "")).startswith("actions/setup-python"))
+    assert steps[i + 1].get("run", "").strip() == \
+        'echo "::remove-matcher owner=python::"', (where, name)
+    last = steps[-1]
+    assert last.get("if") == "always()", (where, name)
+    assert last.get("run", "").strip().startswith("rm -rf out"), (where, name)
+
+
+def _workflow_texts():
+    for entry in sorted(os.listdir(WORKFLOWS)):
+        with open(os.path.join(WORKFLOWS, entry), encoding="utf-8") as fh:
+            yield entry, fh.read()
+
+
+def test_no_workflow_prints_recorded_values():
+    """Each of these prints recorded content by design: they are for a
+    local, scrubbed trace, never a public job log."""
+    import re
+    for entry, text in _workflow_texts():
+        assert "--show-values" not in text, entry
+        assert "--dry-run" not in text, entry
+        for line in text.splitlines():
+            if "verify.py" in line:
+                assert not re.search(r"\s(-v|--verbose)\b", line), (entry, line)
+
+
+def test_the_gate_runs_only_a_reviewed_ref(steps):
+    """`ref` is checked out and run with the environment's secrets; a caller
+    could name `refs/pull/<n>/head` from a fork. Checked before the
+    checkout, since after it the code has already been fetched."""
+    import re
+    names = [s.get("name") or s.get("uses") for s in steps]
+    check = next(s for s in steps if s.get("name") == "Check the gate is configured")
+    assert names.index("Check the gate is configured") < \
+        names.index("actions/checkout@v4")
+    assert check["env"]["REF"] == "${{ inputs.ref || 'main' }}"
+    pattern = "^(main|v[0-9][0-9.]*|[0-9a-f]{40})$"
+    assert f'[[ "$REF" =~ {pattern} ]]' in check["run"]
+    for ref, ok in (("main", True), ("v1.2", True), ("a" * 40, True),
+                    ("refs/pull/7/head", False), ("develop", False),
+                    ("main; curl x", False), ("abc123", False)):
+        assert bool(re.match(pattern, ref)) is ok, ref
+
+
+def test_preflight_runs_before_anything_is_created(steps):
+    """After the cassettes it checks exist, before verify and before the
+    first clone: the point is seconds, not a failure 25 minutes in."""
+    names = [s.get("name", "") for s in steps]
+    pre = names.index("Preflight")
+    assert names.index("Build cassettes from the committed traces") < pre
+    assert pre < names.index("Verify the replay server serves what we recorded")
+    assert pre < names.index("Replay each single-agent cassette against "
+                             "stubbed tools")
+    run = steps[pre]["run"]
+    for flag in ("--gate-agents", "--project-endpoint", "--workspace",
+                 "--judge-deployment", "--summary"):
+        assert flag in run
+    assert "--offline" not in run

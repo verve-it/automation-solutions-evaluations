@@ -51,6 +51,8 @@ Routes
     POST /mcp/<cassette-id>    MCP, using that cassette
     GET  /summary[?session=]   the replay journal
     GET  /                     health, and nothing else
+    PUT  /cassettes/rt-<id>    one run's recording, uploaded for that run
+    DELETE /cassettes/rt-<id>  ...and removed after it, with its session
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -71,6 +74,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # keeps root files and drops directories, so a directory in the package is a
 # 502 waiting to happen.
 PAYLOAD_NAME = "replay_payload.json"
+
+# A cassette uploaded for one run, rather than baked into the deployment: the
+# gate replays the agent's recent real runs, fetched from Log Analytics when it
+# starts, so there is nothing to deploy them with. `rt-` can never be a
+# deployed id (those are `<date>-<op12>`), and the character set leaves no
+# room for a path trick in a blob name.
+RUNTIME_ID = re.compile(r"^rt-[a-z0-9][a-z0-9-]{6,62}$")
+MAX_CASSETTE_BYTES = 32 * 1024 * 1024
 
 
 def _package_listing(root, limit=60):
@@ -249,9 +260,12 @@ class Library:
         self.manifests = self.source.manifests()
         self._cache = {}
 
-    def get(self, cassette_id):
+    def get(self, cassette_id, store=None):
         if cassette_id not in self._cache:
             data = self.source.cassette(cassette_id)
+            if (data is None and store is not None
+                    and RUNTIME_ID.match(cassette_id)):
+                data, _version = store.load(_cassette_key(cassette_id))
             if data is None:
                 return None
             tools, missing = tool_definitions(
@@ -259,13 +273,20 @@ class Library:
             self._cache[cassette_id] = (data, tools, missing)
         return self._cache[cassette_id]
 
-    def cassette(self, cassette_id):
+    def cassette(self, cassette_id, store=None):
         """A fresh Cassette object; its state is loaded from the store."""
-        entry = self.get(cassette_id)
+        entry = self.get(cassette_id, store)
         if entry is None:
             return None, None
         data, tools, _missing = entry
         return Cassette(data, self.config.on_exhausted), tools
+
+    def evict(self, cassette_id):
+        # ponytail: only this instance's copy. Another instance keeps an
+        # uploaded cassette it served in memory until it recycles; it is
+        # immutable and its id is never reused, so that costs memory, not
+        # correctness.
+        self._cache.pop(cassette_id, None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -348,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self._authorized():
             return self._send({"error": "unauthorized"}, 401)
+        if "cassettes" in self._path()[0]:
+            return self._delete_cassette()
         body = json.dumps({"error": "method_not_allowed", "message":
                            "sessions are kept for the journal"}).encode()
         self.send_response(405)
@@ -357,6 +380,92 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _runtime_cassette(self):
+        """The rt- id of /cassettes/<id>, or None."""
+        parts, _query = self._path()
+        if parts[-2:-1] == ["cassettes"] and RUNTIME_ID.match(parts[-1]):
+            return parts[-1]
+        return None
+
+    def _bad_id(self):
+        return self._send({"error": "bad_cassette_id", "message":
+                           "/cassettes/<id> takes an id matching "
+                           f"{RUNTIME_ID.pattern}"}, 400)
+
+    def do_PUT(self):
+        """One run's recording, uploaded by run_replay.py --upload.
+
+        Create-only: a cassette is immutable, so a second PUT of one id is a
+        409 rather than a replay whose recording changed under it."""
+        if not self._authorized():
+            return self._send({"error": "unauthorized"}, 401)
+        cassette_id = self._runtime_cassette()
+        if cassette_id is None:
+            return self._bad_id()
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        # The body is left unread, so the connection cannot be reused. A
+        # negative length is refused too: read(-1) reads to the end of the
+        # stream, which took a 40 MB body past the limit.
+        if not 0 <= length <= MAX_CASSETTE_BYTES:
+            self.close_connection = True
+            if length < 0:
+                return self._send({"error": "bad_length", "message":
+                                   "Content-Length is not a byte count"},
+                                  400)
+            return self._send({"error": "too_large", "message":
+                               f"{length} bytes; the limit is "
+                               f"{MAX_CASSETTE_BYTES}"}, 413)
+        try:
+            data = json.loads(self.rfile.read(length) or b"null")
+            # Parsed as every lookup will parse it: `{"interactions": [1]}`
+            # was stored, and then every call on it was a traceback and a
+            # dropped connection for the cassette's lifetime.
+            tool_definitions(Cassette(data, self.config.on_exhausted),
+                             self.library.manifests)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            data = None
+        if not (isinstance(data, dict)
+                and isinstance(data.get("interactions"), list)):
+            return self._send({"error": "not_a_cassette", "message":
+                               "a cassette is a JSON object with an "
+                               "`interactions` list"}, 400)
+        try:
+            self.store.save(_cassette_key(cassette_id), data, None)
+        except Conflict:
+            return self._send({"error": "exists", "cassette": cassette_id},
+                              409)
+        except Unavailable as exc:
+            return self._send({"error": "state_unavailable",
+                               "message": f"replay state unavailable: {exc}"},
+                              503)
+        self._send({"cassette": cassette_id,
+                    "interactions": len(data["interactions"])}, 201)
+
+    def _delete_cassette(self):
+        """The uploaded cassette, and the named session's state with it.
+        Idempotent: what is already gone is fine."""
+        cassette_id = self._runtime_cassette()
+        if cassette_id is None:
+            return self._bad_id()
+        session, problem = self._session()
+        if problem:
+            return self._send({"error": "bad_session", "message": problem},
+                              400)
+        try:
+            self.store.delete(_cassette_key(cassette_id))
+            if session:
+                self.store.delete(_state_key(cassette_id, session))
+        except Unavailable as exc:
+            return self._send({"error": "state_unavailable",
+                               "message": f"replay state unavailable: {exc}"},
+                              503)
+        self.library.evict(cassette_id)
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         parts, query = self._path()
@@ -403,16 +512,16 @@ class Handler(BaseHTTPRequestHandler):
                                "name a cassette: /summary/<cassette-id>",
                                "available":
                                    self.library.source.cassette_ids()}, 404)
-        cassette, _tools = self.library.cassette(cassette_id)
-        if cassette is None:
-            return self._send({"error": "unknown_cassette",
-                               "cassette": cassette_id}, 404)
         session, problem = self._session()
         if problem:
             return self._send({"error": "bad_session", "message": problem},
                               400)
         session = query.get("session", [None])[0] or session
         try:
+            cassette, _tools = self.library.cassette(cassette_id, self.store)
+            if cassette is None:
+                return self._send({"error": "unknown_cassette",
+                                   "cassette": cassette_id}, 404)
             state, _version = self.store.load(_state_key(cassette_id, session))
         except Unavailable as exc:
             return self._send({"error": "state_unavailable",
@@ -459,13 +568,12 @@ class Handler(BaseHTTPRequestHandler):
         if not session and req.get("method") == "initialize":
             session = uuid.uuid4().hex
 
-        cassette, tools = self.library.cassette(cassette_id)
-        if cassette is None:
-            return self._send({"error": "unknown_cassette",
-                               "cassette": cassette_id}, 404)
-
         key = _state_key(cassette_id, session)
         try:
+            cassette, tools = self.library.cassette(cassette_id, self.store)
+            if cassette is None:
+                return self._send({"error": "unknown_cassette",
+                                   "cassette": cassette_id}, 404)
             return self._answer(req, key, cassette_id, cassette, tools,
                                 session)
         except Unavailable as exc:
@@ -494,7 +602,8 @@ class Handler(BaseHTTPRequestHandler):
 
         with _session_lock(key):
             for attempt in range(SAVE_ATTEMPTS):
-                cassette, tools = self.library.cassette(cassette_id)
+                cassette, tools = self.library.cassette(cassette_id,
+                                                        self.store)
                 state, version = self.store.load(key)
                 cassette.load_state(state)
                 payload = handle_rpc(req, cassette, tools)
@@ -550,6 +659,10 @@ def _log_refusal(code, session, cassette_id, req, cause):
 
 def _state_key(cassette_id, session):
     return f"{cassette_id}.{session or 'default'}"
+
+
+def _cassette_key(cassette_id):
+    return f"cassette.{cassette_id}"
 
 
 def build_store(config):

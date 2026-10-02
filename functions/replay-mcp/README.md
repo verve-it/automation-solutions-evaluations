@@ -208,6 +208,8 @@ window fails in a way that reads like the app was never created.
 | `POST /mcp/<cassette-id>` | MCP streamable HTTP |
 | `POST /mcp` | same, using `REPLAY_CASSETTE` |
 | `GET /summary/<cassette-id>` | the replay journal for one session |
+| `PUT /cassettes/rt-<id>` | upload one run's cassette into the state store (create-only, 32 MB) |
+| `DELETE /cassettes/rt-<id>` | remove it, and the `Mcp-Session-Id` session's state |
 | `GET /` | health, and nothing else; `?resolve=1` reaches the state store first |
 
 `/` is open so the platform can probe it. Everything else takes the bearer

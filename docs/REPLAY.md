@@ -105,6 +105,10 @@ A replayed run is scored on its **matched prefix** and its divergence point:
  "writes_attempted": 1}
 ```
 
+That is the server's summary. The run manifest, which the gate uploads, keeps
+only `seq`, `tool`, `outcome` and `reason` of `first_divergence`: `key` is the
+call's arguments, which are recorded content.
+
 That answers *"did this change alter the trajectory, and where"* — the right
 question for an agent-change gate. It is **not** the same as *"did the agent do
 the task well"*, which still needs recorded production traces scored by
