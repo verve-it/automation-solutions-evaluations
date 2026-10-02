@@ -231,6 +231,35 @@ def routing_failures(m, row, rows):
     return out
 
 
+def not_recorded(row, diverged):
+    """Mark the calls the stub answered `not_recorded` as such, in place.
+
+    The stub's answer says `not_recorded`, but the trace no longer carries
+    it: a failed call has no ToolCallResult, so it arrives as `empty_failed`
+    -- an avoidable call, which `no_wasted_calls` gates on. A divergence is
+    the agent leaving the recorded path, which the stub cannot answer; it is
+    still a tool error for `no_tool_errors`, which reports, and must not
+    fail the build by itself. On 2026-10-02 every `empty_failed` of all
+    seven replays was a call the journal had as diverged.
+
+    Matched by count per tool, because the row keeps only 200 characters of
+    each call's arguments. Returns how many were relabelled, per tool.
+    """
+    left = dict(diverged or {})
+    done = collections.Counter()
+    errors = []
+    for e in row.get("tool_errors") or []:
+        bare = tte.base_tool_name(e.get("tool"))
+        if e.get("kind") == "empty_failed" and left.get(bare, 0) > 0:
+            left[bare] -= 1
+            done[bare] += 1
+            e = dict(e, kind="not_recorded")
+        errors.append(e)
+    if done:
+        row["tool_errors"] = errors
+    return dict(done)
+
+
 def normalise(row, m, key, baseline_row, tool_manifests):
     """The replayed row, presented under the recording's identity.
 
@@ -261,7 +290,10 @@ def normalise(row, m, key, baseline_row, tool_manifests):
         rekeyed.update(tool_definitions=defs, tool_definitions_source=source,
                        has_tool_definitions=bool(defs))
 
+    relabelled = not_recorded(rekeyed, m.get("diverged_tools"))
+
     rekeyed["replay"] = {
+        "not_recorded": relabelled,
         "operation_id": row.get("orchestration_id"),
         "agent": m["agent"],
         "replay_agent": observed_agent,
