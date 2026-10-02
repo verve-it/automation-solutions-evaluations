@@ -579,6 +579,24 @@ def test_local_tools_come_from_config_and_every_recording_of_the_agent(
         "load_skill", "run_skill_script", "tool_search"]
 
 
+def test_a_write_in_a_recording_is_never_local(tmp_path, monkeypatch):
+    """The recordings are live runs nobody reviews. An unprefixed write in
+    one made attribution count it as local, so a replay that sent it around
+    the stub passed."""
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text(json.dumps({"agents": [OPS], "interactions": [
+        {"tool": "load_skill"}, {"tool": "cw_update", "is_write": True}]}),
+        encoding="utf-8")
+    b.write_text(json.dumps({"agents": [OPS], "interactions": [
+        {"tool": "cw_log_time", "is_write": True}]}), encoding="utf-8")
+    monkeypatch.setattr(rr, "CONFIG", {"local_tools": []})
+    local = rr.recorded_local_tools(str(a))
+    assert local == ["load_skill"]
+    _every, remote = ar.tool_counts({"tool_names": ["cw_update"]}, local)
+    assert dict(remote) == {"cw_update": 1}
+
+
 def test_a_manifest_without_local_tools_is_refused(w):
     old = dict(w.manifests[0])
     del old["local_tools"]

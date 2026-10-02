@@ -7,7 +7,9 @@ silently not performed. A review found every one of these call sites could be
 pointed back at the production agent with the suite green, because nothing
 drove main() past --dry-run. This does.
 """
+import io
 import json
+import zipfile
 from types import SimpleNamespace as NS
 
 import pytest
@@ -19,6 +21,18 @@ REPLAY = OPS + "-replay"
 LABEL = "ConnectWise-PSA-ForAgents"
 
 
+def _zip(source):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("main.py", source)
+    return buf.getvalue()
+
+
+# What every hosted agent here reads (--inspect-code), and nothing else.
+CODE = _zip(f'import os\nn = os.environ["{rr.TOOLBOX_NAME_VAR}"]\n'
+            f'v = os.getenv("{rr.TOOLBOX_VERSION_VAR}")\n')
+
+
 class NotFound(Exception):
     status_code = 404
 
@@ -28,8 +42,10 @@ class FakeProject:
     agent's name resolves to after the clone is created."""
 
     def __init__(self, env=None, routes_to_clone=True, replay_readable=True,
-                 others=("triage-analysis-agent",), replay_exists=True):
+                 others=("triage-analysis-agent",), replay_exists=True,
+                 code=CODE):
         self.calls = []
+        self.code = code
         self.env = env or {"AZURE_AI_MODEL_DEPLOYMENT_NAME": "gpt",
                            rr.TOOLBOX_NAME_VAR: "ConnectwiseMCP",
                            rr.TOOLBOX_VERSION_VAR: "1"}
@@ -73,7 +89,7 @@ class FakeProject:
 
     def download_code(self, name, agent_version):
         self.calls.append(("download_code", name, agent_version))
-        return [b"PK\x03\x04zip"]
+        return [self.code]
 
     def create_version_from_code(self, agent_name, definition, code,
                                  description=None, metadata=None):
@@ -168,8 +184,9 @@ def test_every_call_names_the_replay_agent_never_the_agent_under_test(run):
              for kind in ("create", "session", "invoke", "stop_session",
                           "delete_version")}
     assert names == {k: [REPLAY] for k in names}, names
-    # the code comes from the agent under test, byte for byte
-    assert project.named("download_code") == [("download_code", OPS, "29")]
+    # the code comes from the agent under test, byte for byte (read once to
+    # check it names no other agent, once to upload)
+    assert set(project.named("download_code")) == {("download_code", OPS, "29")}
 
 
 def test_the_name_is_checked_to_resolve_to_the_clone_before_invoking(run):
@@ -241,6 +258,24 @@ def test_an_agent_that_names_another_agent_is_refused_before_anything_exists(run
     with pytest.raises(SystemExit) as exc:
         run(project)
     assert "TRIAGE_ANALYSIS_AGENT_NAME=triage-analysis-agent" in str(exc.value)
+    assert not project.named("create") and not project.named("toolbox.create")
+
+
+@pytest.mark.parametrize("code,said", [
+    (_zip('import os\nchild = os.getenv("TRIAGE_ANALYSIS_AGENT_NAME", '
+          '"triage-analysis-agent")\n'), "reads TRIAGE_ANALYSIS_AGENT_NAME"),
+    (b"PK\x03\x04 not a zip", "cannot read")])
+def test_code_that_names_another_agent_is_refused_before_anything_exists(
+        run, code, said):
+    """The orchestrator's environment names no child -- the names are
+    defaults in its code -- and a live run whose hand-offs failed before the
+    children emitted a span is a single-agent recording. That replayed: the
+    clone invoked, its children ran against the live toolbox. Code that
+    cannot be read is refused too: unknown is not none."""
+    project = FakeProject(code=code)
+    with pytest.raises(SystemExit) as exc:
+        run(project)
+    assert said in str(exc.value) and "Nothing was created" in str(exc.value)
     assert not project.named("create") and not project.named("toolbox.create")
 
 
@@ -470,3 +505,65 @@ def test_the_manifest_still_carries_what_attribution_reads(run, tmp_path):
                 "replay_session", "temp_version", "replayed_calls"):
         assert key in m, key
     assert m["first_divergence"] is None
+
+
+# --- a recording uploaded for this run ----------------------------------------
+
+UPLOAD = ("--upload", "--server-url", "https://replay.example.net")
+
+
+def _fake_server(monkeypatch, project, put=201):
+    """The hosted server's /cassettes/<id>, recorded into the project's calls
+    so their order against the SDK's is visible."""
+    def http(method, url, token, body=None, session=None):
+        project.calls.append((method, url, session, body))
+        return put if method == "PUT" else 204
+    monkeypatch.setattr(rr, "_cassette_http", http)
+
+
+def test_the_recording_goes_up_before_anything_is_created(run, monkeypatch,
+                                                          tmp_path, cassette):
+    project = FakeProject()
+    _fake_server(monkeypatch, project)
+    assert run(project, *UPLOAD) == 0
+    kinds = [c[0] for c in project.calls]
+    assert kinds.index("PUT") < kinds.index("toolbox.create") \
+        < kinds.index("create")
+    (_put, url, _session, body), = project.named("PUT")
+    cassette_id = url.rsplit("/", 1)[-1]
+    assert url == f"https://replay.example.net/cassettes/{cassette_id}"
+    assert cassette_id.startswith("rt-")
+    with open(cassette, "rb") as fh:
+        assert body == fh.read()
+    (_kind, _name, tools), = project.named("toolbox.create")
+    assert tools[0].server_url == \
+        f"https://replay.example.net/mcp/{cassette_id}"
+    (_delete, deleted, session, _body), = project.named("DELETE")
+    assert deleted == url and session
+    assert kinds.index("DELETE") > kinds.index("toolbox.delete")
+    manifest = json.loads((tmp_path / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert manifest["cassette_id"] == cassette_id
+
+
+def test_the_upload_is_deleted_when_the_invoke_raises(run, monkeypatch):
+    project = FakeProject()
+    _fake_server(monkeypatch, project)
+
+    def raises(*a):
+        raise RuntimeError("invoke blew up")
+    monkeypatch.setattr(rr, "invoke_agent", raises)
+    with pytest.raises(RuntimeError):
+        run(project, *UPLOAD)
+    assert project.named("DELETE")
+
+
+@pytest.mark.parametrize("status", [503, 409, "URLError"])
+def test_a_failed_upload_creates_nothing(run, monkeypatch, status):
+    project = FakeProject()
+    _fake_server(monkeypatch, project, put=status)
+    with pytest.raises(SystemExit) as exc:
+        run(project, *UPLOAD)
+    assert f"could not upload the cassette to the replay server: {status}" \
+        in str(exc.value)
+    assert not project.named("toolbox.create") and not project.named("create")
