@@ -604,4 +604,9 @@ def _fail(message):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # evalconfig sits beside this file in the built package and at the repo
+    # root in a checkout, which is where the gate runs it from.
+    sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    os.pardir, os.pardir))
+    from evalconfig import public_main
+    sys.exit(public_main(main))

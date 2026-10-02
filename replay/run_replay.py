@@ -760,6 +760,46 @@ def describe_agent(agents, name, inspect_code=False):
     return payload
 
 
+class CodeUnreadable(Exception):
+    pass
+
+
+def code_env_reads(agents, name, version):
+    """(environment variables read, hosts named) in a hosted version's code.
+
+    Read from the uploaded zip, Python files only. Raises CodeUnreadable
+    with a reason that carries no code.
+    """
+    import io
+    import re
+    import zipfile
+
+    try:
+        blob = b"".join(agents.download_code(name, agent_version=str(version)))
+    except Exception as exc:
+        raise CodeUnreadable(f"cannot download ({_public_error(exc)})")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        raise CodeUnreadable("downloaded bytes are not a zip")
+
+    env_reads, hosts = set(), set()
+    for item in archive.namelist():
+        if not item.endswith(".py"):
+            continue
+        try:
+            text = archive.read(item).decode("utf-8", "replace")
+        except Exception:
+            continue
+        # environ.get("X"), getenv("X") and environ["X"] -- the subscript
+        # form was missed, and it is how a required variable is usually read.
+        env_reads.update(re.findall(
+            r"""(?:environ(?:\.get)?\(|getenv\(|environ\[)\s*["']([A-Z0-9_]+)["']""",
+            text))
+        hosts.update(re.findall(r"https?://([A-Za-z0-9.\-]+)", text))
+    return env_reads, hosts
+
+
 def report_code_binding(agents, name, version):
     """How the uploaded code reaches its MCP server. Read only, nothing saved.
 
@@ -770,35 +810,11 @@ def report_code_binding(agents, name, version):
     Only the shape is printed: which environment variables are read and which
     hosts appear. Not the source, which is the customer's, and not any value.
     """
-    import io
-    import re
-    import zipfile
-
     try:
-        blob = b"".join(agents.download_code(name, agent_version=str(version)))
-    except Exception as exc:
-        print(f"  code: cannot download ({type(exc).__name__}: "
-              f"{str(exc)[:90]})")
+        env_reads, hosts = code_env_reads(agents, name, version)
+    except CodeUnreadable as exc:
+        print(f"  code: {exc}")
         return
-
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(blob))
-    except zipfile.BadZipFile:
-        print("  code: downloaded bytes are not a zip")
-        return
-
-    env_reads, hosts = set(), set()
-    for item in archive.namelist():
-        if not item.endswith(".py"):
-            continue
-        try:
-            text = archive.read(item).decode("utf-8", "replace")
-        except Exception:
-            continue
-        env_reads.update(re.findall(
-            r"""(?:environ(?:\.get)?\(|getenv\()\s*["']([A-Z0-9_]+)["']""",
-            text))
-        hosts.update(re.findall(r"https?://([A-Za-z0-9.\-]+)", text))
 
     print(f"  code reads {len(env_reads)} environment variable(s):")
     for key in sorted(env_reads):
@@ -1512,4 +1528,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from evalconfig import public_main
+    sys.exit(public_main(main))

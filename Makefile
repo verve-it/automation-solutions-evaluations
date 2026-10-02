@@ -52,6 +52,9 @@ cassettes:  ## build replay cassettes from the committed traces
 	$(PY) replay/make_cassette.py $(OPS_WORST) -o cassettes
 	$(PY) replay/make_cassette.py $(TRIAGE) -o cassettes
 
+preflight:  ## check recordings and baselines line up, before a gate run (no Azure)
+	$(PY) replay/preflight.py --cassettes cassettes --baselines baselines --offline
+
 replay:  ## serve a cassette as an MCP toolbox (no ConnectWise, no writes)
 	@test -n "$(CASSETTE)" || { echo "usage: make replay CASSETTE=cassettes/<file>.json"; exit 2; }
 	$(PY) replay/replay_server.py $(CASSETTE) --tool-defs tool_manifests/ \

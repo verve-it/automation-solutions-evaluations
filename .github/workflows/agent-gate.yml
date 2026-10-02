@@ -157,6 +157,22 @@ jobs:
       - name: Build cassettes from the committed traces
         run: make cassettes
 
+      # Seconds, before anything is created. Each check here was once found
+      # 5-25 minutes into a run, after clones were built: an agent not in the
+      # project, a workspace id in the wrong form, a missing read role, a
+      # hosted agent whose code ignores the toolbox variables, a recording
+      # with no baseline. replay/preflight.py says what each one means.
+      - name: Preflight
+        env:
+          GATE_AGENTS: ${{ inputs.gate-agents }}
+        run: |
+          python replay/preflight.py --cassettes cassettes --baselines baselines \
+              --gate-agents "$GATE_AGENTS" \
+              --project-endpoint "${{ vars.AZURE_AI_PROJECT_ENDPOINT }}" \
+              --workspace "${{ secrets.LOG_ANALYTICS_WORKSPACE_ID }}" \
+              --judge-deployment "${{ vars.AZURE_JUDGE_DEPLOYMENT }}" \
+              --summary "$GITHUB_STEP_SUMMARY"
+
       # The replay server has to be answering before an agent is pointed at
       # it, or every call diverges and the gate blames the agent.
       - name: Verify the replay server serves what we recorded

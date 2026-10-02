@@ -620,3 +620,19 @@ def test_the_gate_runs_only_a_reviewed_ref(steps):
                     ("refs/pull/7/head", False), ("develop", False),
                     ("main; curl x", False), ("abc123", False)):
         assert bool(re.match(pattern, ref)) is ok, ref
+
+
+def test_preflight_runs_before_anything_is_created(steps):
+    """After the cassettes it checks exist, before verify and before the
+    first clone: the point is seconds, not a failure 25 minutes in."""
+    names = [s.get("name", "") for s in steps]
+    pre = names.index("Preflight")
+    assert names.index("Build cassettes from the committed traces") < pre
+    assert pre < names.index("Verify the replay server serves what we recorded")
+    assert pre < names.index("Replay each single-agent cassette against "
+                             "stubbed tools")
+    run = steps[pre]["run"]
+    for flag in ("--gate-agents", "--project-endpoint", "--workspace",
+                 "--judge-deployment", "--summary"):
+        assert flag in run
+    assert "--offline" not in run

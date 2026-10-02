@@ -185,7 +185,12 @@ def main(argv=None):
     error = _as_dict(getattr(run, "error", None) or {})
     if error:
         print(f"\nRUN ERROR  {error.get('code', '?')}")
-        print(f"  {error.get('message', '')}")
+        # The service's validation errors quote dataset values, and a CI
+        # log is public. The code says which; the message stays in Foundry.
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print("  (message withheld in CI: open the run in Foundry)")
+        else:
+            print(f"  {error.get('message', '')}")
     counts = _as_dict(getattr(run, "result_counts", None) or {})
     if counts:
         print(f"  passed={counts.get('passed')} failed={counts.get('failed')} "
@@ -264,4 +269,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from evalconfig import public_main
+    sys.exit(public_main(main))
