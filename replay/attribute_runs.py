@@ -203,7 +203,11 @@ def routing_failures(m, row, rows):
         out.append((f"run {op[:12]} made {sum(remote.values())} call(s) to "
                     "tools the recording reached through its MCP server, and "
                     "none reached the replay server under this replay's "
-                    "session. They went to something other than the stub.",
+                    "session or its shared one. Either they went to "
+                    "something other than the stub, or the server filed "
+                    "them under a session nobody reads: list the state "
+                    "container for blobs named after "
+                    f"{m.get('replay_session') or 'this replay_session'}.",
                     False))
         return out
 
