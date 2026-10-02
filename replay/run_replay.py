@@ -966,6 +966,24 @@ def journal_tools(journal):
     return dict(sorted(counts.items()))
 
 
+def diverged_tools(journal):
+    """{bare tool name: calls the stub answered `not_recorded`}, or None when
+    the summary carried no journal.
+
+    Attribution needs this because the trace can no longer say it: since
+    2026-09-30 a tool's result lives in AppGenAIContent, and a call that
+    failed has none there, so the stub's `not_recorded` body never reaches
+    the scored row. Without it, every divergence scores as an empty failed
+    call -- an avoidable call, in a gating check.
+    """
+    if journal is None:
+        return None
+    counts = collections.Counter(
+        str(e.get("tool") or "").rsplit("___", 1)[-1] for e in journal
+        if e.get("outcome") == "diverged")
+    return dict(sorted(counts.items()))
+
+
 def recorded_identity(cassette_path):
     """(orchestration_id, entry agent) of the run a cassette recorded.
 
@@ -1037,6 +1055,7 @@ def write_manifest(path, args, base_version, temp_version, s, run=None):
         # such as load_skill are in the trace and never reach the server.
         "replayed_calls": s.get("replayed_calls"),
         "journal_tools": journal_tools(s.get("journal")),
+        "diverged_tools": diverged_tools(s.get("journal")),
         "local_tools": recorded_local_tools(args.cassette),
         "writes_attempted": s.get("writes_attempted"),
         "first_divergence": s.get("first_divergence"),
@@ -1370,6 +1389,13 @@ def main(argv=None):
                          replay_session)
         write_manifest(args.manifest, args, base_version, temp_version, s,
                        run_ids)
+        if args.journal and not args.serve:
+            # A local server writes its own journal file; a hosted one only
+            # answers /summary. Keep what it said, so the gate's artifact
+            # holds per-call outcomes rather than nothing.
+            os.makedirs(os.path.dirname(args.journal) or ".", exist_ok=True)
+            with open(args.journal, "w", encoding="utf-8") as fh:
+                json.dump(s, fh, indent=2)
         ok, text = verdict(s, args.min_matched_prefix)
         print("\nREPLAY")
         print(text)
