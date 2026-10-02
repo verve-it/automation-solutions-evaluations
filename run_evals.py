@@ -32,7 +32,7 @@ expected step must appear in order; additional steps are allowed but counted.
 """
 
 from __future__ import annotations
-import argparse, json, os, sys
+import argparse, json, os, re, sys
 from collections import Counter, defaultdict
 
 from trace_to_eval import CONTENT_PLACEHOLDER, base_tool_name
@@ -242,7 +242,27 @@ def _type_ok(value, declared):
     return False
 
 
-def validate_args(args, schema):
+# An argument name the agent sent is recorded content like any value: shown
+# only when it reads as an identifier.
+_PUBLIC_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _shown_name(name):
+    name = str(name)
+    return name if _PUBLIC_NAME.match(name) else f"<name, {len(name)} chars>"
+
+
+def _shown_value(value, show_values):
+    """The value an agent sent comes from the recording, and these reasons
+    reach the job log, the step summary and the uploaded verdicts of a public
+    repository. Type and length say what kind of mistake it was; the value
+    itself only on --show-values, which is for a local, scrubbed trace."""
+    if show_values:
+        return repr(value)
+    return f"<{type(value).__name__}, {len(str(value))} chars>"
+
+
+def validate_args(args, schema, show_values=False):
     """A deliberately small JSON-Schema subset: the six things Tool Input
     Accuracy checks, done deterministically. Returns a list of problems."""
     problems = []
@@ -257,7 +277,7 @@ def validate_args(args, schema):
     if schema.get("additionalProperties") is False:
         for name in args:
             if name not in props:
-                problems.append(f"unexpected '{name}'")
+                problems.append(f"unexpected '{_shown_name(name)}'")
 
     for name, value in args.items():
         spec = props.get(name)
@@ -273,7 +293,9 @@ def validate_args(args, schema):
             head = [str(v) for v in spec["enum"][:6]]
             rest = len(spec["enum"]) - len(head)
             allowed = ", ".join(head) + (f", +{rest} more" if rest > 0 else "")
-            problems.append(f"'{name}'={value!r} not in [{allowed}]")
+            problems.append(f"'{_shown_name(name)}'="
+                            f"{_shown_value(value, show_values)} "
+                            f"not in [{allowed}]")
     return problems
 
 
@@ -331,7 +353,8 @@ def check_valid_tool_args(run, cfg):
             if not isinstance(args, dict):
                 problems.append(f"{name}: arguments are not an object")
                 continue
-            for p in validate_args(args, schema):
+            for p in validate_args(args, schema,
+                                   cfg.get("show_values", False)):
                 problems.append(f"{name}: {p}")
 
     if not checked:
@@ -391,7 +414,11 @@ def score(runs, cfg):
             "tool_calls": run.get("tool_call_count", 0),
             "duration_ms": run.get("duration_ms", 0),
             "usage": run.get("usage", {}),
-            "skills_in_force": run.get("skills_in_force", []),
+            # An errored load_skill's name is whatever the agent asked for,
+            # not a skill that exists, so it is recorded content.
+            "skills_in_force": [
+                {**s, "skill_name": "<not loaded>"} if s.get("errored") else s
+                for s in run.get("skills_in_force", [])],
             "checks": res,
             "passed": not gating,
             "failed_gating": gating,
@@ -510,7 +537,10 @@ def print_skill_drift(rows):
     hashes = defaultdict(set)
     for r in rows:
         for s in r.get("skills_in_force", []):
-            if not s.get("truncated"):
+            # An errored load is named "<not loaded>" and hashed over its
+            # error body, so two runs that failed on different skills read as
+            # one skill with two contents -- false drift.
+            if not s.get("truncated") and not s.get("errored"):
                 hashes[s["skill_name"]].add(s["sha256"][:12])
     drifted = {k: v for k, v in hashes.items() if len(v) > 1}
     if drifted:
@@ -801,6 +831,9 @@ def main(argv=None):
     ap.add_argument("--allow-lost-coverage", action="store_true",
                     help="do not fail when a check that used to score now "
                          "skips (use when intentionally retiring a check)")
+    ap.add_argument("--show-values", action="store_true",
+                    help="print failing argument values. Local, scrubbed "
+                         "traces only; never in a workflow.")
     args = ap.parse_args(argv)
     if args.strict_baseline and not args.baseline:
         ap.error("--strict-baseline needs --baseline")
@@ -808,7 +841,8 @@ def main(argv=None):
     runs = [json.loads(l) for l in open(args.jsonl, encoding="utf-8") if l.strip()]
     cfg = {"max_empty_rate": args.max_empty_rate, "expected": {},
            "max_tokens": args.max_tokens,
-           "max_duration_ms": args.max_duration_ms}
+           "max_duration_ms": args.max_duration_ms,
+           "show_values": args.show_values}
     if args.expected:
         cfg["expected"] = {
             k: v for k, v in

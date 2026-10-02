@@ -341,6 +341,18 @@ def test_skill_drift_is_reported_independently_of_usage(capsys):
     assert "SKILL DRIFT" in out and "normalization" in out
 
 
+def test_errored_skills_are_not_reported_as_drift(capsys):
+    """score() names every errored load "<not loaded>" and its sha256 is of
+    the error body, so two runs failing on different skills read as one
+    skill with two contents."""
+    rows = [_rollup_row(skills_in_force=[{"skill_name": "<not loaded>",
+                                          "sha256": c * 64, "truncated": False,
+                                          "errored": True}])
+            for c in "ab"]
+    e.print_skill_drift(rows)
+    assert "SKILL DRIFT" not in capsys.readouterr().out
+
+
 # ------------------------------------------------------- thresholds and summary
 
 def _row(agent, gating_verdicts, extra=None):
@@ -427,3 +439,55 @@ def test_the_summary_names_what_failed(tmp_path):
     # Appends: $GITHUB_STEP_SUMMARY accumulates across steps.
     e.write_summary(str(path), rows, None, None, None)
     assert path.read_text(encoding="utf-8").count("## Agent evaluation") == 2
+
+
+# --- no recorded value reaches a public channel -----------------------------
+
+CANARY = "CANARY-V-7f3a"
+
+
+def test_an_enum_failure_shows_type_and_length_not_the_value():
+    problems = e.validate_args(
+        {"reference_type": CANARY, "query": "x"}, SCHEMA)
+    assert problems == [
+        f"'reference_type'=<str, {len(CANARY)} chars> "
+        "not in [company, contact]"]
+
+
+def test_show_values_prints_the_value():
+    problems = e.validate_args(
+        {"reference_type": CANARY, "query": "x"}, SCHEMA, show_values=True)
+    assert any(repr(CANARY) in p for p in problems)
+
+
+def test_an_argument_name_that_is_not_an_identifier_is_not_printed():
+    name = "Acme Ltd, 12 High St"
+    problems = e.validate_args(
+        {"reference_type": "company", "query": "x", name: 1}, SCHEMA)
+    assert problems == [f"unexpected '<name, {len(name)} chars>'"]
+
+
+def test_a_canary_enum_value_reaches_no_output_of_main(tmp_path, capsys):
+    """Through main() exactly as the gate calls it: stdout, --json and
+    --summary are all public in a workflow."""
+    runs = tmp_path / "eval_runs.jsonl"
+    r = run(tool_definitions=DEFS, tool_call_count=1,
+            actions=[action("cw_resolve",
+                            {"reference_type": CANARY, "query": "x"})],
+            skills_in_force=[{"skill_name": "CANARY-S-7f3a", "sha256": "0" * 64,
+                              "bytes": 0, "truncated": False,
+                              "errored": True}])
+    runs.write_text(json.dumps(r) + "\n", encoding="utf-8")
+    out, summary = tmp_path / "r.json", tmp_path / "s.md"
+    e.main([str(runs), "--json", str(out), "--summary", str(summary)])
+
+    printed = capsys.readouterr()
+    written = out.read_text(encoding="utf-8")
+    assert "valid_tool_args" in written     # the check ran and failed
+    for text in (printed.out, printed.err, written,
+                 summary.read_text(encoding="utf-8")):
+        assert CANARY not in text
+        assert "CANARY-S-7f3a" not in text
+    row = json.loads(written)[0]
+    assert row["checks"]["valid_tool_args"]["passed"] is False
+    assert row["skills_in_force"][0]["skill_name"] == "<not loaded>"

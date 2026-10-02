@@ -199,10 +199,50 @@ def _is_build_failed(exc):
     return code == BUILD_FAILED or BUILD_FAILED in str(exc)
 
 
-def _request_id(exc):
+_IDENT = r"[A-Za-z0-9_.:-]{1,64}"
+
+
+def _identifier(value):
+    """`value` if it is identifier-shaped, else None: what is printed from an
+    exception's attributes must be a code or an id, never a sentence."""
     import re
-    m = re.search(r"Request ID: ([0-9a-f]{32})", str(exc))
-    return f"request id {m.group(1)}" if m else None
+    return value if isinstance(value, str) and re.fullmatch(_IDENT, value) \
+        else None
+
+
+def _request_id(exc):
+    # The openai client, which responses.create goes through, keeps the id in
+    # exc.request_id (from x-request-id) and never in the message; reading
+    # only the message printed "no request id" for every invoke failure.
+    rid = _identifier(getattr(exc, "request_id", None))
+    if not rid:
+        import re
+        m = re.search(r"Request ID: ([0-9a-f]{32})", str(exc))
+        rid = m.group(1) if m else None
+    return f"request id {rid}" if rid else None
+
+
+def _error_code(exc):
+    # openai puts the service's code on exc.code, azure-core on exc.error.code.
+    code = _identifier(getattr(exc, "code", None)) or _identifier(
+        getattr(getattr(exc, "error", None), "code", None))
+    return f"code {code}" if code else None
+
+
+def _public_error(exc):
+    """An invoke error as the job log may show it: class, HTTP status, the
+    service's error code and request id. The message itself is not printed --
+    the service quotes the input back in it, and the input is the recording's
+    query, in the job log of a public repository. The code is what tells a
+    schema complaint (unknown_parameter) from anything else; the request id
+    is what a support case needs."""
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None)
+    return ", ".join(p for p in [
+        type(exc).__name__,
+        f"status {status}" if status else "no status",
+        _error_code(exc),
+        _request_id(exc) or "no request id"] if p)
 
 
 def _is_not_ready(exc):
@@ -386,7 +426,8 @@ def invoke_agent(client, name, session_id, query):
     try:
         openai_client = client.get_openai_client(agent_name=name)
     except Exception as exc:
-        print(f"\nWARNING  could not open the agent endpoint: {exc}")
+        print("\nWARNING  could not open the agent endpoint: "
+              f"{_public_error(exc)}")
         print("WARNING  the agent was not invoked, so the journal below is "
               "whatever was already there.")
         return None
@@ -399,8 +440,7 @@ def invoke_agent(client, name, session_id, query):
               f"{getattr(response, 'id', '?')}")
         return response
     except Exception as exc:
-        print(f"\nWARNING  invoke failed: {type(exc).__name__}: "
-              f"{str(exc)[:200]}")
+        print(f"\nWARNING  invoke failed: {_public_error(exc)}")
         print("WARNING  the temporary version was still created and is still "
               "cleaned up. If this is a schema complaint about "
               "agent_session_id, the session is bound to the version already "
@@ -1077,7 +1117,11 @@ def write_manifest(path, args, base_version, temp_version, s, run=None):
         "diverged_tools": diverged_tools(s.get("journal")),
         "local_tools": recorded_local_tools(args.cassette),
         "writes_attempted": s.get("writes_attempted"),
-        "first_divergence": s.get("first_divergence"),
+        # Where it diverged, never what was sent: the server's record of a
+        # divergence carries the call's key and arguments, which are the
+        # agent's -- and so the recording's -- content, and this manifest is
+        # an uploaded artifact.
+        "first_divergence": _public_divergence(s.get("first_divergence")),
         "suggested_eval_name": f"replay-{args.agent}-v{base_version}",
     }
     payload.update(run or {})
@@ -1086,6 +1130,15 @@ def write_manifest(path, args, base_version, temp_version, s, run=None):
         json.dump(payload, fh, indent=1, ensure_ascii=False)
         fh.write("\n")
     return payload
+
+
+DIVERGENCE_FIELDS = ("seq", "tool", "outcome", "reason")
+
+
+def _public_divergence(fd):
+    if not isinstance(fd, dict):
+        return None
+    return {k: fd[k] for k in DIVERGENCE_FIELDS if k in fd}
 
 
 def describe(args):
@@ -1239,7 +1292,10 @@ def main(argv=None):
                                 + ["Mcp-Session-Id"]}],
                 "summary_url": summary_url(server_url),
                 "replay_session": replay_session,
-                "query": query,
+                # Its length and where it came from: the dry run prints
+                # to the job log like everything else.
+                "query": {"chars": len(str(query)),
+                          "source": "--query" if args.query else "cassette"},
                 "temp_version_metadata": {"purpose": TEMP_MARKER},
             }, indent=1))
             print("\ndry run: nothing was created in the project.")
@@ -1394,7 +1450,7 @@ def main(argv=None):
                           f"(rebuild of v{failed})")
             session_id = getattr(session, "agent_session_id", None)
             run_ids["agent_session_id"] = session_id
-            print(f"session {session_id} — query: {str(query)[:70]}")
+            print(f"session {session_id} — query: {len(str(query))} chars")
 
             response = invoke_agent(client, replay_agent, session_id, query)
             run_ids["response_id"] = getattr(response, "id", None)
@@ -1437,8 +1493,10 @@ def main(argv=None):
                        run_ids)
         if args.journal and not args.serve:
             # A local server writes its own journal file; a hosted one only
-            # answers /summary. Keep what it said, so the gate's artifact
-            # holds per-call outcomes rather than nothing.
+            # answers /summary. Keep what it said, for reading per-call
+            # outcomes on the runner. It is raw: each entry's key is the
+            # call's arguments, so the gate writes it under out/raw/ and does
+            # not upload it -- the manifest carries the per-tool counts.
             os.makedirs(os.path.dirname(args.journal) or ".", exist_ok=True)
             with open(args.journal, "w", encoding="utf-8") as fh:
                 json.dump(s, fh, indent=2)

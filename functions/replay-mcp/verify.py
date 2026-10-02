@@ -135,6 +135,14 @@ def advertised_local_tools(tools, local=None):
     return sorted({t.get("name") for t in tools} & set(local))
 
 
+def _first_diff(a, b):
+    """Offset of the first character at which a and b differ."""
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return min(len(a), len(b))
+
+
 def replay(client, cassette_id, recording, verbose=False):
     _info, session = client.initialize(cassette_id)
     if not session:
@@ -161,10 +169,14 @@ def replay(client, cassette_id, recording, verbose=False):
         else:
             mismatched += 1
             if verbose:
+                # Lengths and where they part, not the text: both sides are a
+                # recorded ConnectWise response, and -v is how a deploy that
+                # fails gets rerun in a public job log.
+                rec = interaction["result"]
                 problems.append(
                     f"seq {interaction['seq']} {interaction['tool']}: "
-                    f"expected {interaction['result'][:80]!r} "
-                    f"got {got[:80]!r}")
+                    f"expected {len(rec)} chars, got {len(got)}; first "
+                    f"difference at char {_first_diff(rec, got)}")
         if interaction["is_write"]:
             writes += 1
 

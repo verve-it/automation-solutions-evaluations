@@ -1652,3 +1652,35 @@ def test_verify_fails_a_server_that_advertises_the_agents_own_tools():
     assert any("load_skill" in p and "redeploy" in p for p in problems), problems
     assert verify.advertised_local_tools(
         [{"name": "cw_get_ticket"}], local=["load_skill"]) == []
+
+
+def test_verify_v_reports_lengths_and_offset_not_the_responses():
+    """-v is how a failing deploy is rerun, in a public job log. Both sides
+    of a mismatch are a recorded ConnectWise response."""
+    recorded = 'CANARY-R-7f3a {"id": 805392}'
+    got = 'CANARY-R-7f3a {"id": 805393, "extra": 1}'
+
+    class Differs:
+        def initialize(self, cassette):
+            return {}, "s1"
+
+        def tools(self, cassette, session):
+            return [{"name": "cw_get_ticket", "inputSchema": {}}]
+
+        def call(self, *args):
+            return {"content": [{"text": got}]}
+
+        def summary(self, cassette, session):
+            return {"replayed_calls": 1, "diverged": 0}
+
+    recording = {"interactions": [{"seq": 4, "tool": "cw_get_ticket",
+                                   "arguments": {}, "result": recorded,
+                                   "is_write": False}]}
+    _report, problems = verify.replay(Differs(), "c", recording, verbose=True)
+    text = "\n".join(problems)
+    assert "CANARY-R-7f3a" not in text and "805392" not in text
+    offset = recorded.index("2}")
+    assert (f"seq 4 cw_get_ticket: expected {len(recorded)} chars, got "
+            f"{len(got)}; first difference at char {offset}") in text
+    assert verify._first_diff("abc", "abcd") == 3
+    assert verify._first_diff("abc", "abc") == 3

@@ -302,10 +302,14 @@ Four things the gate must not do, all of which look like they work:
   downloadable by anyone, and `scrub_trace.py` is propose → human review →
   apply, so it cannot be dropped into CI. Neither `agent-gate.yml` nor the
   nightly drift job uploads raw spans or the Foundry dataset. Verdicts,
-  journals (which replay the already-scrubbed cassettes) and the Foundry run
-  are the record. Raw exports live under `out/`, which is never uploaded;
+  manifests and the Foundry run are the record. Raw exports, journals
+  included, live under `out/raw/`, which is never uploaded;
   `artifacts/replay-*.json` once matched the raw spans file, so the test
   matches every upload glob against every path an export step writes.
+  More generally, **no value read from a recording reaches a public
+  channel** -- job log, annotation, step summary or upload: ids, names,
+  versions, counts, lengths and timestamps only, which is why
+  `run_evals.py --show-values` is local and no workflow may pass it.
 
 Attribution retries while App Insights catches up (exit 3 = not ingested, or
 only partly: for some tool, fewer calls in the trace than the replay server
