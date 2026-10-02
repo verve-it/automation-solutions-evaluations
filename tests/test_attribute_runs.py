@@ -354,6 +354,58 @@ def test_telemetry_tool_definitions_survive_normalisation():
     assert out["tool_definitions_source"].startswith("telemetry+manifest:")
 
 
+def test_a_call_the_stub_did_not_record_is_not_an_avoidable_call():
+    """2026-10-02, cassette 1f3c5a2f5a73: the journal had 3 diverged calls
+    (cw_resolve x2, cw_get) and the trace 3 `empty_failed`, because a failed
+    call carries no ToolCallResult. Scored as is, no_wasted_calls -- a
+    gating check -- failed an unchanged agent for leaving the recording."""
+    def err(tool, kind="empty_failed"):
+        return {"tool": PREFIXED + tool, "kind": kind, "args": "{}"}
+    row = {"run_agent": REPLAY_AGENT, "traj_key": REPLAY_AGENT,
+           "orchestration_id": "op", "agent_version": "1",
+           "tool_call_count": 6,
+           "tool_errors": [err("cw_resolve"), err("cw_resolve"),
+                           err("cw_get"), err("cw_get"),
+                           err("cw_query", "invalid_entity")]}
+    m = {"agent": OPS, "diverged_tools": {"cw_resolve": 2, "cw_get": 1}}
+    out = ar.normalise(row, m, ("rec", OPS), {}, None)
+
+    kinds = [(e["tool"].split("___")[-1], e["kind"]) for e in out["tool_errors"]]
+    assert kinds == [("cw_resolve", "not_recorded"),
+                     ("cw_resolve", "not_recorded"),
+                     ("cw_get", "not_recorded"),
+                     # one more empty failure than the stub diverged on: a
+                     # recorded failure, still the agent's
+                     ("cw_get", "empty_failed"),
+                     ("cw_query", "invalid_entity")]
+    assert out["replay"]["not_recorded"] == {"cw_get": 1, "cw_resolve": 2}
+    assert row["tool_errors"][0]["kind"] == "empty_failed"  # input untouched
+
+    wasted = ev.check_no_wasted_calls(out, {})
+    assert wasted["passed"] is False and wasted["count"] == 2
+    # Still a tool error: no_tool_errors reports every divergence.
+    assert ev.check_no_tool_errors(out, {})["count"] == 5
+
+
+def test_an_old_manifest_relabels_nothing():
+    row = {"run_agent": REPLAY_AGENT, "traj_key": REPLAY_AGENT,
+           "orchestration_id": "op", "agent_version": "1",
+           "tool_errors": [{"tool": "x", "kind": "empty_failed"}]}
+    out = ar.normalise(row, {"agent": OPS}, ("rec", OPS), {}, None)
+    assert out["tool_errors"][0]["kind"] == "empty_failed"
+    assert out["replay"]["not_recorded"] == {}
+
+
+def test_the_manifest_counts_the_stubs_divergences_per_tool():
+    journal = [{"tool": PREFIXED + "cw_get_ticket", "outcome": "matched"},
+               {"tool": PREFIXED + "cw_resolve", "outcome": "diverged"},
+               {"tool": PREFIXED + "cw_resolve", "outcome": "matched"},
+               {"tool": PREFIXED + "cw_get", "outcome": "diverged"},
+               {"tool": PREFIXED + "cw_resolve", "outcome": "diverged"}]
+    assert rr.diverged_tools(journal) == {"cw_get": 1, "cw_resolve": 2}
+    assert rr.diverged_tools(None) is None
+
+
 def test_the_baseline_is_the_recordings_own(w):
     assert w.attribute() == 0
     base = _load(w.tmp / "replay-baseline.json")
