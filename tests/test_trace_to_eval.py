@@ -422,6 +422,64 @@ def test_a_full_row_with_content_columns_converts_normally():
     assert runs[0]["empty_results"], "dead end should be detected from the column"
 
 
+def _content_row(dims, **cols):
+    return {"name": "execute_tool cw_query", "id": "s1", "operation_Id": "op1",
+            "operation_ParentId": "", "duration": "10", "success": "True",
+            "timestamp": "2026-10-02T16:07:46.493Z",
+            "customDimensions": json.dumps(dict(
+                {"gen_ai.agent.name": "triage-analysis-agent",
+                 "gen_ai.tool.name": "cw_query"}, **dims)), **cols}
+
+
+def _convert_rows(rows):
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(rows, fh)
+    try:
+        return t.convert(t.load_spans(path))[0]
+    finally:
+        os.unlink(path)
+
+
+PLACEHOLDER = "This attribute has moved to the genAIContent table."
+
+
+def test_a_span_exported_before_its_content_row_is_counted():
+    """The span tables and AppGenAIContent are ingested separately (22 s
+    apart, observed). Exported in the gap, the bag's placeholder is all the
+    row has -- and it is not the call's arguments."""
+    runs = _convert_rows([_content_row(
+        {t.K_TOOL_ARGS: PLACEHOLDER, t.K_TOOL_RES: PLACEHOLDER})])
+    assert runs[0]["content_missing"] == 1
+
+
+def test_a_span_with_its_content_row_is_not_missing_anything():
+    runs = _convert_rows([_content_row(
+        {t.K_TOOL_ARGS: PLACEHOLDER, "_MS.GenAIContentId": "abc"},
+        c_tool_args='{"entity": "company/companies"}', c_tool_result="")])
+    assert runs[0]["content_missing"] == 0
+    assert runs[0]["tool_errors"] == []
+
+
+def test_a_failed_call_with_no_result_is_not_missing_content():
+    """A failed call has no ToolCallResult at all; its arguments arriving is
+    what says the content row was joined."""
+    row = _content_row({t.K_TOOL_ARGS: PLACEHOLDER},
+                       c_tool_args='{"entity": "company/companies"}',
+                       c_tool_result=None)
+    row["success"] = "False"
+    runs = _convert_rows([row])
+    assert runs[0]["content_missing"] == 0
+    assert runs[0]["tool_errors"][0]["kind"] == "empty_failed"
+
+
+def test_a_trace_from_before_the_move_has_nothing_missing():
+    runs = _convert_rows([_content_row({t.K_TOOL_ARGS: '{"entity": "x"}',
+                                        t.K_TOOL_RES: '{"count": 1}'})])
+    assert runs[0]["content_missing"] == 0
+
+
 # --- intent must name a real intent -----------------------------------------
 
 def _dims(text):

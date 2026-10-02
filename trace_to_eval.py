@@ -252,6 +252,31 @@ CONTENT_COLUMNS = {
 }
 
 
+# What the span tables hold in a content attribute's place since 2026-09-30.
+CONTENT_PLACEHOLDER = "This attribute has moved to the genAIContent table"
+
+
+def content_missing(row, dims):
+    """True when this span's content lives in AppGenAIContent and the export
+    did not get it.
+
+    The two tables are ingested separately: on 2026-10-02 a span's content row
+    landed up to 22 s after the span. An export inside that gap gets the
+    placeholder where the arguments should be -- scored, that read as
+    "cw_query: arguments are not JSON" for a call whose arguments were fine.
+    """
+    joined = any(_col(row, column) not in (None, "")
+                 for column in CONTENT_COLUMNS)
+    if joined:
+        return False
+    values = [str(dims.get(attr) or "") for attr in CONTENT_COLUMNS.values()]
+    if any(v.startswith(CONTENT_PLACEHOLDER) for v in values):
+        return True
+    # A pointer and no content anywhere. During the dual-write window the
+    # bag has the pointer AND the values inline, which is not missing.
+    return bool(dims.get("_MS.GenAIContentId")) and not any(values)
+
+
 def merge_content_columns(row, dims):
     """Overlay AppGenAIContent columns onto a span's customDimensions.
 
@@ -279,6 +304,7 @@ def load_spans(path):
     for r in rows:
         d = _as_dict(_col(r, "customDimensions", "CustomDimensions", "Properties",
                           "dims"))
+        missing = content_missing(r, d)
         d = merge_content_columns(r, d)
         spans.append({
             "timestamp": normalise_timestamp(
@@ -290,6 +316,7 @@ def load_spans(path):
             "duration":  float(_col(r, "duration", "DurationMs") or 0),
             "success":   str(_col(r, "success", "Success")).lower() != "false",
             "d":         d,
+            "content_missing": missing,
         })
     return spans
 
@@ -841,6 +868,10 @@ def convert(spans, manifests=None):
                 "conversation_id": rd.get(K_CONV, ""),
                 "model": rd.get(K_RES_MODEL) or rd.get(K_REQ_MODEL, ""),
                 "started": aspans[0]["timestamp"],
+                # Spans whose AppGenAIContent row the export did not get:
+                # their arguments, results and messages are a placeholder.
+                "content_missing": sum(1 for s in aspans
+                                       if s.get("content_missing")),
                 "duration_ms": max((s["duration"] for s in aspans), default=0),
                 "mcp_toolboxes": [{"toolbox": t, "version": v}
                                   for t, v in toolboxes],
@@ -984,6 +1015,10 @@ def main():
     print(f"  fragmented       : {unlinked}  (single-agent traces)")
     print(f"  fully evaluable  : {evaluable}  (query+response+tool_defs+tools)")
     print(f"  with errors      : {sum(1 for r in runs if r['error_count'])}")
+    missing = sum(r["content_missing"] for r in runs)
+    if missing:
+        print(f"  CONTENT MISSING  : {missing} span(s) exported before their "
+              f"AppGenAIContent row (placeholder scored as content)")
     print(f"  truncated results: {sum(r['truncated_results'] for r in runs)}")
     print(f"  search cascades  : {sum(len(r['search_cascades']) for r in runs)}")
     trunc_skills = sum(r["truncated_skills"] for r in runs)
