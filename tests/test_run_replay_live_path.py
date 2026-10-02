@@ -86,12 +86,21 @@ class FakeProject:
 
     not_ready = 0      # create_session refusals before the version is ready
     session_error = None
+    build_failures = 0  # versions whose provisioning fails in Foundry
 
     def create_session(self, agent_name, version_indicator):
         self.calls.append(("session", agent_name,
                            version_indicator.agent_version))
         if self.session_error:
             raise self.session_error
+        if self.build_failures:
+            self.build_failures -= 1
+            from azure.core.exceptions import HttpResponseError
+            raise HttpResponseError(message=(
+                "(agent_version_failed) Agent version provisioning failed: "
+                "[CodeError] in /__w/1/s/Oryx/src/BuildScriptGenerator/"
+                "Python/PythonPlatform.cs:line 794 [Request ID: "
+                "efc8e91097d355f9d0f8e2948291c86b]"))
         if self.not_ready:
             self.not_ready -= 1
             from azure.core.exceptions import HttpResponseError
@@ -344,3 +353,34 @@ def test_any_other_session_error_is_not_retried(run, monkeypatch):
     with pytest.raises(RuntimeError, match="403"):
         run(project)
     assert len(project.named("session")) == 1
+
+
+def test_a_failed_foundry_build_is_rebuilt_once(run, tmp_path, capsys):
+    """2026-10-02: one clone failed in Oryx's ResolveVersions while five
+    clones of the same bytes built in the same run."""
+    project = FakeProject(replay_exists=False)
+    project.build_failures = 1
+    assert run(project) == 0
+    assert len(project.named("create")) == 2
+    assert len(project.named("session")) == 2
+    assert "efc8e91097d355f9d0f8e2948291c86b" in capsys.readouterr().out
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["temp_version"] == "8"
+    assert ("delete_version", REPLAY, "8") in project.calls   # the failed one
+    assert project.named("delete") and project.named("toolbox.delete")
+
+
+def test_a_build_that_fails_twice_is_not_retried_again(run):
+    project = FakeProject(replay_exists=False)
+    project.build_failures = 2
+    with pytest.raises(Exception, match="agent_version_failed"):
+        run(project)
+    assert len(project.named("create")) == 2
+    assert project.named("delete") and project.named("toolbox.delete")
+
+
+def test_a_rebuild_beside_other_versions_deletes_the_failed_one(run):
+    project = FakeProject()           # the replay agent already exists
+    project.build_failures = 1
+    assert run(project) == 0
+    assert ("delete_version", REPLAY, "8") in project.calls

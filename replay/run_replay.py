@@ -186,6 +186,25 @@ READY_POLL_S = 10
 _sleep = time.sleep
 
 
+# Provisioning that failed in Foundry's build, not in our code. Seen on
+# 2026-10-02: one clone of triage-analysis-agent v1 failed in Oryx's
+# PythonPlatform.ResolveVersions while five clones of the same bytes built in
+# the same run. A new version is a new build; one more is tried.
+BUILD_FAILED = "agent_version_failed"
+BUILD_RETRIES = 1
+
+
+def _is_build_failed(exc):
+    code = getattr(getattr(exc, "error", None), "code", None)
+    return code == BUILD_FAILED or BUILD_FAILED in str(exc)
+
+
+def _request_id(exc):
+    import re
+    m = re.search(r"Request ID: ([0-9a-f]{32})", str(exc))
+    return f"request id {m.group(1)}" if m else None
+
+
 def _is_not_ready(exc):
     code = getattr(getattr(exc, "error", None), "code", None)
     return code == NOT_READY or NOT_READY in str(exc)
@@ -1304,7 +1323,7 @@ def main(argv=None):
                                     session=replay_session,
                                     server_label=server_label)
 
-        try:
+        def create_clone():
             temp = binding.create(
                 agents, replay_agent, definition,
                 description=f"temporary: stubbed-tool replay of "
@@ -1314,6 +1333,10 @@ def main(argv=None):
                           "base_version": str(base_version),
                           "cassette": os.path.basename(args.cassette)},
                 base_version=base_version, source_agent=args.agent)
+            return getattr(temp, "version", None) or getattr(temp, "id", None)
+
+        try:
+            temp_version = create_clone()
         except Exception as exc:
             teardown_binding(binding)
             sys.exit(
@@ -1324,7 +1347,6 @@ def main(argv=None):
                 "reach it. A 403 means this identity may read agents but not "
                 "create them in this project. The toolbox was deleted; "
                 "nothing else was created.")
-        temp_version = getattr(temp, "version", None) or getattr(temp, "id", None)
         print(f"created {replay_agent} v{temp_version} "
               f"(clone of {args.agent} v{base_version})")
 
@@ -1337,15 +1359,39 @@ def main(argv=None):
                                       else None),
                    "started_utc": _utcnow()}
         try:
-            problem = routing_problem(agents, replay_agent, temp_version)
-            if problem:
-                sys.exit(f"not invoking: {problem}")
-            # VersionRefIndicator, not VersionIndicator: the latter is the
-            # abstract discriminated base and takes no version at all. The
-            # field is agent_version.
-            session = create_session_when_ready(
-                agents, replay_agent,
-                models.VersionRefIndicator(agent_version=str(temp_version)))
+            for attempt in range(1 + BUILD_RETRIES):
+                problem = routing_problem(agents, replay_agent, temp_version)
+                if problem:
+                    sys.exit(f"not invoking: {problem}")
+                # VersionRefIndicator, not VersionIndicator: the latter is the
+                # abstract discriminated base and takes no version at all.
+                # The field is agent_version.
+                try:
+                    session = create_session_when_ready(
+                        agents, replay_agent, models.VersionRefIndicator(
+                            agent_version=str(temp_version)))
+                    break
+                except Exception as exc:
+                    if not _is_build_failed(exc) or attempt == BUILD_RETRIES:
+                        raise
+                    failed = temp_version
+                    print(f"  {replay_agent} v{failed} failed to build in "
+                          f"Foundry ({BUILD_FAILED}): "
+                          f"{_request_id(exc) or 'no request id'}. The code "
+                          "is the base version's, byte for byte, so the "
+                          "build is retried once as a new version.",
+                          flush=True)
+                    # Gone before the rebuild, so the name's "latest" can
+                    # only be the new version -- routing_problem checks that.
+                    try:
+                        agents.delete_version(replay_agent, failed,
+                                              force=True)
+                    except Exception as exc_del:
+                        print(f"  could not delete failed v{failed}: "
+                              f"{type(exc_del).__name__}: {exc_del}")
+                    temp_version = create_clone()
+                    print(f"created {replay_agent} v{temp_version} "
+                          f"(rebuild of v{failed})")
             session_id = getattr(session, "agent_session_id", None)
             run_ids["agent_session_id"] = session_id
             print(f"session {session_id} — query: {str(query)[:70]}")
